@@ -378,7 +378,7 @@ class TradingEnvironment:
 
     def reset(self) -> np.ndarray:
         """Reset environment."""
-        self.step = 0
+        self.current_step = 0
         self.capital = self.initial_capital
         self.position = 0  # 0: flat, 1: long, -1: short
         self.entry_price = 0
@@ -389,10 +389,10 @@ class TradingEnvironment:
 
     def _get_state(self) -> np.ndarray:
         """Get current state vector."""
-        row = self.data.iloc[self.step]
+        row = self.data.iloc[self.current_step]
 
         # Price features
-        returns = self.data['close'].pct_change().iloc[max(0, self.step-20):self.step+1].values
+        returns = self.data['close'].pct_change().iloc[max(0, self.current_step-20):self.current_step+1].values
         returns = np.nan_to_num(returns, nan=0)
 
         # Technical indicators (if available)
@@ -426,12 +426,12 @@ class TradingEnvironment:
         """
         Execute action and return (state, reward, done, info).
         """
-        self.step += 1
+        self.current_step += 1
 
-        if self.step >= len(self.data) - 1:
+        if self.current_step >= len(self.data) - 1:
             return self._get_state(), 0, True, {'portfolio_value': self.capital}
 
-        row = self.data.iloc[self.step]
+        row = self.data.iloc[self.current_step]
         price = row['close']
 
         reward = 0
@@ -482,7 +482,7 @@ class TradingEnvironment:
         info = {
             'portfolio_value': self.capital,
             'position': self.position,
-            'step': self.step
+            'step': self.current_step
         }
 
         return self._get_state(), reward, done, info

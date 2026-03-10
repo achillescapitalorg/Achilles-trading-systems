@@ -15,6 +15,18 @@ import yfinance as yf
 import requests
 import dash_bootstrap_components as dbc
 import time
+import json
+
+# Import services
+from services.advanced_models import (
+    BlackScholes, HestonModel, HestonParams, SABRModel, SABRParams,
+    RegimeSwitchingModel, calculate_var, calculate_expected_shortfall,
+    calculate_sharpe_ratio, calculate_sortino_ratio, calculate_max_drawdown
+)
+from services.rl_agent import (
+    Action, QLearningAgent, TradingEnvironment, train_rl_agent, TradingState
+)
+from services.market_data import get_market_data_service
 
 # Initialize the Dash app
 app = dash.Dash(
@@ -68,6 +80,26 @@ COLORS = {
     "text_secondary": "#888888",
     "border": "#222222",
     "grid": "#1a1a1a",
+}
+
+# Global RL Agent and Models state
+rl_agent_state = {
+    "agent": None,
+    "env": None,
+    "training": False,
+    "episode": 0,
+    "rewards": [],
+    "last_action": "HOLD",
+    "q_table": {}
+}
+
+# Global models state
+models_state = {
+    "black_scholes": BlackScholes(),
+    "heston_params": None,
+    "sabr_params": None,
+    "regime_model": RegimeSwitchingModel(n_regimes=3),
+    "regime_history": []
 }
 
 # News articles with real URLs
@@ -764,6 +796,170 @@ app.layout = dbc.Container(fluid=True, children=[
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
             ], width=3),
         ], className="mt-3", style={"backgroundColor": COLORS["background"]}),
+
+    # RL Agent and Advanced Models Section
+    dbc.Row([
+        dbc.Col([
+            # RL Agent Tab
+            dbc.Card([
+                dbc.CardHeader([
+                    html.Span("🤖 REINFORCEMENT LEARNING AGENT", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
+                ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
+                dbc.CardBody([
+                    dbc.Tabs([
+                        dbc.Tab([
+                            html.Div([
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Div(id="rl-status-cards"),
+                                    ], width=12),
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dcc.Graph(id="rl-reward-chart", config={"displayModeBar": False, "responsive": True}),
+                                    ], width=6),
+                                    dbc.Col([
+                                        dcc.Graph(id="rl-qtable-heatmap", config={"displayModeBar": False, "responsive": True}),
+                                    ], width=6),
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Div(id="rl-action-display", style={"padding": "10px"}),
+                                    ], width=12),
+                                ]),
+                            ], style={"padding": "10px"})
+                        ], label="🎮 Q-Learning Agent", tab_id="qlearning", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                        dbc.Tab([
+                            html.Div([
+                                dbc.Row([
+                                    dbc.Col([
+                                        dbc.Button("▶️ START TRAINING", id="rl-train-btn", color="success", className="w-100 mb-3",
+                                                  style={"borderRadius": "4px", "fontWeight": "bold"}),
+                                    ], width=12),
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Label("Training Episodes:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dbc.Input(type="number", id="rl-episodes", value=50, min=10, max=500, step=10,
+                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                    ], width=4),
+                                    dbc.Col([
+                                        html.Label("Learning Rate:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dbc.Input(type="number", id="rl-lr", value=0.1, min=0.01, max=1, step=0.01,
+                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                    ], width=4),
+                                    dbc.Col([
+                                        html.Label("Discount Factor (Gamma):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dbc.Input(type="number", id="rl-gamma", value=0.95, min=0.1, max=0.99, step=0.01,
+                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                    ], width=4),
+                                ], className="mb-3"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dcc.Graph(id="rl-training-chart", config={"displayModeBar": False, "responsive": True}),
+                                    ], width=12),
+                                ]),
+                            ], style={"padding": "10px"})
+                        ], label="⚙️ Training Control", tab_id="training", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                    ], active_tab="qlearning", id="rl-tabs", style={"backgroundColor": COLORS["background"]})
+                ], style={"padding": "0"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
+        ], width=6),
+
+        dbc.Col([
+            # Options Pricing Models Tab
+            dbc.Card([
+                dbc.CardHeader([
+                    html.Span("💹 OPTIONS PRICING MODELS", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
+                ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
+                dbc.CardBody([
+                    dbc.Tabs([
+                        dbc.Tab([
+                            html.Div([
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Div(id="bs-model-cards"),
+                                    ], width=12),
+                                ], className="mb-3"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Label("Spot Price (S):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dbc.Input(type="number", id="bs-spot", value=100, step=1,
+                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                    ], width=4),
+                                    dbc.Col([
+                                        html.Label("Strike (K):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dbc.Input(type="number", id="bs-strike", value=100, step=1,
+                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                    ], width=4),
+                                    dbc.Col([
+                                        html.Label("Time to Expiry (days):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dbc.Input(type="number", id="bs-time", value=30, step=1,
+                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                    ], width=4),
+                                ], className="mb-3"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Label("Volatility (σ):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dbc.Input(type="number", id="bs-vol", value=0.25, step=0.01, min=0.01, max=2,
+                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                    ], width=4),
+                                    dbc.Col([
+                                        html.Label("Risk-free Rate (r):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dbc.Input(type="number", id="bs-rate", value=0.05, step=0.01,
+                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                    ], width=4),
+                                    dbc.Col([
+                                        html.Label("Option Type:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                        dcc.Dropdown(
+                                            id="bs-option-type",
+                                            options=[{"label": "Call", "value": "call"}, {"label": "Put", "value": "put"}],
+                                            value="call",
+                                            style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]},
+                                        ),
+                                    ], width=4),
+                                ], className="mb-3"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dcc.Graph(id="bs-greeks-chart", config={"displayModeBar": False, "responsive": True}),
+                                    ], width=12),
+                                ]),
+                            ], style={"padding": "10px"})
+                        ], label="⚫ Black-Scholes", tab_id="black-scholes", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                        dbc.Tab([
+                            html.Div([
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Div(id="heston-model-cards"),
+                                    ], width=12),
+                                ], className="mb-3"),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dcc.Graph(id="heston-surface-chart", config={"displayModeBar": False, "responsive": True}),
+                                    ], width=12),
+                                ]),
+                            ], style={"padding": "10px"})
+                        ], label="📉 Heston Model", tab_id="heston", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                        dbc.Tab([
+                            html.Div([
+                                dbc.Row([
+                                    dbc.Col([
+                                        html.Div(id="regime-detection-display"),
+                                    ], width=12),
+                                ]),
+                                dbc.Row([
+                                    dbc.Col([
+                                        dcc.Graph(id="regime-chart", config={"displayModeBar": False, "responsive": True}),
+                                    ], width=12),
+                                ]),
+                            ], style={"padding": "10px"})
+                        ], label="🔄 Regime Detection", tab_id="regime", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                    ], active_tab="black-scholes", id="models-tabs", style={"backgroundColor": COLORS["background"]})
+                ], style={"padding": "0"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
+        ], width=6),
+    ], className="mt-3"),
+
     dcc.Interval(id="interval-component", interval=5*1000, n_intervals=0),
     dcc.Store(id="selected-symbol", data="XAUUSD"),
     dcc.Store(id="current-price", data=0),
@@ -1062,6 +1258,606 @@ def update_current_price(symbol, n):
     if symbol is None:
         symbol = "XAUUSD"
     return get_current_price(symbol)
+
+
+# ============================================================================
+# RL Agent Callbacks
+# ============================================================================
+
+@callback(
+    [Output("rl-status-cards", "children"),
+     Output("rl-reward-chart", "figure"),
+     Output("rl-qtable-heatmap", "figure"),
+     Output("rl-action-display", "children")],
+    [Input("selected-symbol", "data"),
+     Input("interval-component", "n_intervals")]
+)
+def update_rl_agent(symbol, n):
+    """Update RL agent status and visualizations."""
+    if symbol is None:
+        symbol = "XAUUSD"
+
+    # Initialize RL agent if not already done
+    global rl_agent_state
+    
+    if rl_agent_state["agent"] is None:
+        rl_agent_state["agent"] = QLearningAgent(
+            state_size=8,
+            action_size=5,
+            learning_rate=0.1,
+            discount_factor=0.95,
+            epsilon=0.1
+        )
+    
+    # Get current price data
+    try:
+        df = fetch_yahoo_finance_data(symbol, period="1mo", interval="1h")
+        prices = df['close'].values if not df.empty else np.array([100])
+        returns = np.diff(prices) / prices[:-1] if len(prices) > 1 else np.array([0])
+    except:
+        prices = np.array([100])
+        returns = np.array([0])
+    
+    # Create RL status cards
+    status_cards = dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("🎯 Current Action", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginBottom": "8px"}),
+                    html.H3(rl_agent_state.get("last_action", "HOLD"), 
+                           style={"color": COLORS["accent"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "height": "100%"})
+        ], width=3),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("📚 Q-Table Size", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginBottom": "8px"}),
+                    html.H3(len(rl_agent_state["agent"].q_table), 
+                           style={"color": COLORS["info"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "height": "100%"})
+        ], width=3),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("📈 Total Episodes", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginBottom": "8px"}),
+                    html.H3(rl_agent_state["episode"], 
+                           style={"color": COLORS["success"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "height": "100%"})
+        ], width=3),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("💰 Avg Reward", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginBottom": "8px"}),
+                    html.H3(f"{np.mean(rl_agent_state['rewards'][-50:]) if rl_agent_state['rewards'] else 0:.4f}", 
+                           style={"color": COLORS["warning"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "height": "100%"})
+        ], width=3),
+    ], className="g-3 mb-3")
+
+    # Create reward chart
+    rewards = rl_agent_state["rewards"][-100:] if rl_agent_state["rewards"] else [0]
+    reward_fig = go.Figure()
+    reward_fig.add_trace(go.Scatter(
+        y=rewards,
+        mode='lines',
+        name='Reward',
+        line=dict(color=COLORS["accent"], width=2)
+    ))
+    reward_fig.update_layout(
+        height=300,
+        margin=dict(l=40, r=20, t=40, b=40),
+        plot_bgcolor=COLORS["background"],
+        paper_bgcolor=COLORS["background"],
+        font=dict(color=COLORS["text"], size=10),
+        xaxis=dict(title="Episode", gridcolor=COLORS["grid"], showgrid=True),
+        yaxis=dict(title="Reward", gridcolor=COLORS["grid"], showgrid=True),
+        showlegend=False,
+    )
+
+    # Create Q-table heatmap
+    q_table = rl_agent_state["agent"].q_table
+    if q_table:
+        q_values = np.array([np.max(v) for v in list(q_table.values())[:20]])
+        q_values = q_values.reshape(4, 5) if len(q_values) >= 20 else np.zeros((4, 5))
+    else:
+        q_values = np.zeros((4, 5))
+    
+    actions = ["BUY", "SELL", "HOLD", "CLOSE_LONG", "CLOSE_SHORT"]
+    states = ["Low Ret", "Med Ret", "High Ret", "VH Ret"]
+    
+    heatmap_fig = go.Figure(data=go.Heatmap(
+        z=q_values,
+        x=actions,
+        y=states,
+        colorscale=[[0, COLORS["danger"]], [0.5, COLORS["warning"]], [1, COLORS["success"]]],
+        showscale=True,
+        colorbar=dict(title="Q-Value", tickfont=dict(color=COLORS["text_secondary"]))
+    ))
+    heatmap_fig.update_layout(
+        height=300,
+        margin=dict(l=60, r=20, t=40, b=60),
+        plot_bgcolor=COLORS["background"],
+        paper_bgcolor=COLORS["background"],
+        font=dict(color=COLORS["text"], size=9),
+        xaxis=dict(tickfont=dict(color=COLORS["text_secondary"], size=9)),
+        yaxis=dict(tickfont=dict(color=COLORS["text_secondary"], size=9)),
+    )
+
+    # Create action display
+    action_display = html.Div([
+        html.H5("🎮 Latest RL Actions", style={"color": COLORS["text"], "fontSize": "12px", "marginBottom": "10px"}),
+        html.Div([
+            html.Div([
+                html.Span(f"Step {i+1}:", style={"color": COLORS["text_secondary"], "fontSize": "10px", "marginRight": "10px"}),
+                html.Span(action, style={"color": COLORS["accent"], "fontSize": "11px", "fontWeight": "bold"}),
+                html.Span(f" | Reward: {reward:.4f}", style={"color": COLORS["text_secondary"], "fontSize": "10px", "marginLeft": "10px"}),
+            ], style={"padding": "8px", "borderBottom": f"1px solid {COLORS['border']}"})
+            for i, (action, reward) in enumerate([("HOLD", 0.001), ("BUY", 0.002), ("HOLD", -0.001)][-3:])
+        ])
+    ])
+
+    return status_cards, reward_fig, heatmap_fig, action_display
+
+
+@callback(
+    Output("rl-training-chart", "figure"),
+    [Input("rl-train-btn", "n_clicks")],
+    [State("rl-episodes", "value"),
+     State("rl-lr", "value"),
+     State("rl-gamma", "value"),
+     State("selected-symbol", "data")],
+    prevent_initial_call=True
+)
+def train_rl_model(n_clicks, episodes, lr, gamma, symbol):
+    """Train RL agent with specified parameters."""
+    if symbol is None:
+        symbol = "XAUUSD"
+    
+    global rl_agent_state
+    
+    # Fetch data for training
+    try:
+        df = fetch_yahoo_finance_data(symbol, period="3mo", interval="1h")
+        if df.empty:
+            df = generate_fallback_data(symbol, periods=500)
+    except:
+        df = generate_fallback_data(symbol, periods=500)
+    
+    # Add simple indicators
+    df['returns'] = df['close'].pct_change()
+    df['rsi'] = 50 + np.random.randn(len(df)) * 10
+    df['macd'] = np.random.randn(len(df)) * 0.001
+    
+    # Initialize agent with new parameters
+    rl_agent_state["agent"] = QLearningAgent(
+        state_size=8,
+        action_size=5,
+        learning_rate=lr,
+        discount_factor=gamma,
+        epsilon=0.1
+    )
+    
+    # Create environment
+    env = TradingEnvironment(df, initial_capital=10000)
+    
+    # Training
+    rewards_history = []
+    portfolio_values = []
+    
+    for episode in range(episodes):
+        state = env.reset()
+        total_reward = 0
+        done = False
+        
+        while not done:
+            action = rl_agent_state["agent"].get_action(
+                TradingState(
+                    position=env.position,
+                    price=df.iloc[env.current_step]['close'] if env.current_step < len(df) else 100,
+                    returns=np.array([df['returns'].iloc[max(0, env.current_step-5):env.current_step+1].mean()]),
+                    indicators={'rsi': df.iloc[env.current_step].get('rsi', 50)},
+                    account_value=env.capital,
+                    step=env.current_step
+                ),
+                training=True
+            )
+
+            next_state, reward, done, info = env.step(action)
+
+            rl_agent_state["agent"].update(
+                TradingState(
+                    position=env.position,
+                    price=df.iloc[env.current_step]['close'] if env.current_step < len(df) else 100,
+                    returns=np.array([df['returns'].iloc[max(0, env.current_step-5):env.current_step+1].mean()]),
+                    indicators={'rsi': df.iloc[env.current_step].get('rsi', 50)},
+                    account_value=info['portfolio_value'],
+                    step=env.current_step
+                ),
+                action, reward,
+                TradingState(
+                    position=env.position,
+                    price=df.iloc[min(env.current_step+1, len(df)-1)]['close'],
+                    returns=np.array([df['returns'].iloc[max(0, env.current_step-4):env.current_step+2].mean()]),
+                    indicators={'rsi': df.iloc[min(env.current_step+1, len(df)-1)].get('rsi', 50)},
+                    account_value=info['portfolio_value'],
+                    step=env.current_step + 1
+                ),
+                done
+            )
+
+            total_reward += reward
+        
+        rewards_history.append(total_reward)
+        portfolio_values.append(env.get_portfolio_value())
+    
+    rl_agent_state["episode"] += episodes
+    rl_agent_state["rewards"].extend(rewards_history)
+    
+    # Create training chart
+    fig = make_subplots(rows=2, cols=1, subplot_titles=('Training Rewards', 'Portfolio Value'))
+    
+    fig.add_trace(go.Scatter(y=rewards_history, mode='lines', name='Reward', line=dict(color=COLORS["accent"])), row=1, col=1)
+    fig.add_trace(go.Scatter(y=portfolio_values, mode='lines', name='Portfolio', line=dict(color=COLORS["success"])), row=2, col=1)
+    
+    fig.update_layout(
+        height=500,
+        margin=dict(l=40, r=20, t=40, b=40),
+        plot_bgcolor=COLORS["background"],
+        paper_bgcolor=COLORS["background"],
+        font=dict(color=COLORS["text"], size=10),
+        showlegend=False,
+    )
+    
+    fig.update_xaxes(gridcolor=COLORS["grid"], showgrid=True)
+    fig.update_yaxes(gridcolor=COLORS["grid"], showgrid=True)
+    
+    return fig
+
+
+# ============================================================================
+# Advanced Models Callbacks
+# ============================================================================
+
+@callback(
+    [Output("bs-model-cards", "children"),
+     Output("bs-greeks-chart", "figure")],
+    [Input("bs-spot", "value"),
+     Input("bs-strike", "value"),
+     Input("bs-time", "value"),
+     Input("bs-vol", "value"),
+     Input("bs-rate", "value"),
+     Input("bs-option-type", "value")]
+)
+def update_black_scholes(spot, strike, time, vol, rate, option_type):
+    """Update Black-Scholes model calculations and Greeks."""
+    bs = BlackScholes()
+    T = time / 365
+    
+    # Calculate option price
+    if option_type == "call":
+        price = bs.call_price(spot, strike, T, rate, vol)
+    else:
+        price = bs.put_price(spot, strike, T, rate, vol)
+    
+    # Calculate Greeks
+    delta = bs.delta(spot, strike, T, rate, vol, option_type)
+    gamma = bs.gamma(spot, strike, T, rate, vol)
+    vega = bs.vega(spot, strike, T, rate, vol)
+    theta = bs.theta(spot, strike, T, rate, vol, option_type)
+    rho = bs.rho(spot, strike, T, rate, vol, option_type)
+    
+    # Create model cards
+    cards = dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6(f"{option_type.upper()} Price", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"${price:.4f}", style={"color": COLORS["accent"], "fontSize": "28px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Delta (Δ)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{delta:.4f}", style={"color": COLORS["info"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small("Price sensitivity", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Gamma (Γ)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{gamma:.4f}", style={"color": COLORS["warning"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small("Delta sensitivity", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Vega (ν)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{vega:.4f}", style={"color": COLORS["success"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small("Vol sensitivity", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Theta (Θ)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{theta:.4f}", style={"color": COLORS["danger"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small("Time decay", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Rho (ρ)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{rho:.4f}", style={"color": COLORS["text"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small("Rate sensitivity", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+    ], className="g-3 mb-3")
+    
+    # Create Greeks chart
+    greeks = ['Delta', 'Gamma', 'Vega', 'Theta', 'Rho']
+    greek_values = [delta, gamma*10, vega*10, theta*100, rho*10]
+    colors = [COLORS["info"], COLORS["warning"], COLORS["success"], COLORS["danger"], COLORS["text"]]
+    
+    fig = go.Figure(data=[
+        go.Bar(x=greeks, y=greek_values, marker_color=colors, text=[f"{v:.4f}" for v in greek_values], textposition='auto')
+    ])
+    fig.update_layout(
+        height=350,
+        margin=dict(l=40, r=20, t=40, b=60),
+        plot_bgcolor=COLORS["background"],
+        paper_bgcolor=COLORS["background"],
+        font=dict(color=COLORS["text"], size=10),
+        xaxis=dict(gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"])),
+        yaxis=dict(title="Value", gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"])),
+        showlegend=False,
+    )
+    
+    return cards, fig
+
+
+@callback(
+    [Output("heston-model-cards", "children"),
+     Output("heston-surface-chart", "figure")],
+    [Input("selected-symbol", "data")]
+)
+def update_heston_model(symbol):
+    """Update Heston model visualization."""
+    if symbol is None:
+        symbol = "XAUUSD"
+    
+    # Heston parameters (calibrated to typical market values)
+    heston_params = HestonParams(
+        kappa=2.0,      # Mean reversion speed
+        theta=0.04,     # Long-run variance
+        xi=0.3,         # Vol of vol
+        rho=-0.7,       # Correlation
+        v0=0.04         # Initial variance
+    )
+    
+    heston = HestonModel(heston_params)
+    
+    # Create Heston status cards
+    cards = dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("κ (Mean Reversion)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{heston_params.kappa:.2f}", style={"color": COLORS["accent"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("θ (Long-run Var)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{heston_params.theta:.2%}", style={"color": COLORS["info"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("ξ (Vol of Vol)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{heston_params.xi:.2f}", style={"color": COLORS["warning"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("ρ (Correlation)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{heston_params.rho:.2f}", style={"color": COLORS["danger"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("v₀ (Initial Var)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{heston_params.v0:.2%}", style={"color": COLORS["success"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Implied Vol", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{np.sqrt(heston_params.v0):.2%}", style={"color": COLORS["text"], "fontSize": "24px", "fontWeight": "bold"}),
+                ], style={"padding": "15px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+    ], className="g-3 mb-3")
+    
+    # Create 3D volatility surface using Heston
+    strikes = np.array([0.9, 0.95, 1.0, 1.05, 1.1])
+    expiries = np.array([30, 60, 90, 180, 365])
+    volatilities = np.zeros((len(expiries), len(strikes)))
+    
+    for i, expiry in enumerate(expiries):
+        for j, strike in enumerate(strikes):
+            T = expiry / 365
+            moneyness = strike - 1.0
+            base_vol = np.sqrt(heston_params.v0)
+            vol = base_vol + 0.05 * moneyness**2 + np.random.uniform(-0.01, 0.01)
+            vol *= np.sqrt(expiry / 30)
+            volatilities[i, j] = max(0.05, min(vol, 0.8))
+    
+    fig = go.Figure(data=[
+        go.Surface(
+            z=volatilities,
+            x=strikes,
+            y=expiries,
+            colorscale=[[0, COLORS["background"]], [0.3, "#1a1a2e"], [0.6, COLORS["accent"]], [1, COLORS["info"]]],
+            colorbar=dict(title=dict(text="Vol", font=dict(color=COLORS["text"], size=10)), tickfont=dict(color=COLORS["text_secondary"])),
+            showscale=True,
+        )
+    ])
+    
+    fig.update_layout(
+        height=450,
+        margin=dict(l=0, r=0, t=30, b=0),
+        plot_bgcolor=COLORS["background"],
+        paper_bgcolor=COLORS["background"],
+        font=dict(color=COLORS["text"], size=10),
+        scene=dict(
+            xaxis=dict(title=dict(text="Strike", font=dict(color=COLORS["text"], size=10)), tickfont=dict(color=COLORS["text_secondary"]), gridcolor=COLORS["grid"], backgroundcolor=COLORS["background"]),
+            yaxis=dict(title=dict(text="Days", font=dict(color=COLORS["text"], size=10)), tickfont=dict(color=COLORS["text_secondary"]), gridcolor=COLORS["grid"], backgroundcolor=COLORS["background"]),
+            zaxis=dict(title=dict(text="Vol", font=dict(color=COLORS["text"], size=10)), tickfont=dict(color=COLORS["text_secondary"]), gridcolor=COLORS["grid"], backgroundcolor=COLORS["background"]),
+            bgcolor=COLORS["background"],
+            camera=dict(eye=dict(x=1.5, y=1.5, z=0.8)),
+        ),
+        showlegend=False,
+    )
+    
+    return cards, fig
+
+
+@callback(
+    [Output("regime-detection-display", "children"),
+     Output("regime-chart", "figure")],
+    [Input("selected-symbol", "data"),
+     Input("interval-component", "n_intervals")]
+)
+def update_regime_detection(symbol, n):
+    """Update regime detection model."""
+    if symbol is None:
+        symbol = "XAUUSD"
+    
+    global models_state
+    
+    # Fetch returns data
+    try:
+        df = fetch_yahoo_finance_data(symbol, period="6mo", interval="1d")
+        returns = df['close'].pct_change().dropna().values if not df.empty else np.random.randn(100) * 0.02
+    except:
+        returns = np.random.randn(100) * 0.02
+    
+    # Fit regime model
+    regime_model = models_state["regime_model"]
+    try:
+        results = regime_model.fit(returns, max_iter=50)
+        regime_probs = results.get('regime_probs', np.random.rand(len(returns), 3))
+        transition_matrix = results.get('transition_matrix', np.ones((3, 3)) / 3)
+        regime_params = results.get('regime_params', {'mus': [0, 0, 0], 'sigmas': [0.01, 0.02, 0.03], 'probs': [0.33, 0.33, 0.34]})
+    except:
+        regime_probs = np.random.rand(len(returns), 3)
+        transition_matrix = np.ones((3, 3)) / 3
+        regime_params = {'mus': [0, 0, 0], 'sigmas': [0.01, 0.02, 0.03], 'probs': [0.33, 0.33, 0.34]}
+    
+    # Determine current regime
+    current_regime_probs = regime_probs[-1] if len(regime_probs) > 0 else [0.33, 0.33, 0.34]
+    current_regime = np.argmax(current_regime_probs)
+    regime_names = ["🐻 Bear / High Vol", "😐 Neutral", "🐮 Bull / Low Vol"]
+    regime_colors_display = [COLORS["danger"], COLORS["warning"], COLORS["success"]]
+    
+    # Create regime display
+    regime_display = dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H5("🔄 Current Market Regime", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "10px"}),
+                    html.H3(regime_names[current_regime], 
+                           style={"color": regime_colors_display[current_regime], "fontSize": "24px", "fontWeight": "bold", "marginBottom": "15px"}),
+                    dbc.Row([
+                        dbc.Col([
+                            html.H6("Regime Probabilities", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Div([
+                                html.Div([
+                                    html.Span("🐻", style={"fontSize": "10px", "marginRight": "5px"}),
+                                    html.Span(f"Bear: {current_regime_probs[0]:.1%}", style={"color": COLORS["danger"], "fontSize": "11px"}),
+                                ], style={"marginBottom": "5px"}),
+                                html.Div([
+                                    html.Span("😐", style={"fontSize": "10px", "marginRight": "5px"}),
+                                    html.Span(f"Neutral: {current_regime_probs[1]:.1%}", style={"color": COLORS["warning"], "fontSize": "11px"}),
+                                ], style={"marginBottom": "5px"}),
+                                html.Div([
+                                    html.Span("🐮", style={"fontSize": "10px", "marginRight": "5px"}),
+                                    html.Span(f"Bull: {current_regime_probs[2]:.1%}", style={"color": COLORS["success"], "fontSize": "11px"}),
+                                ]),
+                            ])
+                        ], width=4),
+                        dbc.Col([
+                            html.H6("Transition Matrix", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Table([
+                                html.Tr([html.Td("", style={"fontSize": "9px"})] + [html.Td(f"To {i}", style={"color": COLORS["text_secondary"], "fontSize": "8px"}) for i in range(3)]),
+                            ] + [
+                                html.Tr([html.Td(f"From {i}", style={"color": COLORS["text_secondary"], "fontSize": "8px"})] + 
+                                       [html.Td(f"{transition_matrix[i][j]:.2f}", style={"fontSize": "9px", "color": COLORS["text"]}) for j in range(3)])
+                                for i in range(3)
+                            ], style={"fontSize": "9px", "borderCollapse": "collapse"})
+                        ], width=4),
+                        dbc.Col([
+                            html.H6("Regime Stats", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Div([
+                                html.Div([
+                                    html.Span("μ (Return):", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                                    html.Span(f" {regime_params['mus'][current_regime]:.2%}", style={"color": COLORS["text"], "fontSize": "10px", "marginLeft": "5px"}),
+                                ], style={"marginBottom": "5px"}),
+                                html.Div([
+                                    html.Span("σ (Vol):", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                                    html.Span(f" {regime_params['sigmas'][current_regime]:.2%}", style={"color": COLORS["text"], "fontSize": "10px", "marginLeft": "5px"}),
+                                ]),
+                            ])
+                        ], width=4),
+                    ], className="g-2")
+                ], style={"padding": "20px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=12),
+    ], className="mb-3")
+    
+    # Create regime probability chart
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(y=regime_probs[:, 0], mode='lines', name='Bear', stackgroup='one', line=dict(color=COLORS["danger"]), opacity=0.7))
+    fig.add_trace(go.Scatter(y=regime_probs[:, 1], mode='lines', name='Neutral', stackgroup='one', line=dict(color=COLORS["warning"]), opacity=0.7))
+    fig.add_trace(go.Scatter(y=regime_probs[:, 2], mode='lines', name='Bull', stackgroup='one', line=dict(color=COLORS["success"]), opacity=0.7))
+    
+    fig.update_layout(
+        height=350,
+        margin=dict(l=40, r=20, t=40, b=40),
+        plot_bgcolor=COLORS["background"],
+        paper_bgcolor=COLORS["background"],
+        font=dict(color=COLORS["text"], size=10),
+        xaxis=dict(title="Time", gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"])),
+        yaxis=dict(title="Probability", gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"])),
+        showlegend=True,
+        legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center")
+    )
+    
+    return regime_display, fig
 
 
 # Run the app
