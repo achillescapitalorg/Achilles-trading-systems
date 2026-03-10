@@ -1,0 +1,262 @@
+/* Custom CSS for Trading Terminal - Pure Black Theme */
+
+/* Global styles */
+body {
+    background-color: #000000 !important;
+    color: #ffffff !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Main container */
+.container-fluid {
+    background-color: #000000 !important;
+}
+
+/* Card styles - Pure Black */
+.card {
+    background-color: #0a0a0a !important;
+    border: 1px solid #222222 !important;
+    box-shadow: none !important;
+}
+
+.card-header {
+    background-color: #0a0a0a !important;
+    border-bottom: 1px solid #222222 !important;
+}
+
+.card-body {
+    background-color: #0a0a0a !important;
+}
+
+/* Button styles */
+.btn-dark {
+    background-color: #00ff88 !important;
+    border-color: #00ff88 !important;
+    color: #000000 !important;
+}
+
+.btn-dark:hover {
+    background-color: #00cc6a !important;
+    border-color: #00cc6a !important;
+    color: #000000 !important;
+}
+
+.btn-outline-dark {
+    color: #ffffff !important;
+    border-color: #222222 !important;
+    background-color: transparent !important;
+}
+
+.btn-outline-dark:hover {
+    background-color: #121212 !important;
+    color: #ffffff !important;
+    border-color: #333333 !important;
+}
+
+.btn-success {
+    background-color: #00ff88 !important;
+    border-color: #00ff88 !important;
+    color: #000000 !important;
+    font-weight: bold;
+}
+
+.btn-success:hover {
+    background-color: #00cc6a !important;
+    border-color: #00cc6a !important;
+    color: #000000 !important;
+}
+
+.btn-danger {
+    background-color: #ff4757 !important;
+    border-color: #ff4757 !important;
+    color: #ffffff !important;
+    font-weight: bold;
+}
+
+.btn-danger:hover {
+    background-color: #ff3344 !important;
+    border-color: #ff3344 !important;
+    color: #ffffff !important;
+}
+
+/* Table styles */
+.table-dark {
+    --bs-table-bg: transparent !important;
+    --bs-table-color: #ffffff !important;
+    --bs-table-border-color: #222222 !important;
+}
+
+.table-hover tbody tr:hover {
+    background-color: #121212 !important;
+}
+
+.table th {
+    background-color: #0a0a0a !important;
+    border-bottom: 1px solid #222222 !important;
+}
+
+.table td {
+    border-bottom: 1px solid #222222 !important;
+}
+
+/* Progress bar */
+.progress {
+    background-color: #121212 !important;
+    border-radius: 10px !important;
+}
+
+.progress-bar {
+    background-color: #00ff88 !important;
+}
+
+.progress-bar.bg-success {
+    background-color: #00ff88 !important;
+}
+
+.progress-bar.bg-danger {
+    background-color: #ff4757 !important;
+}
+
+.progress-bar.bg-warning {
+    background-color: #ffa502 !important;
+}
+
+/* Input styles */
+.form-control {
+    background-color: #121212 !important;
+    border: 1px solid #222222 !important;
+    color: #ffffff !important;
+}
+
+.form-control:focus {
+    background-color: #121212 !important;
+    border-color: #00ff88 !important;
+    color: #ffffff !important;
+    box-shadow: 0 0 0 0.25rem rgba(0, 255, 136, 0.15) !important;
+}
+
+.form-control::placeholder {
+    color: #666666 !important;
+}
+
+/* Dropdown styles */
+.select-container .select-menu {
+    background-color: #121212 !important;
+    border-color: #222222 !important;
+}
+
+.select-container .select-value-label {
+    color: #ffffff !important;
+}
+
+.select-container .select-option {
+    background-color: #121212 !important;
+    color: #ffffff !important;
+}
+
+.select-container .select-option:hover {
+    background-color: #1a1a1a !important;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #000000;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #222222;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #333333;
+}
+
+/* Plotly graph overrides */
+.js-plotly-plot .plotly {
+    background-color: #000000 !important;
+}
+
+/* Link styles for news */
+a {
+    color: #00ff88 !important;
+    text-decoration: none !important;
+}
+
+a:hover {
+    color: #00cc6a !important;
+    text-decoration: none !important;
+}
+
+/* Animation for signal updates */
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.7; }
+    100% { opacity: 1; }
+}
+
+.signal-update {
+    animation: pulse 1s ease-in-out;
+}
+
+/* Custom text colors */
+.text-secondary {
+    color: #888888 !important;
+}
+
+/* Border utilities */
+.border-secondary {
+    border-color: #222222 !important;
+}
+
+/* Background utilities */
+.bg-dark {
+    background-color: #0a0a0a !important;
+}
+
+/* Hover effects for news items */
+.news-item {
+    transition: background-color 0.2s ease;
+}
+
+.news-item:hover {
+    background-color: #121212 !important;
+}
+
+/* Custom dropdown menu */
+.dropdown-menu {
+    background-color: #121212 !important;
+    border: 1px solid #222222 !important;
+}
+
+.dropdown-menu .dropdown-item {
+    color: #ffffff !important;
+}
+
+.dropdown-menu .dropdown-item:hover {
+    background-color: #1a1a1a !important;
+    color: #ffffff !important;
+}
+
+/* Loading state */
+._dash-loading {
+    color: #00ff88 !important;
+}
+
+/* Plotly modebar */
+.modebar {
+    background-color: rgba(10, 10, 10, 0.8) !important;
+}
+
+.modebar-btn path {
+    fill: #888888 !important;
+}
+
+.modebar-btn:hover path {
+    fill: #00ff88 !important;
+}

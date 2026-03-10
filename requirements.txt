@@ -1,0 +1,37 @@
+# Dash Trading Frontend Requirements
+# ====================================
+
+# Dash Framework
+dash>=2.14.0
+dash-bootstrap-components>=1.5.0
+dash-ag-grid>=2.21.0
+
+# Visualization
+plotly>=5.18.0
+
+# Data Analysis
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.7.0
+scikit-learn>=1.3.0
+
+# Market Data
+yfinance>=0.2.31
+ccxt>=4.0.0
+
+# HTTP Requests
+requests>=2.31.0
+httpx>=0.25.0
+aiohttp>=3.9.0
+
+# News Scraping
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Deep Learning (for RL Agent)
+torch>=2.1.0
+gymnasium>=0.29.0
+
+# Optional: Advanced Quant Finance
+# QuantLib>=1.30  # Uncomment if you need advanced options pricing
+
