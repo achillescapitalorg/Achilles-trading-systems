@@ -28,6 +28,8 @@ from services.rl_agent import (
     Action, QLearningAgent, TradingEnvironment, train_rl_agent, TradingState
 )
 from services.market_data import get_market_data_service
+from services.news_scraper import get_financial_news, NewsArticle, NewsSource
+from services.news_scraper import get_financial_news
 
 # Initialize the Dash app
 app = dash.Dash(
@@ -105,51 +107,9 @@ models_state = {
     "regime_history": []
 }
 
-# News articles with real URLs
-NEWS_ARTICLES = [
-    {
-        "title": "Gold Prices Surge Amid Market Uncertainty",
-        "source": "Bloomberg",
-        "url": "https://www.bloomberg.com/markets/commodities",
-        "sentiment": 0.6,
-        "time": "2 hours ago"
-    },
-    {
-        "title": "Bitcoin Breaks Key Resistance Level",
-        "source": "CoinDesk",
-        "url": "https://www.coindesk.com/markets",
-        "sentiment": 0.8,
-        "time": "3 hours ago"
-    },
-    {
-        "title": "Fed Policy Decision Impacts Forex Markets",
-        "source": "Reuters",
-        "url": "https://www.reuters.com/markets/currencies",
-        "sentiment": -0.2,
-        "time": "4 hours ago"
-    },
-    {
-        "title": "Tech Stocks Rally on Earnings Reports",
-        "source": "CNBC",
-        "url": "https://www.cnbc.com/technology",
-        "sentiment": 0.7,
-        "time": "5 hours ago"
-    },
-    {
-        "title": "Oil Prices Volatile Amid Supply Concerns",
-        "source": "MarketWatch",
-        "url": "https://www.marketwatch.com/investing/commodities",
-        "sentiment": -0.3,
-        "time": "6 hours ago"
-    },
-    {
-        "title": "European Markets Close Higher on ECB News",
-        "source": "Financial Times",
-        "url": "https://www.ft.com/markets",
-        "sentiment": 0.4,
-        "time": "7 hours ago"
-    },
-]
+# News articles will be fetched dynamically from news scraper
+# Keeping placeholder for type checking
+NEWS_ARTICLES = []
 
 # Economic calendar events
 CALENDAR_EVENTS = [
@@ -174,19 +134,27 @@ def fetch_yahoo_finance_data(symbol, period="5d", interval="15m"):
         # Check if df is None or empty
         if df is None or (hasattr(df, 'empty') and df.empty):
             return generate_fallback_data(symbol)
-        
+
         # Check if df has expected structure
         if not hasattr(df, 'columns') or len(df.columns) == 0:
             return generate_fallback_data(symbol)
 
         df = df.reset_index()
-        df.columns = df.columns.str.lower()
+        
+        # Handle column renaming safely
+        try:
+            df.columns = df.columns.str.lower()
+        except:
+            # If column renaming fails, create new dataframe
+            df = pd.DataFrame(df.values, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'][:len(df.columns)])
 
         # Handle datetime column
         if 'date' in df.columns:
             df['timestamp'] = pd.to_datetime(df['date'])
         elif 'datetime' in df.columns:
             df['timestamp'] = pd.to_datetime(df['datetime'])
+        elif 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
         elif len(df.columns) > 0:
             df['timestamp'] = pd.to_datetime(df.iloc[:, 0])
         else:
@@ -973,29 +941,96 @@ app.layout = dbc.Container(fluid=True, children=[
                     ], style={"padding": "0"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
 
-                # Heston Model
+                # Heston Volatility & Options Analytics (Integrated Section)
                 dbc.Card([
                     dbc.CardHeader([
-                        html.Span("📉 HESTON STOCHASTIC VOLATILITY MODEL", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
+                        html.Span("📉 HESTON VOLATILITY & OPTIONS ANALYTICS", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
                     ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
                     dbc.CardBody([
-                        html.Div(id="heston-model-cards"),
-                        dcc.Graph(id="heston-surface-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "350px", "marginTop": "16px"})
-                    ], style={"padding": "16px"})
-                ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
-
-                # AI Price Prediction
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.Div([
-                            html.Span("🤖 AI PRICE PREDICTION", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
-                            html.Span(" (30-Day Forecast)", style={"color": COLORS["text_secondary"], "fontSize": "10px", "marginLeft": "8px"}),
-                        ]),
-                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
-                    dbc.CardBody([
-                        html.Div(id="prediction-cards"),
-                        dcc.Graph(id="prediction-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "350px", "marginTop": "16px"})
-                    ], style={"padding": "16px"})
+                        dbc.Tabs([
+                            # Heston Model Tab
+                            dbc.Tab([
+                                html.Div([
+                                    html.Div(id="heston-model-cards", className="mb-3"),
+                                    dcc.Graph(id="heston-surface-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "400px"}),
+                                ], style={"padding": "10px"})
+                            ], label="📉 Heston Model", tab_id="heston", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                            
+                            # Black-Scholes Tab
+                            dbc.Tab([
+                                html.Div([
+                                    dbc.Row([
+                                        dbc.Col([
+                                            html.Label("Spot Price (S):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                            dbc.Input(type="number", id="bs-spot", value=100, step=1,
+                                                     style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                        ], width=4),
+                                        dbc.Col([
+                                            html.Label("Strike (K):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                            dbc.Input(type="number", id="bs-strike", value=100, step=1,
+                                                     style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                        ], width=4),
+                                        dbc.Col([
+                                            html.Label("Time to Expiry (days):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                            dbc.Input(type="number", id="bs-time", value=30, step=1,
+                                                     style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                        ], width=4),
+                                    ], className="mb-3"),
+                                    dbc.Row([
+                                        dbc.Col([
+                                            html.Label("Volatility (σ):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                            dbc.Input(type="number", id="bs-vol", value=0.25, step=0.01, min=0.01, max=2,
+                                                     style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                        ], width=4),
+                                        dbc.Col([
+                                            html.Label("Risk-free Rate (r):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                            dbc.Input(type="number", id="bs-rate", value=0.05, step=0.01,
+                                                     style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
+                                        ], width=4),
+                                        dbc.Col([
+                                            html.Label("Option Type:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                            dcc.Dropdown(
+                                                id="bs-option-type",
+                                                options=[{"label": "Call", "value": "call"}, {"label": "Put", "value": "put"}],
+                                                value="call",
+                                                style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]},
+                                            ),
+                                        ], width=4),
+                                    ], className="mb-3"),
+                                    html.Div(id="bs-model-cards"),
+                                    dbc.Row([
+                                        dbc.Col([
+                                            dcc.Graph(id="bs-greeks-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "350px"}),
+                                        ], width=12),
+                                    ]),
+                                ], style={"padding": "10px"})
+                            ], label="⚫ Black-Scholes", tab_id="black-scholes", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                            
+                            # Regime Detection Tab
+                            dbc.Tab([
+                                html.Div([
+                                    html.Div(id="regime-detection-display", className="mb-3"),
+                                    dbc.Row([
+                                        dbc.Col([
+                                            dcc.Graph(id="regime-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "400px"}),
+                                        ], width=12),
+                                    ]),
+                                ], style={"padding": "10px"})
+                            ], label="🔄 Regime Detection", tab_id="regime", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                            
+                            # AI Price Prediction Tab
+                            dbc.Tab([
+                                html.Div([
+                                    html.Div(id="prediction-cards", className="mb-3"),
+                                    dbc.Row([
+                                        dbc.Col([
+                                            dcc.Graph(id="prediction-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "400px"}),
+                                        ], width=12),
+                                    ]),
+                                ], style={"padding": "10px"})
+                            ], label="🤖 AI Prediction", tab_id="prediction", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                        ], active_tab="heston", id="volatility-tabs", style={"backgroundColor": COLORS["background"]})
+                    ], style={"padding": "0"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
 
                 # Market Metrics with Tabs
@@ -1161,85 +1196,6 @@ app.layout = dbc.Container(fluid=True, children=[
                     ], active_tab="qlearning", id="rl-tabs", style={"backgroundColor": COLORS["background"]})
                 ], style={"padding": "0"})
             ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
-        ], width=6),
-
-        dbc.Col([
-            # Options Pricing Models Tab
-            dbc.Card([
-                dbc.CardHeader([
-                    html.Span("💹 OPTIONS PRICING MODELS", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
-                ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
-                dbc.CardBody([
-                    dbc.Tabs([
-                        dbc.Tab([
-                            html.Div([
-                                dbc.Row([
-                                    dbc.Col([
-                                        html.Div(id="bs-model-cards"),
-                                    ], width=12),
-                                ], className="mb-3"),
-                                dbc.Row([
-                                    dbc.Col([
-                                        html.Label("Spot Price (S):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-                                        dbc.Input(type="number", id="bs-spot", value=100, step=1,
-                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
-                                    ], width=4),
-                                    dbc.Col([
-                                        html.Label("Strike (K):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-                                        dbc.Input(type="number", id="bs-strike", value=100, step=1,
-                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
-                                    ], width=4),
-                                    dbc.Col([
-                                        html.Label("Time to Expiry (days):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-                                        dbc.Input(type="number", id="bs-time", value=30, step=1,
-                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
-                                    ], width=4),
-                                ], className="mb-3"),
-                                dbc.Row([
-                                    dbc.Col([
-                                        html.Label("Volatility (σ):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-                                        dbc.Input(type="number", id="bs-vol", value=0.25, step=0.01, min=0.01, max=2,
-                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
-                                    ], width=4),
-                                    dbc.Col([
-                                        html.Label("Risk-free Rate (r):", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-                                        dbc.Input(type="number", id="bs-rate", value=0.05, step=0.01,
-                                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}),
-                                    ], width=4),
-                                    dbc.Col([
-                                        html.Label("Option Type:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-                                        dcc.Dropdown(
-                                            id="bs-option-type",
-                                            options=[{"label": "Call", "value": "call"}, {"label": "Put", "value": "put"}],
-                                            value="call",
-                                            style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]},
-                                        ),
-                                    ], width=4),
-                                ], className="mb-3"),
-                                dbc.Row([
-                                    dbc.Col([
-                                        dcc.Graph(id="bs-greeks-chart", config={"displayModeBar": False, "responsive": True}),
-                                    ], width=12),
-                                ]),
-                            ], style={"padding": "10px"})
-                        ], label="⚫ Black-Scholes", tab_id="black-scholes", label_style={"color": COLORS["text"], "fontSize": "11px"}),
-                        dbc.Tab([
-                            html.Div([
-                                dbc.Row([
-                                    dbc.Col([
-                                        html.Div(id="regime-detection-display"),
-                                    ], width=12),
-                                ]),
-                                dbc.Row([
-                                    dbc.Col([
-                                        dcc.Graph(id="regime-chart", config={"displayModeBar": False, "responsive": True}),
-                                    ], width=12),
-                                ]),
-                            ], style={"padding": "10px"})
-                        ], label="🔄 Regime Detection", tab_id="regime", label_style={"color": COLORS["text"], "fontSize": "11px"}),
-                    ], active_tab="black-scholes", id="models-tabs", style={"backgroundColor": COLORS["background"]})
-                ], style={"padding": "0"})
-            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
         ], width=6),
     ], className="mt-3"),
 
@@ -1599,36 +1555,76 @@ def update_signals(symbol):
     [Input("interval-component", "n_intervals")]
 )
 def update_news(n):
-    """Update news feed with clickable links to original articles."""
-    news_items = []
-    for article in NEWS_ARTICLES:
-        sentiment_color = COLORS["success"] if article["sentiment"] > 0.3 else COLORS["danger"] if article["sentiment"] < -0.3 else COLORS["text_secondary"]
-        sentiment_text = "Bullish" if article["sentiment"] > 0.3 else "Bearish" if article["sentiment"] < -0.3 else "Neutral"
+    """Update news feed with real scraped news articles."""
+    try:
+        # Fetch real news articles from scraper
+        articles = get_financial_news(limit=10)
+        
+        # If we got no articles, return empty state message
+        if not articles:
+            return [html.Div("Loading financial news...", style={"textAlign": "center", "padding": "20px", "color": COLORS["text_secondary"]})]
+        
+        news_items = []
+        for article in articles:
+            # Convert NewsArticle object to dict-like access for compatibility
+            sentiment = getattr(article, 'sentiment', 0.0)
+            title = getattr(article, 'title', 'Financial News Update')
+            source = getattr(article, 'source', NewsSource.FOREX_FACTORY).value if hasattr(getattr(article, 'source', None), 'value') else str(getattr(article, 'source', 'Financial News'))
+            url = getattr(article, 'url', '#')
+            published_at = getattr(article, 'published_at', datetime.now())
+            related_symbols = getattr(article, 'related_symbols', [])
+            
+            # Format time
+            time_diff = datetime.now() - published_at
+            if time_diff.days > 0:
+                time_str = f"{time_diff.days} day{'s' if time_diff.days != 1 else ''} ago"
+            elif time_diff.seconds > 3600:
+                hours = time_diff.seconds // 3600
+                time_str = f"{hours} hour{'s' if hours != 1 else ''} ago"
+            elif time_diff.seconds > 60:
+                minutes = time_diff.seconds // 60
+                time_str = f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+            else:
+                time_str = "Just now"
+            
+            sentiment_color = COLORS["success"] if sentiment > 0.3 else COLORS["danger"] if sentiment < -0.3 else COLORS["text_secondary"]
+            sentiment_text = "Bullish" if sentiment > 0.3 else "Bearish" if sentiment < -0.3 else "Neutral"
+            
+            # Add symbols info if available
+            symbols_text = ""
+            if related_symbols:
+                symbols_text = html.Small(f" | {' '.join(related_symbols[:3])}", style={"color": COLORS["text_secondary"], "fontSize": "9px", "marginLeft": "8px"})
 
-        news_items.append(
-            html.Div([
-                html.A(
-                    html.Div([
+            news_items.append(
+                html.Div([
+                    html.A(
                         html.Div([
-                            html.Small(article["source"], style={"color": COLORS["text_secondary"], "fontSize": "9px", "textTransform": "uppercase", "letterSpacing": "1px"}),
-                            html.Small("• " + article["time"], style={"color": COLORS["text_secondary"], "fontSize": "9px", "marginLeft": "8px"}),
-                        ], style={"display": "flex", "alignItems": "center", "marginBottom": "4px"}),
-                        html.P(article["title"], style={"color": COLORS["accent"], "fontSize": "12px", "marginBottom": "6px", "fontWeight": "500", "textDecoration": "none"}),
-                        html.Div([
-                            html.Span(f"Sentiment: {sentiment_text}", style={"color": sentiment_color, "fontSize": "10px", "backgroundColor": COLORS["surface_light"], "padding": "2px 6px", "borderRadius": "3px"}),
-                            html.Span("🔗 Read More →", style={"color": COLORS["text_secondary"], "fontSize": "9px", "marginLeft": "8px"}),
-                        ], style={"display": "flex", "alignItems": "center"}),
-                    ], style={"padding": "10px", "borderRadius": "4px", "transition": "background-color 0.2s"}),
-                    href=article["url"],
-                    target="_blank",
-                    rel="noopener noreferrer",
-                    style={"textDecoration": "none", "color": "inherit", "display": "block"}
-                ),
-                html.Hr(style={"borderColor": COLORS["border"], "margin": "8px 0"}),
-            ], style={"marginBottom": "4px"})
-        )
-
-    return news_items
+                            html.Div([
+                                html.Small(source.title(), style={"color": COLORS["text_secondary"], "fontSize": "9px", "textTransform": "uppercase", "letterSpacing": "1px"}),
+                                html.Small("• " + time_str, style={"color": COLORS["text_secondary"], "fontSize": "9px", "marginLeft": "8px"}),
+                                symbols_text
+                            ], style={"display": "flex", "alignItems": "center", "marginBottom": "4px"}),
+                            html.P(title, style={"color": COLORS["accent"], "fontSize": "12px", "marginBottom": "6px", "fontWeight": "500", "textDecoration": "none"}),
+                            html.Div([
+                                html.Span(f"Sentiment: {sentiment_text}", style={"color": sentiment_color, "fontSize": "10px", "backgroundColor": COLORS["surface_light"], "padding": "2px 6px", "borderRadius": "3px"}),
+                                html.Span("🔗 Read More →", style={"color": COLORS["text_secondary"], "fontSize": "9px", "marginLeft": "8px"}),
+                            ], style={"display": "flex", "alignItems": "center"}),
+                        ], style={"padding": "10px", "borderRadius": "4px", "transition": "background-color 0.2s"}),
+                        href=url,
+                        target="_blank",
+                        rel="noopener noreferrer",
+                        style={"textDecoration": "none", "color": "inherit", "display": "block"}
+                    ),
+                    html.Hr(style={"borderColor": COLORS["border"], "margin": "8px 0"}),
+                ], style={"marginBottom": "4px"})
+            )
+        
+        return news_items
+        
+    except Exception as e:
+        print(f"Error fetching news: {e}")
+        # Fallback to a simple message if scraping fails
+        return [html.Div("Unable to load financial news at this time.", style={"textAlign": "center", "padding": "20px", "color": COLORS["text_secondary"]})]
 
 
 @callback(

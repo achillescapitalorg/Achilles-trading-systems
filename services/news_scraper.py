@@ -526,7 +526,7 @@ class NewsAggregator:
             'User-Agent': random.choice(self.USER_AGENTS),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'gzip, deflate',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         }
@@ -633,14 +633,13 @@ class NewsAggregator:
         news = []
         for i, (title, sentiment, impact, symbols, source, path) in enumerate(templates[:count]):
             full_url = f"{source_urls.get(source, 'https://example.com')}{path}"
-            
+
             news.append(NewsArticle(
                 id=f"news-{i}-{int(datetime.now().timestamp())}",
                 title=title,
                 source=NewsSource(source),
                 sentiment=sentiment + random.uniform(-0.1, 0.1),
                 relevance=random.uniform(0.6, 1.0),
-                timestamp=datetime.now() - timedelta(hours=i),
                 url=full_url,
                 impact=impact,
                 summary=f"Market analysis: {title[:100]}...",
