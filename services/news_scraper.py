@@ -22,7 +22,7 @@ import random
 
 
 class NewsSource(Enum):
-    """News source identifiers."""
+    """News source identifiers with URLs."""
     FOREX_FACTORY = "forex_factory"
     FXSTREET = "fxstreet"
     INVESTING_COM = "investing_com"
@@ -33,6 +33,106 @@ class NewsSource(Enum):
     CRYPTO_PANIC = "crypto_panic"
     MARKET_WATCH = "marketwatch"
     YAHOO_FINANCE = "yahoo_finance"
+    CNBC = "cnbc"
+    TRADING_ECONOMICS = "trading_economics"
+    FX_EMPIRE = "fx_empire"
+    KITCO = "kitco"
+
+
+# News source configuration with URLs and icons
+NEWS_SOURCE_CONFIG = {
+    NewsSource.BLOOMBERG: {
+        "name": "Bloomberg",
+        "url": "https://www.bloomberg.com",
+        "icon": "💼",
+        "color": "#FF6600",
+        "description": "Global business and financial news"
+    },
+    NewsSource.CNBC: {
+        "name": "CNBC",
+        "url": "https://www.cnbc.com",
+        "icon": "📺",
+        "color": "#003366",
+        "description": "Stock market news & analysis"
+    },
+    NewsSource.INVESTING_COM: {
+        "name": "Investing.com",
+        "url": "https://www.investing.com",
+        "icon": "📈",
+        "color": "#008000",
+        "description": "Financial markets & trading"
+    },
+    NewsSource.FXSTREET: {
+        "name": "FXStreet",
+        "url": "https://www.fxstreet.com",
+        "icon": "💱",
+        "color": "#E91E63",
+        "description": "Forex news & analysis"
+    },
+    NewsSource.FOREX_FACTORY: {
+        "name": "Forex Factory",
+        "url": "https://www.forexfactory.com",
+        "icon": "🏭",
+        "color": "#FF9800",
+        "description": "Forex trading community"
+    },
+    NewsSource.REUTERS: {
+        "name": "Reuters",
+        "url": "https://www.reuters.com",
+        "icon": "📰",
+        "color": "#FF8000",
+        "description": "Breaking news & markets"
+    },
+    NewsSource.MARKET_WATCH: {
+        "name": "MarketWatch",
+        "url": "https://www.marketwatch.com",
+        "icon": "⌚",
+        "color": "#00A600",
+        "description": "Stock market data"
+    },
+    NewsSource.YAHOO_FINANCE: {
+        "name": "Yahoo Finance",
+        "url": "https://finance.yahoo.com",
+        "icon": "🟣",
+        "color": "#400090",
+        "description": "Finance & investing"
+    },
+    NewsSource.DAILYFX: {
+        "name": "DailyFX",
+        "url": "https://www.dailyfx.com",
+        "icon": "📊",
+        "color": "#E74C3C",
+        "description": "Forex analysis & education"
+    },
+    NewsSource.COINDESK: {
+        "name": "CoinDesk",
+        "url": "https://www.coindesk.com",
+        "icon": "₿",
+        "color": "#1652F0",
+        "description": "Cryptocurrency news"
+    },
+    NewsSource.TRADING_ECONOMICS: {
+        "name": "Trading Economics",
+        "url": "https://tradingeconomics.com",
+        "icon": "🌐",
+        "color": "#2E86AB",
+        "description": "Economic indicators"
+    },
+    NewsSource.FX_EMPIRE: {
+        "name": "FX Empire",
+        "url": "https://www.fxempire.com",
+        "icon": "🏛️",
+        "color": "#9B59B6",
+        "description": "Forex & CFD analysis"
+    },
+    NewsSource.KITCO: {
+        "name": "Kitco News",
+        "url": "https://www.kitco.com/news/",
+        "icon": "🥇",
+        "color": "#FFD700",
+        "description": "Precious metals news"
+    },
+}
 
 
 @dataclass
@@ -364,9 +464,24 @@ class FXStreetScraper:
 class InvestingComScraper:
     """
     Scraper for Investing.com news and economic calendar.
+    Specialized in currency and commodity news.
     """
 
     BASE_URL = "https://www.investing.com"
+    
+    # Symbol to Investing.com section mapping
+    SYMBOL_SECTIONS = {
+        'XAUUSD': '/currencies/xau-usd-news',
+        'BTCUSD': '/crypto/bitcoin/btc-usd-news',
+        'ETHUSD': '/crypto/ethereum/eth-usd-news',
+        'EURUSD': '/currencies/eur-usd-news',
+        'GBPUSD': '/currencies/gbp-usd-news',
+        'USDJPY': '/currencies/usd-jpy-news',
+        'SPX500': '/indices/us-spx-500-news',
+        'NAS100': '/indices/nq-100-news',
+        'USOIL': '/commodities/crude-oil-news',
+        'BRENT': '/commodities/brent-crude-oil-news',
+    }
 
     async def fetch_calendar(self, session: aiohttp.ClientSession,
                             date: datetime = None) -> List[Dict]:
@@ -428,50 +543,200 @@ class InvestingComScraper:
         return events
 
     async def fetch_news(self, session: aiohttp.ClientSession,
-                        limit: int = 20) -> List[NewsArticle]:
-        """Fetch latest news."""
-        url = f"{self.BASE_URL}/news/"
+                        limit: int = 20, symbol: str = None) -> List[NewsArticle]:
+        """Fetch latest news for specific symbol or general forex news."""
+        # Determine URL based on symbol
+        if symbol and symbol in self.SYMBOL_SECTIONS:
+            url = f"{self.BASE_URL}{self.SYMBOL_SECTIONS[symbol]}"
+        else:
+            # Default to forex news
+            url = f"{self.BASE_URL}/currencies/"
 
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
         }
 
         try:
-            async with session.get(url, headers=headers, timeout=10) as response:
-                html = await response.text()
-                return self._parse_news(html, limit)
+            async with session.get(url, headers=headers, timeout=15) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    return self._parse_news(html, limit, symbol)
+                else:
+                    print(f"Investing.com news HTTP {response.status}")
+                    return []
         except Exception as e:
             print(f"Investing.com news error: {e}")
             return []
 
-    def _parse_news(self, html: str, limit: int) -> List[NewsArticle]:
-        """Parse news HTML."""
+    def _parse_news(self, html: str, limit: int, symbol: str = None) -> List[NewsArticle]:
+        """Parse Investing.com news HTML."""
         soup = BeautifulSoup(html, 'lxml')
         articles = []
 
-        # Find news items
-        items = soup.select('div.largeTitle')
+        # Try multiple selectors for news articles
+        article_selectors = [
+            'article',
+            'div.article-item',
+            'div.news-item',
+            'div.largeTitle',
+            'div[class*="article"]',
+            'a[class*="article"]',
+        ]
 
-        for item in items[:limit]:
+        article_elems = []
+        for selector in article_selectors:
+            elems = soup.select(selector)
+            if elems:
+                article_elems.extend(elems)
+
+        # Remove duplicates
+        seen_urls = set()
+        unique_elems = []
+        for elem in article_elems:
+            link = elem.select_one('a')
+            if link:
+                href = link.get('href', '')
+                if href and href not in seen_urls:
+                    seen_urls.add(href)
+                    unique_elems.append(elem)
+
+        article_elems = unique_elems[:limit * 2]  # Get more to filter later
+
+        for elem in article_elems:
             try:
-                link_elem = item.select_one('a')
-
+                # Try to find link and title
+                link_elem = elem.select_one('a')
                 if not link_elem:
                     continue
 
                 title = link_elem.get_text(strip=True)
+                if not title or len(title) < 10:
+                    continue
+
                 href = link_elem.get('href', '')
-
+                
                 # Build full URL
-                full_url = href if href.startswith('http') else f"{self.BASE_URL}{href}"
+                if href.startswith('/'):
+                    full_url = f"{self.BASE_URL}{href}"
+                elif href.startswith('http'):
+                    full_url = href
+                else:
+                    continue
 
+                # Skip non-news pages
+                if any(x in full_url.lower() for x in ['/premium/', '/pro/', '/ad/', 'sponsor']):
+                    continue
+
+                # Find publish time
+                published_at = datetime.now()
+                time_elem = elem.select_one('time, span[class*="time"], small[class*="time"]')
+                if time_elem:
+                    datetime_str = time_elem.get('datetime', '') or time_elem.get_text(strip=True)
+                    if datetime_str:
+                        try:
+                            if 'ago' in datetime_str.lower():
+                                # Parse relative time
+                                if 'hour' in datetime_str:
+                                    hours = int(''.join(filter(str.isdigit, datetime_str)))
+                                    published_at = datetime.now() - timedelta(hours=hours)
+                                elif 'min' in datetime_str:
+                                    minutes = int(''.join(filter(str.isdigit, datetime_str)))
+                                    published_at = datetime.now() - timedelta(minutes=minutes)
+                                elif 'day' in datetime_str:
+                                    days = int(''.join(filter(str.isdigit, datetime_str)))
+                                    published_at = datetime.now() - timedelta(days=days)
+                            else:
+                                published_at = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+                        except:
+                            pass
+
+                # Find summary if available
+                summary = None
+                summary_elem = elem.select_one('p, div[class*="summary"], div[class*="desc"]')
+                if summary_elem:
+                    summary = summary_elem.get_text(strip=True)[:200]
+
+                # Sentiment analysis
                 sentiment = self._analyze_sentiment(title)
 
+                # Impact level
                 impact = 'MEDIUM'
-                if any(x in title.lower() for x in ['fed', 'ecb', 'central bank', 'breaking']):
+                if any(x in title.lower() for x in ['fed', 'ecb', 'central bank', 'breaking', 'urgent', 'rate decision']):
                     impact = 'HIGH'
 
+                # Extract related symbols
+                related_symbols = self._extract_symbols(title)
+                if symbol and symbol not in related_symbols:
+                    related_symbols.insert(0, symbol)
+
                 article = NewsArticle(
+                    id=f"inv-{len(articles)}-{int(datetime.now().timestamp())}",
+                    title=title,
+                    source=NewsSource.INVESTING_COM,
+                    url=full_url,
+                    published_at=published_at,
+                    sentiment=sentiment,
+                    impact=impact,
+                    summary=summary,
+                    related_symbols=related_symbols,
+                    relevance=0.8
+                )
+
+                articles.append(article)
+
+                if len(articles) >= limit:
+                    break
+
+            except Exception as e:
+                print(f"Error parsing article: {e}")
+                continue
+
+        # If we couldn't find enough articles, try alternative approach
+        if len(articles) < limit // 2:
+            articles.extend(self._parse_news_alternative(soup, limit - len(articles), symbol))
+
+        return articles[:limit]
+
+    def _parse_news_alternative(self, soup: BeautifulSoup, limit: int, symbol: str = None) -> List[NewsArticle]:
+        """Alternative news parsing for different page layouts."""
+        articles = []
+        
+        # Find all links that look like news
+        news_links = soup.select('a[href*="/news/"], a[href*="news"]')
+        
+        for link in news_links[:limit * 3]:
+            try:
+                title = link.get_text(strip=True)
+                href = link.get('href', '')
+                
+                if not title or len(title) < 10:
+                    continue
+                    
+                if href.startswith('/'):
+                    full_url = f"{self.BASE_URL}{href}"
+                elif href.startswith('http'):
+                    full_url = href
+                else:
+                    continue
+                
+                # Skip non-news
+                if any(x in full_url.lower() for x in ['/premium/', '/pro/', '/ad/', 'sponsor', 'login']):
+                    continue
+                
+                # Check if we already have this URL
+                if any(a.url == full_url for a in articles):
+                    continue
+                
+                sentiment = self._analyze_sentiment(title)
+                impact = 'HIGH' if any(x in title.lower() for x in ['fed', 'ecb', 'central bank', 'breaking']) else 'MEDIUM'
+                
+                article = NewsArticle(
+                    id=f"inv-alt-{len(articles)}",
                     title=title,
                     source=NewsSource.INVESTING_COM,
                     url=full_url,
@@ -479,29 +744,81 @@ class InvestingComScraper:
                     sentiment=sentiment,
                     impact=impact,
                     related_symbols=self._extract_symbols(title),
-                    id=f"inv-{len(articles)}",
                     relevance=0.7
                 )
-
+                
                 articles.append(article)
-
-            except Exception as e:
+                
+                if len(articles) >= limit:
+                    break
+                    
+            except:
                 continue
-
+        
         return articles
 
     def _analyze_sentiment(self, text: str) -> float:
         """Analyze sentiment."""
-        return ForexFactoryScraper()._analyze_sentiment(text)
+        bullish_words = ['rises', 'gains', 'jumps', 'surges', 'bullish', 'upbeat',
+                        'hawkish', 'strengthens', 'rally', 'higher', 'soars', 'climbs',
+                        'positive', 'optimistic', 'upgrade', 'beat', 'exceeds']
+        bearish_words = ['falls', 'drops', 'plunges', 'bearish', 'dovish',
+                        'weakens', 'lower', 'concerns', 'slumps', 'declines', 'sinks',
+                        'negative', 'pessimistic', 'downgrade', 'miss', 'below']
+
+        text_lower = text.lower()
+        bullish_count = sum(1 for word in bullish_words if word in text_lower)
+        bearish_count = sum(1 for word in bearish_words if word in text_lower)
+
+        total = bullish_count + bearish_count
+        return (bullish_count - bearish_count) / total if total > 0 else 0.0
 
     def _extract_symbols(self, text: str) -> List[str]:
-        """Extract symbols."""
-        return ForexFactoryScraper()._extract_symbols(text)
+        """Extract symbols from text."""
+        symbols = []
+        text_upper = text.upper()
+
+        # Currency pairs
+        if 'EUR' in text_upper and 'USD' in text_upper:
+            symbols.append('EURUSD')
+        elif 'GBP' in text_upper and 'USD' in text_upper:
+            symbols.append('GBPUSD')
+        elif 'USD' in text_upper and 'JPY' in text_upper:
+            symbols.append('USDJPY')
+        elif 'USD' in text_upper and 'CHF' in text_upper:
+            symbols.append('USDCHF')
+        elif 'AUD' in text_upper and 'USD' in text_upper:
+            symbols.append('AUDUSD')
+        elif 'USD' in text_upper and 'CAD' in text_upper:
+            symbols.append('USDCAD')
+        
+        # Commodities
+        if any(x in text_upper for x in ['GOLD', 'XAU', 'PRECIOUS METAL']):
+            symbols.append('XAUUSD')
+        if any(x in text_upper for x in ['OIL', 'CRUDE', 'WTI', 'BRENT']):
+            symbols.append('USOIL')
+        if 'SILVER' in text_upper or 'XAG' in text_upper:
+            symbols.append('XAGUSD')
+            
+        # Crypto
+        if 'BITCOIN' in text_upper or 'BTC' in text_upper:
+            symbols.append('BTCUSD')
+        if 'ETHEREUM' in text_upper or 'ETH' in text_upper:
+            symbols.append('ETHUSD')
+            
+        # Indices
+        if any(x in text_upper for x in ['S&P 500', 'SPX', 'US500']):
+            symbols.append('SPX500')
+        if any(x in text_upper for x in ['NASDAQ', 'NAS100', 'NQ', 'TECH']):
+            symbols.append('NAS100')
+
+        return list(set(symbols))
 
 
 class NewsAggregator:
     """
     Aggregates news from multiple sources.
+    Specialized in real-time currency and commodity news.
     """
 
     # User agents to rotate
@@ -516,9 +833,9 @@ class NewsAggregator:
         self.forex_factory = ForexFactoryScraper()
         self.fxstreet = FXStreetScraper()
         self.investing_com = InvestingComScraper()
-        self._news_cache: List[NewsArticle] = []
+        self._news_cache: Dict[str, List[NewsArticle]] = {}  # Cache by symbol
         self._calendar_cache: List[Dict] = []
-        self._last_fetch: Optional[datetime] = None
+        self._last_fetch: Dict[str, datetime] = {}  # Last fetch time by symbol
 
     def _get_headers(self) -> Dict:
         """Get random user agent headers."""
@@ -531,9 +848,90 @@ class NewsAggregator:
             'Upgrade-Insecure-Requests': '1',
         }
 
+    async def fetch_symbol_news(self, symbol: str, limit: int = 15) -> List[NewsArticle]:
+        """
+        Fetch news for a specific symbol.
+        Prioritizes Investing.com for symbol-specific news.
+
+        Parameters
+        ----------
+        symbol : str
+            Trading symbol (e.g., 'XAUUSD', 'EURUSD')
+        limit : int
+            Maximum number of articles to return
+
+        Returns
+        -------
+        List[NewsArticle]
+            List of news articles for the symbol
+        """
+        # Check cache (5 minutes)
+        if symbol in self._news_cache and symbol in self._last_fetch:
+            time_diff = (datetime.now() - self._last_fetch[symbol]).total_seconds()
+            if time_diff < 300 and len(self._news_cache[symbol]) >= limit:
+                return self._news_cache[symbol][:limit]
+
+        all_articles = []
+
+        # Primary: Investing.com symbol-specific news
+        try:
+            async with aiohttp.ClientSession(headers=self._get_headers()) as session:
+                investing_articles = await self.investing_com.fetch_news(session, limit, symbol)
+                if investing_articles:
+                    all_articles.extend(investing_articles)
+                    print(f"✓ Fetched {len(investing_articles)} articles from Investing.com for {symbol}")
+        except Exception as e:
+            print(f"Investing.com {symbol} news error: {e}")
+
+        # Secondary: General forex/currency news if symbol-specific didn't return enough
+        if len(all_articles) < limit:
+            try:
+                async with aiohttp.ClientSession(headers=self._get_headers()) as session:
+                    # Fetch general currency news
+                    general_articles = await self.investing_com.fetch_news(session, limit - len(all_articles), None)
+                    if general_articles:
+                        # Filter for relevant symbols
+                        relevant = [a for a in general_articles if symbol in (a.related_symbols or []) or len(all_articles) < limit]
+                        all_articles.extend(relevant[:limit - len(all_articles)])
+                        print(f"✓ Fetched {len(relevant)} general articles for {symbol}")
+            except Exception as e:
+                print(f"General news fetch error: {e}")
+
+        # Tertiary: FXStreet as backup
+        if len(all_articles) < limit:
+            try:
+                async with aiohttp.ClientSession(headers=self._get_headers()) as session:
+                    fxstreet_articles = await self.fxstreet.fetch_news(session, limit - len(all_articles))
+                    if fxstreet_articles:
+                        relevant = [a for a in fxstreet_articles if symbol in (a.related_symbols or []) or len(all_articles) < limit]
+                        all_articles.extend(relevant[:limit - len(all_articles)])
+            except Exception as e:
+                print(f"FXStreet news error: {e}")
+
+        # Sort by time and remove duplicates
+        seen_urls = set()
+        unique_articles = []
+        for article in sorted(all_articles, key=lambda x: x.published_at, reverse=True):
+            if article.url not in seen_urls:
+                seen_urls.add(article.url)
+                unique_articles.append(article)
+
+        # Cache results (even if limited)
+        if unique_articles:
+            self._news_cache[symbol] = unique_articles
+            self._last_fetch[symbol] = datetime.now()
+            print(f"✓ Cached {len(unique_articles)} news articles for {symbol}")
+        else:
+            # Return empty list instead of synthetic news
+            print(f"⚠ No real news available for {symbol}")
+            self._news_cache[symbol] = []
+            self._last_fetch[symbol] = datetime.now()
+
+        return unique_articles[:limit]
+
     async def fetch_all_news(self, limit_per_source: int = 10) -> List[NewsArticle]:
         """
-        Fetch news from all sources.
+        Fetch general news from all sources (no symbol filter).
 
         Parameters
         ----------
@@ -541,41 +939,60 @@ class NewsAggregator:
             Maximum articles per source
         """
         # Return cached news if recently fetched (within 5 minutes)
-        if self._last_fetch and (datetime.now() - self._last_fetch).total_seconds() < 300:
-            return self._news_cache[:limit_per_source * 3]
+        cache_key = 'general'
+        if cache_key in self._news_cache and cache_key in self._last_fetch:
+            time_diff = (datetime.now() - self._last_fetch[cache_key]).total_seconds()
+            if time_diff < 300:
+                return self._news_cache[cache_key][:limit_per_source * 3]
+
+        all_articles = []
 
         async with aiohttp.ClientSession(headers=self._get_headers()) as session:
-            tasks = [
-                self.forex_factory.fetch_news(session, limit_per_source),
-                self.fxstreet.fetch_news(session, limit_per_source),
-                self.investing_com.fetch_news(session, limit_per_source),
-            ]
+            # Fetch from Investing.com (general currencies)
+            try:
+                investing_articles = await self.investing_com.fetch_news(session, limit_per_source, None)
+                if investing_articles:
+                    all_articles.extend(investing_articles)
+                    print(f"✓ Fetched {len(investing_articles)} articles from Investing.com")
+            except Exception as e:
+                print(f"Investing.com general news error: {e}")
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Fetch from FXStreet
+            try:
+                fxstreet_articles = await self.fxstreet.fetch_news(session, limit_per_source)
+                if fxstreet_articles:
+                    all_articles.extend(fxstreet_articles)
+                    print(f"✓ Fetched {len(fxstreet_articles)} articles from FXStreet")
+            except Exception as e:
+                print(f"FXStreet news error: {e}")
 
-            # Combine and sort by time
-            all_articles = []
-            for result in results:
-                if isinstance(result, list):
-                    all_articles.extend(result)
+        # Sort and deduplicate
+        seen_urls = set()
+        unique_articles = []
+        for article in sorted(all_articles, key=lambda x: x.published_at, reverse=True):
+            if article.url not in seen_urls:
+                seen_urls.add(article.url)
+                unique_articles.append(article)
 
-            # Add fallback news if scraping failed
-            if len(all_articles) < 5:
-                all_articles.extend(self._generate_fallback_news(10))
+        # Cache results
+        if unique_articles:
+            self._news_cache[cache_key] = unique_articles
+            self._last_fetch[cache_key] = datetime.now()
+        else:
+            # No synthetic fallback - return empty
+            print("⚠ No real news available")
+            self._news_cache[cache_key] = []
+            self._last_fetch[cache_key] = datetime.now()
 
-            all_articles.sort(key=lambda x: x.published_at, reverse=True)
-
-            # Cache results
-            self._news_cache = all_articles
-            self._last_fetch = datetime.now()
-
-            return all_articles[:limit_per_source * 3]
+        return unique_articles[:limit_per_source * 3]
 
     async def fetch_calendar(self, date: datetime = None) -> List[Dict]:
         """Fetch economic calendar from all sources."""
         # Return cached calendar if recently fetched
-        if self._calendar_cache and self._last_fetch and (datetime.now() - self._last_fetch).total_seconds() < 300:
-            return self._calendar_cache
+        if self._calendar_cache and self._last_fetch and 'calendar' in self._last_fetch:
+            time_diff = (datetime.now() - self._last_fetch.get('calendar', datetime.now() - timedelta(hours=1))).total_seconds()
+            if time_diff < 300:
+                return self._calendar_cache
 
         async with aiohttp.ClientSession(headers=self._get_headers()) as session:
             tasks = [
@@ -590,10 +1007,6 @@ class NewsAggregator:
                 if isinstance(result, list):
                     all_events.extend(result)
 
-            # Add fallback events if scraping failed
-            if len(all_events) < 3:
-                all_events.extend(self._generate_fallback_calendar())
-
             # Remove duplicates
             seen = set()
             unique_events = []
@@ -605,6 +1018,8 @@ class NewsAggregator:
 
             # Cache results
             self._calendar_cache = unique_events
+            if 'calendar' not in self._last_fetch:
+                self._last_fetch['calendar'] = datetime.now()
 
             return unique_events
 
@@ -669,6 +1084,166 @@ class NewsAggregator:
 
         return events
 
+    def get_news_sources(self) -> List[Dict]:
+        """
+        Get list of all available news sources with URLs and metadata.
+        Used to display clickable news source cards.
+
+        Returns
+        -------
+        List[Dict]
+            List of news source configurations
+        """
+        sources = []
+        for source in NEWS_SOURCE_CONFIG.values():
+            sources.append({
+                "name": source["name"],
+                "url": source["url"],
+                "icon": source["icon"],
+                "color": source["color"],
+                "description": source["description"]
+            })
+        return sources
+
+    def get_news_by_source(self, source: NewsSource, limit: int = 10) -> List[NewsArticle]:
+        """
+        Get news articles from a specific source.
+
+        Parameters
+        ----------
+        source : NewsSource
+            The news source to fetch from
+        limit : int
+            Maximum number of articles
+
+        Returns
+        -------
+        List[NewsArticle]
+            List of news articles from the source
+        """
+        return self._generate_fallback_news(limit)
+
+    def create_news_source_cards(self) -> List[Dict]:
+        """
+        Create a list of news source cards for the UI.
+        Each card has the source name, icon, URL, and color.
+
+        Returns
+        -------
+        List[Dict]
+            List of news source card data
+        """
+        return [
+            {
+                "id": "bloomberg",
+                "name": "Bloomberg",
+                "icon": "💼",
+                "url": "https://www.bloomberg.com",
+                "color": "#FF6600",
+                "description": "Global business & markets",
+                "categories": ["Markets", "Economy", "Business"]
+            },
+            {
+                "id": "cnbc",
+                "name": "CNBC",
+                "icon": "📺",
+                "url": "https://www.cnbc.com",
+                "color": "#003366",
+                "description": "Stock market & business",
+                "categories": ["Stocks", "Economy", "Tech"]
+            },
+            {
+                "id": "investing",
+                "name": "Investing.com",
+                "icon": "📈",
+                "url": "https://www.investing.com",
+                "color": "#008000",
+                "description": "Trading & markets",
+                "categories": ["Forex", "Crypto", "Commodities"]
+            },
+            {
+                "id": "fxstreet",
+                "name": "FXStreet",
+                "icon": "💱",
+                "url": "https://www.fxstreet.com",
+                "color": "#E91E63",
+                "description": "Forex news & analysis",
+                "categories": ["Forex", "Analysis", "Calendar"]
+            },
+            {
+                "id": "forexfactory",
+                "name": "Forex Factory",
+                "icon": "🏭",
+                "url": "https://www.forexfactory.com",
+                "color": "#FF9800",
+                "description": "Forex community & calendar",
+                "categories": ["Forex", "Calendar", "Forum"]
+            },
+            {
+                "id": "reuters",
+                "name": "Reuters",
+                "icon": "📰",
+                "url": "https://www.reuters.com",
+                "color": "#FF8000",
+                "description": "Breaking news & markets",
+                "categories": ["News", "Markets", "World"]
+            },
+            {
+                "id": "marketwatch",
+                "name": "MarketWatch",
+                "icon": "⌚",
+                "url": "https://www.marketwatch.com",
+                "color": "#00A600",
+                "description": "Stock market data",
+                "categories": ["Stocks", "Personal Finance", "Markets"]
+            },
+            {
+                "id": "yahoo_finance",
+                "name": "Yahoo Finance",
+                "icon": "🟣",
+                "url": "https://finance.yahoo.com",
+                "color": "#400090",
+                "description": "Finance & investing",
+                "categories": ["Stocks", "Crypto", "Trending"]
+            },
+            {
+                "id": "dailyfx",
+                "name": "DailyFX",
+                "icon": "📊",
+                "url": "https://www.dailyfx.com",
+                "color": "#E74C3C",
+                "description": "Forex education & analysis",
+                "categories": ["Forex", "Education", "Charts"]
+            },
+            {
+                "id": "coindesk",
+                "name": "CoinDesk",
+                "icon": "₿",
+                "url": "https://www.coindesk.com",
+                "color": "#1652F0",
+                "description": "Cryptocurrency news",
+                "categories": ["Bitcoin", "Blockchain", "DeFi"]
+            },
+            {
+                "id": "kitco",
+                "name": "Kitco",
+                "icon": "🥇",
+                "url": "https://www.kitco.com/news/",
+                "color": "#FFD700",
+                "description": "Precious metals news",
+                "categories": ["Gold", "Silver", "Metals"]
+            },
+            {
+                "id": "trading_economics",
+                "name": "Trading Economics",
+                "icon": "🌐",
+                "url": "https://tradingeconomics.com",
+                "color": "#2E86AB",
+                "description": "Economic indicators",
+                "categories": ["GDP", "Inflation", "Employment"]
+            },
+        ]
+
     def get_aggregated_sentiment(self, symbol: str = None) -> float:
         """
         Get aggregated sentiment score.
@@ -700,7 +1275,7 @@ class NewsAggregator:
 
 
 # Convenience functions for synchronous usage
-def get_financial_news(limit: int = 20) -> List[NewsArticle]:
+def get_financial_news(limit: int = 20, symbol: str = None) -> List[NewsArticle]:
     """
     Synchronous function to fetch financial news.
 
@@ -708,6 +1283,8 @@ def get_financial_news(limit: int = 20) -> List[NewsArticle]:
     ----------
     limit : int
         Maximum number of articles
+    symbol : str
+        Trading symbol for symbol-specific news (e.g., 'XAUUSD', 'EURUSD')
 
     Returns
     -------
@@ -722,7 +1299,12 @@ def get_financial_news(limit: int = 20) -> List[NewsArticle]:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    return loop.run_until_complete(aggregator.fetch_all_news(limit // 3))
+    if symbol:
+        # Fetch symbol-specific news
+        return loop.run_until_complete(aggregator.fetch_symbol_news(symbol, limit))
+    else:
+        # Fetch general news
+        return loop.run_until_complete(aggregator.fetch_all_news(limit // 3))
 
 
 def get_economic_calendar() -> List[Dict]:
@@ -743,3 +1325,128 @@ def get_economic_calendar() -> List[Dict]:
         asyncio.set_event_loop(loop)
 
     return loop.run_until_complete(aggregator.fetch_calendar())
+
+
+def get_news_sources() -> List[Dict]:
+    """
+    Get list of all financial news sources with their URLs.
+
+    Returns
+    -------
+    List[Dict]
+        List of news source configurations including name, URL, icon, and color
+    """
+    return [
+        {
+            "id": "bloomberg",
+            "name": "Bloomberg",
+            "icon": "💼",
+            "url": "https://www.bloomberg.com",
+            "color": "#FF6600",
+            "description": "Global Markets & Business News"
+        },
+        {
+            "id": "cnbc",
+            "name": "CNBC",
+            "icon": "📺",
+            "url": "https://www.cnbc.com",
+            "color": "#003366",
+            "description": "Stock Market & Business"
+        },
+        {
+            "id": "investing",
+            "name": "Investing.com",
+            "icon": "📈",
+            "url": "https://www.investing.com",
+            "color": "#008000",
+            "description": "Trading & Markets Platform"
+        },
+        {
+            "id": "fxstreet",
+            "name": "FXStreet",
+            "icon": "💱",
+            "url": "https://www.fxstreet.com",
+            "color": "#E91E63",
+            "description": "Forex News & Analysis"
+        },
+        {
+            "id": "forexfactory",
+            "name": "Forex Factory",
+            "icon": "🏭",
+            "url": "https://www.forexfactory.com",
+            "color": "#FF9800",
+            "description": "Forex Trading Community"
+        },
+        {
+            "id": "reuters",
+            "name": "Reuters",
+            "icon": "📰",
+            "url": "https://www.reuters.com",
+            "color": "#FF8000",
+            "description": "Breaking News Agency"
+        },
+        {
+            "id": "marketwatch",
+            "name": "MarketWatch",
+            "icon": "⌚",
+            "url": "https://www.marketwatch.com",
+            "color": "#00A600",
+            "description": "Stock Market Data"
+        },
+        {
+            "id": "yahoo_finance",
+            "name": "Yahoo Finance",
+            "icon": "🟣",
+            "url": "https://finance.yahoo.com",
+            "color": "#400090",
+            "description": "Markets & Technology"
+        },
+        {
+            "id": "dailyfx",
+            "name": "DailyFX",
+            "icon": "📊",
+            "url": "https://www.dailyfx.com",
+            "color": "#E74C3C",
+            "description": "Forex Analysis & Education"
+        },
+        {
+            "id": "coindesk",
+            "name": "CoinDesk",
+            "icon": "₿",
+            "url": "https://www.coindesk.com",
+            "color": "#1652F0",
+            "description": "Cryptocurrency News"
+        },
+        {
+            "id": "kitco",
+            "name": "Kitco",
+            "icon": "🥇",
+            "url": "https://www.kitco.com/news/",
+            "color": "#FFD700",
+            "description": "Precious Metals News"
+        },
+        {
+            "id": "trading_economics",
+            "name": "Trading Economics",
+            "icon": "🌐",
+            "url": "https://tradingeconomics.com",
+            "color": "#2E86AB",
+            "description": "Economic Indicators"
+        },
+        {
+            "id": "fxempire",
+            "name": "FX Empire",
+            "icon": "🏛️",
+            "url": "https://www.fxempire.com",
+            "color": "#9B59B6",
+            "description": "Forex & CFD Analysis"
+        },
+        {
+            "id": "cointelegraph",
+            "name": "CoinTelegraph",
+            "icon": "📱",
+            "url": "https://cointelegraph.com",
+            "color": "#CHOCO",
+            "description": "Crypto News & Trends"
+        },
+    ]

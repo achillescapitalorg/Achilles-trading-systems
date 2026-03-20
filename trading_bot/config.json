@@ -1,0 +1,60 @@
+{
+  "trading": {
+    "paper_trading": true,
+    "assets": ["XAUUSD", "BTCUSD"],
+    "primary_timeframe": "M15",
+    "cycle_seconds": 300
+  },
+  "risk": {
+    "risk_per_trade": 1.0,
+    "max_positions": 3,
+    "max_drawdown": 10.0,
+    "min_confidence": 0.6,
+    "risk_model": "fixed_percentage",
+    "stop_loss_type": "atr_based",
+    "stop_loss_atr_multiplier": 2.0,
+    "take_profit_risk_reward": 2.0
+  },
+  "signals": {
+    "weights": {
+      "technical": 0.40,
+      "quantitative": 0.35,
+      "sentiment": 0.25
+    },
+    "technical_indicators": {
+      "rsi_period": 14,
+      "rsi_oversold": 30,
+      "rsi_overbought": 70,
+      "macd_fast": 12,
+      "macd_slow": 26,
+      "macd_signal": 9,
+      "bollinger_period": 20,
+      "bollinger_std": 2.0,
+      "supertrend_period": 10,
+      "supertrend_multiplier": 3.0
+    },
+    "quantitative": {
+      "mean_reversion_window": 60,
+      "momentum_periods": [5, 10, 20, 60],
+      "volatility_atr_period": 14,
+      "squeeze_period": 20
+    }
+  },
+  "exness": {
+    "login": null,
+    "password": null,
+    "server": "Exness-MT5Trial",
+    "demo": true
+  },
+  "api_keys": {
+    "twitter": null,
+    "newsapi": null,
+    "cryptopanic": null,
+    "alpha_vantage": null
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "trading_bot.log",
+    "console": true
+  }
+}
