@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats, optimize, integrate
 from scipy.stats import norm, multivariate_normal
-from typing import Dict, List, Tuple, Optional, Callable
+from typing import Dict, List, Tuple, Optional, Callable, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import warnings
@@ -526,118 +526,507 @@ class RoughBergomiModel:
 
 
 # ============================================================================
-# Regime-Switching Model
+# Regime-Switching Model (Hidden Markov Model)
 # ============================================================================
 
 class RegimeSwitchingModel:
     """
-    Markov Regime-Switching Model
-
-    Models different market states (bull, bear, high vol, low vol).
+    Hidden Markov Regime-Switching Model
+    
+    Models different market states using a proper Markov chain with
+    Baum-Welch EM algorithm for parameter estimation.
+    
+    Features:
+    - Proper EM algorithm with forward-backward pass
+    - Viterbi algorithm for optimal state sequence
+    - Regime duration statistics
+    - Transition probability estimation
+    - Smoothed regime probabilities
     """
-
-    def __init__(self, n_regimes: int = 2):
+    
+    REGIME_NAMES = {
+        0: "LOW_VOL_BEAR",
+        1: "HIGH_VOL_BEAR", 
+        2: "LOW_VOL_BULL",
+        3: "HIGH_VOL_BULL",
+        4: "SIDEWAYS"
+    }
+    
+    def __init__(self, n_regimes: int = 3, regime_names: Dict[int, str] = None):
         self.n_regimes = n_regimes
+        if regime_names:
+            self.REGIME_NAMES = regime_names
         self.transition_matrix = None
         self.regime_params = None
-
-    def fit(self, returns: np.ndarray, max_iter: int = 100) -> Dict:
+        self.log_likelihood = None
+        self.converged = False
+        self.n_iterations = 0
+        self.regime_durations = None
+        
+    def fit(self, returns: np.ndarray, max_iter: int = 100, tol: float = 1e-6,
+            min_variance: float = 1e-8) -> Dict:
         """
-        Fit regime-switching model using EM algorithm.
+        Fit regime-switching model using Baum-Welch EM algorithm.
+        
+        Parameters
+        ----------
+        returns : np.ndarray
+            Return series
+        max_iter : int
+            Maximum EM iterations
+        tol : float
+            Convergence tolerance for log-likelihood
+        min_variance : float
+            Minimum variance to prevent numerical issues
+            
+        Returns
+        -------
+        Dict
+            Model results including transition matrix, regime params,
+            filtered/smoothed probabilities, and regime statistics
         """
+        returns = np.asarray(returns, dtype=np.float64)
         n = len(returns)
-
-        # Initialize parameters
-        mus = np.array([np.mean(returns), -np.mean(returns)])
-        sigmas = np.array([np.std(returns), np.std(returns) * 2])
-        probs = np.ones(self.n_regimes) / self.n_regimes
-
-        # Transition matrix
-        P = np.ones((self.n_regimes, self.n_regimes)) * 0.5
-        P += np.eye(self.n_regimes) * 0.5
-
-        # EM algorithm
+        
+        if n < 20:
+            return self._fallback_result(n)
+        
+        mu_data = np.mean(returns)
+        sigma_data = np.std(returns)
+        
+        if self.n_regimes == 2:
+            mus = np.array([-abs(mu_data) * 2, abs(mu_data) * 2])
+            sigmas = np.array([sigma_data * 0.8, sigma_data * 1.2])
+        elif self.n_regimes == 3:
+            sorted_returns = np.sort(returns)
+            q1, q2 = np.percentile(sorted_returns, [33, 67])
+            mus = np.array([np.mean(sorted_returns[sorted_returns < q1]),
+                          np.mean(sorted_returns[(sorted_returns >= q1) & (sorted_returns < q2)]),
+                          np.mean(sorted_returns[sorted_returns >= q2])])
+            mus = np.clip(mus, -0.1, 0.1)
+            sigmas = np.array([sigma_data * 0.7, sigma_data, sigma_data * 1.3])
+        else:
+            quantiles = np.percentile(returns, np.linspace(0, 100, self.n_regimes + 1))
+            mus = np.array([np.mean(returns[(returns >= quantiles[i]) & (returns < quantiles[i+1])])
+                          for i in range(self.n_regimes)])
+            mus = np.clip(mus, -0.1, 0.1)
+            base_sigma = sigma_data / np.sqrt(self.n_regimes)
+            sigmas = np.array([base_sigma * (0.5 + 0.5 * i / max(1, self.n_regimes - 1))
+                              for i in range(self.n_regimes)])
+        
+        sigmas = np.clip(sigmas, min_variance, None)
+        
+        if self.n_regimes == 2:
+            P = np.array([[0.9, 0.1],
+                         [0.1, 0.9]])
+        else:
+            P = np.eye(self.n_regimes) * 0.8 + (1 - 0.8) / self.n_regimes
+        
+        pi = np.ones(self.n_regimes) / self.n_regimes
+        
+        self.log_likelihood = -np.inf
+        
         for iteration in range(max_iter):
-            # E-step: Calculate regime probabilities
-            gamma = self._e_step(returns, mus, sigmas, P, probs)
-
-            # M-step: Update parameters
-            mus_new, sigmas_new, P_new, probs_new = self._m_step(
-                returns, gamma, self.n_regimes
-            )
-
-            # Check convergence
-            if np.max(np.abs(mus_new - mus)) < 1e-6:
+            xi, gamma, log_lik = self._baum_welch_pass(returns, mus, sigmas, P, pi)
+            
+            if iteration > 0 and abs(log_lik - self.log_likelihood) < tol:
+                self.converged = True
+                self.n_iterations = iteration + 1
                 break
-
-            mus, sigmas, P, probs = mus_new, sigmas_new, P_new, probs_new
-
+            
+            self.log_likelihood = log_lik
+            
+            mus_new, sigmas_new, P_new, pi_new = self._m_step(
+                returns, gamma, xi, P, self.n_regimes, min_variance
+            )
+            
+            if np.any(np.isnan(mus_new)) or np.any(np.isnan(sigmas_new)):
+                break
+                
+            mus, sigmas, P, pi = mus_new, sigmas_new, P_new, pi_new
+        
+        else:
+            self.n_iterations = max_iter
+        
+        P = np.clip(P, 1e-6, 1 - 1e-6)
+        P = P / P.sum(axis=1, keepdims=True)
+        
         self.transition_matrix = P
-        self.regime_params = {'mus': mus, 'sigmas': sigmas, 'probs': probs}
-
+        self.regime_params = {
+            'mus': mus.tolist(),
+            'sigmas': sigmas.tolist(),
+            'initial_probs': pi.tolist(),
+            'regime_labels': [self.REGIME_NAMES.get(i, f"REGIME_{i}") for i in range(self.n_regimes)]
+        }
+        
+        self.regime_durations = self._calculate_durations(gamma)
+        
+        smoothed_probs = self._forward_backward_smooth(returns, mus, sigmas, P, pi)
+        
         return {
             'transition_matrix': P,
             'regime_params': self.regime_params,
-            'regime_probs': gamma
+            'filtered_probs': gamma,
+            'smoothed_probs': smoothed_probs,
+            'log_likelihood': self.log_likelihood,
+            'converged': self.converged,
+            'n_iterations': self.n_iterations,
+            'regime_durations': self.regime_durations
         }
-
-    def _e_step(self, returns: np.ndarray, mus: np.ndarray,
-                sigmas: np.ndarray, P: np.ndarray,
-                probs: np.ndarray) -> np.ndarray:
-        """E-step: Calculate posterior regime probabilities."""
+    
+    def _fallback_result(self, n: int) -> Dict:
+        """Return fallback results when insufficient data."""
+        gamma = np.random.rand(n, self.n_regimes)
+        gamma = gamma / gamma.sum(axis=1, keepdims=True)
+        
+        return {
+            'transition_matrix': np.eye(self.n_regimes) * 0.8 + 0.2 / self.n_regimes,
+            'regime_params': {
+                'mus': [0.0] * self.n_regimes,
+                'sigmas': [0.02] * self.n_regimes,
+                'initial_probs': [1.0 / self.n_regimes] * self.n_regimes,
+                'regime_labels': [self.REGIME_NAMES.get(i, f"REGIME_{i}") for i in range(self.n_regimes)]
+            },
+            'filtered_probs': gamma,
+            'smoothed_probs': gamma,
+            'log_likelihood': 0.0,
+            'converged': False,
+            'n_iterations': 0,
+            'regime_durations': {'mean': [np.nan] * self.n_regimes, 'current': [0] * self.n_regimes}
+        }
+    
+    def _compute_log_likelihoods(self, returns: np.ndarray, mus: np.ndarray,
+                                  sigmas: np.ndarray) -> np.ndarray:
+        """Compute log-likelihood for each observation in each regime."""
         n = len(returns)
-        gamma = np.zeros((n, self.n_regimes))
-
-        for t in range(n):
-            likelihoods = np.array([
-                stats.norm.pdf(returns[t], mus[k], sigmas[k])
-                for k in range(self.n_regimes)
-            ])
-            gamma[t] = probs * likelihoods
-            gamma[t] /= gamma[t].sum()
-
-        return gamma
-
-    def _m_step(self, returns: np.ndarray, gamma: np.ndarray,
-                n_regimes: int) -> Tuple:
-        """M-step: Update model parameters."""
+        log_liks = np.zeros((n, self.n_regimes))
+        
+        for k in range(self.n_regimes):
+            if sigmas[k] > 1e-10:
+                log_liks[:, k] = stats.norm.logpdf(returns, mus[k], sigmas[k])
+            else:
+                log_liks[:, k] = -np.inf
+                
+        return log_liks
+    
+    def _baum_welch_pass(self, returns: np.ndarray, mus: np.ndarray,
+                        sigmas: np.ndarray, P: np.ndarray, 
+                        pi: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
+        """
+        Single Baum-Welch pass (E-step).
+        
+        Returns:
+        - xi: Joint probability of being in regime i at t and j at t+1
+        - gamma: Filtered probability of being in each regime at each t
+        - log_lik: Total log-likelihood
+        """
         n = len(returns)
-
-        # Update means
-        mus = np.array([
-            np.sum(gamma[:, k] * returns) / gamma[:, k].sum()
-            for k in range(n_regimes)
-        ])
-
-        # Update volatilities
-        sigmas = np.array([
-            np.sqrt(np.sum(gamma[:, k] * (returns - mus[k])**2) / gamma[:, k].sum())
-            for k in range(n_regimes)
-        ])
-
-        # Update transition probabilities
-        P = np.ones((n_regimes, n_regimes)) / n_regimes
-
-        # Update regime probabilities
-        probs = gamma.mean(axis=0)
-
-        return mus, sigmas, P, probs
-
-    def predict_regime(self, returns: np.ndarray) -> int:
-        """Predict current market regime."""
+        log_liks = self._compute_log_likelihoods(returns, mus, sigmas)
+        
+        log_P = np.log(np.clip(P, 1e-10, 1.0))
+        log_pi = np.log(np.clip(pi, 1e-10, 1.0))
+        
+        log_alpha = np.zeros((n, self.n_regimes))
+        log_gamma = np.zeros((n, self.n_regimes))
+        
+        log_alpha[0] = log_pi + log_liks[0]
+        for t in range(1, n):
+            log_alpha_sum = np.log(np.sum(np.exp(log_alpha[t-1] + log_P.T), axis=1) + 1e-10)
+            log_alpha[t] = log_liks[t] + log_alpha_sum
+        
+        log_likelihood = np.log(np.sum(np.exp(log_alpha[-1])) + 1e-10)
+        
+        log_beta = np.zeros((n, self.n_regimes))
+        log_beta[-1] = 0.0
+        for t in range(n - 2, -1, -1):
+            log_beta_sum = np.log(np.sum(np.exp(log_P + log_liks[t+1] + log_beta[t+1]), axis=1) + 1e-10)
+            log_beta[t] = log_beta_sum
+        
+        alpha = np.exp(log_alpha - log_likelihood)
+        beta = np.exp(log_beta - log_likelihood)
+        
+        log_gamma = log_alpha + log_beta - log_likelihood
+        gamma = np.exp(log_gamma)
+        gamma = np.clip(gamma, 0, 1)
+        
+        xi = np.zeros((n - 1, self.n_regimes, self.n_regimes))
+        for t in range(n - 1):
+            denom = np.sum(np.exp(log_alpha[t][:, None] + log_P + log_liks[t+1] + log_beta[t+1][None, :]))
+            if denom > 1e-10:
+                xi[t] = np.exp(log_alpha[t][:, None] + log_P + log_liks[t+1] + log_beta[t+1][None, :] - np.log(denom))
+            else:
+                xi[t] = 1.0 / self.n_regimes
+                
+        return xi, gamma, log_likelihood
+    
+    def _forward_backward_smooth(self, returns: np.ndarray, mus: np.ndarray,
+                                  sigmas: np.ndarray, P: np.ndarray,
+                                  pi: np.ndarray) -> np.ndarray:
+        """
+        Compute smoothed (optimal) regime probabilities using forward-backward algorithm.
+        """
+        n = len(returns)
+        log_liks = self._compute_log_likelihoods(returns, mus, sigmas)
+        
+        log_alpha = np.zeros((n, self.n_regimes))
+        log_alpha[0] = np.log(np.clip(pi, 1e-10, 1.0)) + log_liks[0]
+        
+        for t in range(1, n):
+            log_alpha_sum = np.log(np.sum(np.exp(log_alpha[t-1][:, None] + np.log(np.clip(P, 1e-10, 1.0))), axis=1) + 1e-10)
+            log_alpha[t] = log_liks[t] + log_alpha_sum
+        
+        total_log_lik = np.log(np.sum(np.exp(log_alpha[-1])) + 1e-10)
+        
+        log_beta = np.zeros((n, self.n_regimes))
+        for t in range(n - 2, -1, -1):
+            log_beta[t] = np.log(np.sum(np.exp(np.log(np.clip(P, 1e-10, 1.0)) + log_liks[t+1] + log_beta[t+1]), axis=1) + 1e-10)
+        
+        log_gamma = log_alpha + log_beta - total_log_lik
+        gamma = np.exp(log_gamma)
+        
+        return np.clip(gamma, 0, 1)
+    
+    def _m_step(self, returns: np.ndarray, gamma: np.ndarray, xi: np.ndarray,
+                P: np.ndarray, n_regimes: int, min_variance: float) -> Tuple:
+        """M-step: Update parameters using sufficient statistics."""
+        n = len(returns)
+        
+        gamma_sum = gamma.sum(axis=0) + 1e-10
+        
+        mus = np.zeros(n_regimes)
+        for k in range(n_regimes):
+            mus[k] = np.sum(gamma[:, k] * returns) / gamma_sum[k]
+        
+        sigmas = np.zeros(n_regimes)
+        for k in range(n_regimes):
+            sigmas[k] = np.sqrt(np.sum(gamma[:, k] * (returns - mus[k])**2) / gamma_sum[k] + min_variance)
+        
+        xi_sum = xi.sum(axis=0)
+        P_new = np.zeros((n_regimes, n_regimes))
+        for i in range(n_regimes):
+            for j in range(n_regimes):
+                P_new[i, j] = xi_sum[i, j] / (xi_sum[i, :].sum() + 1e-10)
+        P_new = np.clip(P_new, 1e-6, 1 - 1e-6)
+        
+        pi = gamma[0] / (gamma[0].sum() + 1e-10)
+        
+        return mus, sigmas, P_new, pi
+    
+    def _calculate_durations(self, gamma: np.ndarray) -> Dict:
+        """Calculate expected regime durations from transition matrix."""
+        if self.transition_matrix is None:
+            return {'mean': [np.nan] * self.n_regimes, 'current': [0] * self.n_regimes}
+        
+        durations = []
+        for i in range(self.n_regimes):
+            if self.transition_matrix[i, i] < 1 - 1e-6:
+                duration = 1.0 / (1.0 - self.transition_matrix[i, i])
+            else:
+                duration = np.nan
+            durations.append(duration)
+        
+        state_sequence = np.argmax(gamma, axis=1)
+        
+        current_durations = []
+        current_state = state_sequence[-1]
+        duration = 1
+        for t in range(len(state_sequence) - 2, -1, -1):
+            if state_sequence[t] == current_state:
+                duration += 1
+            else:
+                break
+        current_durations = [0] * self.n_regimes
+        current_durations[current_state] = duration
+        
+        return {
+            'mean': durations,
+            'current': current_durations,
+            'transition_matrix': self.transition_matrix.tolist()
+        }
+    
+    def viterbi(self, returns: np.ndarray) -> np.ndarray:
+        """
+        Find most likely sequence of regimes using Viterbi algorithm.
+        
+        Parameters
+        ----------
+        returns : np.ndarray
+            Return series
+            
+        Returns
+        -------
+        np.ndarray
+            Most likely regime sequence
+        """
         if self.regime_params is None:
-            return 0
-
-        mus = self.regime_params['mus']
-        sigmas = self.regime_params['sigmas']
-
-        current_return = returns[-1]
-        likelihoods = [
-            stats.norm.pdf(current_return, mus[k], sigmas[k])
-            for k in range(self.n_regimes)
-        ]
-
-        return int(np.argmax(likelihoods))
+            return np.zeros(len(returns), dtype=int)
+            
+        n = len(returns)
+        mus = np.array(self.regime_params['mus'])
+        sigmas = np.array(self.regime_params['sigmas'])
+        P = self.transition_matrix
+        pi = np.array(self.regime_params.get('initial_probs', [1.0/self.n_regimes]*self.n_regimes))
+        
+        log_liks = self._compute_log_likelihoods(returns, mus, sigmas)
+        log_P = np.log(np.clip(P, 1e-10, 1.0))
+        log_pi = np.log(np.clip(pi, 1e-10, 1.0))
+        
+        delta = np.zeros((n, self.n_regimes))
+        psi = np.zeros((n, self.n_regimes), dtype=int)
+        
+        delta[0] = log_pi + log_liks[0]
+        
+        for t in range(1, n):
+            for j in range(self.n_regimes):
+                trans_probs = delta[t-1] + log_P[:, j]
+                psi[t, j] = np.argmax(trans_probs)
+                delta[t, j] = np.max(trans_probs) + log_liks[t, j]
+        
+        states = np.zeros(n, dtype=int)
+        states[-1] = np.argmax(delta[-1])
+        
+        for t in range(n - 2, -1, -1):
+            states[t] = psi[t + 1, states[t + 1]]
+            
+        return states
+    
+    def predict_regime(self, returns: np.ndarray) -> Tuple[int, np.ndarray]:
+        """
+        Predict current regime with confidence.
+        
+        Returns
+        -------
+        Tuple[int, np.ndarray]
+            Most likely regime index and probability distribution
+        """
+        returns = np.asarray(returns, dtype=np.float64)
+        
+        if self.regime_params is None:
+            probs = np.ones(self.n_regimes) / self.n_regimes
+            return 0, probs
+            
+        n = len(returns)
+        mus = np.array(self.regime_params['mus'])
+        sigmas = np.array(self.regime_params['sigmas'])
+        P = self.transition_matrix
+        pi = np.array(self.regime_params.get('initial_probs', [1.0/self.n_regimes]*self.n_regimes))
+        
+        log_liks = self._compute_log_likelihoods(returns, mus, sigmas)
+        log_P = np.log(np.clip(P, 1e-10, 1.0))
+        log_pi = np.log(np.clip(pi, 1e-10, 1.0))
+        
+        log_alpha = np.zeros(self.n_regimes)
+        log_alpha = log_pi + log_liks[0]
+        
+        for t in range(1, n):
+            log_alpha_sum = np.log(np.sum(np.exp(log_alpha + log_P.T), axis=1) + 1e-10)
+            log_alpha = log_liks[t] + log_alpha_sum
+        
+        probs = np.exp(log_alpha - np.max(log_alpha))
+        probs = probs / probs.sum()
+        
+        return int(np.argmax(probs)), probs
+    
+    def predict_next_regime(self) -> Tuple[int, float]:
+        """
+        Predict next regime and its probability.
+        
+        Returns
+        -------
+        Tuple[int, float]
+            Most likely next regime and its probability
+        """
+        if self.transition_matrix is None:
+            return 0, 1.0 / self.n_regimes
+            
+        current_state = self.n_regimes - 1
+        next_probs = self.transition_matrix[current_state]
+        
+        return int(np.argmax(next_probs)), float(np.max(next_probs))
+    
+    def get_regime_confidence(self, returns: np.ndarray) -> float:
+        """
+        Calculate confidence score for current regime classification.
+        
+        Returns
+        -------
+        float
+            Confidence score between 0 and 1
+        """
+        _, probs = self.predict_regime(returns)
+        confidence = 1.0 - np.sum(probs * np.log(np.clip(probs, 1e-10, 1.0))) / np.log(1.0 / self.n_regimes)
+        return float(np.clip(confidence, 0, 1))
+    
+    def regime_analysis_summary(self, returns: np.ndarray) -> Dict:
+        """
+        Comprehensive regime analysis summary.
+        
+        Returns
+        -------
+        Dict
+            Complete regime analysis including current regime, trend, volatility regime
+        """
+        returns = np.asarray(returns, dtype=np.float64)
+        
+        if len(returns) < 20:
+            return self._fallback_result(len(returns))
+        
+        results = self.fit(returns)
+        
+        current_regime, regime_probs = self.predict_regime(returns)
+        viterbi_states = self.viterbi(returns)
+        
+        regime_returns = {}
+        regime_vol = {}
+        for i in range(self.n_regimes):
+            mask = viterbi_states == i
+            if mask.sum() > 0:
+                regime_returns[i] = float(np.mean(returns[mask]))
+                regime_vol[i] = float(np.std(returns[mask]))
+            else:
+                regime_returns[i] = 0.0
+                regime_vol[i] = 0.0
+        
+        avg_duration = results['regime_durations']['mean']
+        
+        sorted_regimes = sorted(range(self.n_regimes), 
+                              key=lambda i: regime_returns[i], 
+                              reverse=True)
+        
+        trend_regime = sorted_regimes[0] if regime_returns[sorted_regimes[0]] > 0 else sorted_regimes[-1]
+        vol_regime = sorted(range(self.n_regimes), key=lambda i: regime_vol[i], reverse=True)[0]
+        
+        is_trending = abs(regime_returns[trend_regime]) > 0.001
+        is_high_vol = regime_vol[vol_regime] > np.mean(list(regime_vol.values()))
+        
+        if is_trending:
+            if regime_returns[trend_regime] > 0:
+                market_regime = "TRENDING_UP"
+            else:
+                market_regime = "TRENDING_DOWN"
+        else:
+            market_regime = "SIDEWAYS"
+        
+        if is_high_vol:
+            market_regime += "_HIGH_VOL"
+        else:
+            market_regime += "_LOW_VOL"
+        
+        return {
+            'current_regime': current_regime,
+            'current_regime_name': self.REGIME_NAMES.get(current_regime, f"REGIME_{current_regime}"),
+            'regime_probs': regime_probs.tolist(),
+            'market_regime': market_regime,
+            'regime_returns': regime_returns,
+            'regime_volatility': regime_vol,
+            'avg_duration': avg_duration,
+            'transition_matrix': self.transition_matrix.tolist() if self.transition_matrix is not None else None,
+            'confidence': self.get_regime_confidence(returns),
+            'converged': self.converged,
+            'n_iterations': self.n_iterations,
+            'log_likelihood': self.log_likelihood,
+            'viterbi_states': viterbi_states.tolist()
+        }
 
 
 # ============================================================================
@@ -716,3 +1105,195 @@ def calculate_calmar_ratio(returns: np.ndarray,
         return 0.0
 
     return annual_return / max_dd
+
+
+# ============================================================================
+# Unified Regime Detection
+# ============================================================================
+
+def detect_regime(returns: np.ndarray, n_regimes: int = 3) -> Dict[str, Any]:
+    """
+    Unified regime detection function for use across all modules.
+    
+    Provides a consistent interface for market regime detection
+    that can be used by both the dashboard and trading bot.
+    
+    Parameters
+    ----------
+    returns : np.ndarray
+        Return series
+    n_regimes : int
+        Number of regimes to detect (2-5)
+        
+    Returns
+    -------
+    Dict
+        Comprehensive regime analysis including:
+        - current_regime: Current regime index
+        - regime_name: Human-readable regime name
+        - regime_probs: Probability distribution over regimes
+        - market_regime: Market state description
+        - trend: Trend strength
+        - volatility: Annualized volatility
+        - hurst: Hurst exponent estimate
+        - confidence: Classification confidence
+        - regime_returns: Expected return per regime
+        - regime_volatility: Expected volatility per regime
+        - avg_duration: Expected regime durations
+        - transition_matrix: Markov transition probabilities
+        - viterbi_states: Optimal state sequence
+    """
+    returns = np.asarray(returns, dtype=np.float64)
+    n = len(returns)
+    
+    if n < 20:
+        return {
+            'current_regime': 1,
+            'regime_name': 'SIDEWAYS',
+            'regime_probs': [1.0 / n_regimes] * n_regimes,
+            'market_regime': 'SIDEWAYS',
+            'trend': 0.0,
+            'volatility': 0.20,
+            'hurst': 0.5,
+            'confidence': 0.0,
+            'regime_returns': [0.0] * n_regimes,
+            'regime_volatility': [0.20] * n_regimes,
+            'avg_duration': [np.nan] * n_regimes,
+            'transition_matrix': np.eye(n_regimes).tolist(),
+            'viterbi_states': [1] * n,
+            'n_observations': n,
+            'converged': False,
+            'method': 'insufficient_data'
+        }
+    
+    n_regimes = max(2, min(5, n_regimes))
+    
+    model = RegimeSwitchingModel(n_regimes=n_regimes)
+    results = model.fit(returns, max_iter=100, tol=1e-6)
+    
+    current_regime, regime_probs = model.predict_regime(returns)
+    regime_params = results.get('regime_params', {})
+    regime_labels = regime_params.get('regime_labels', [f'REGIME_{i}' for i in range(n_regimes)])
+    regime_name = regime_labels[current_regime] if current_regime < len(regime_labels) else f'REGIME_{current_regime}'
+    
+    market_analysis = model.regime_analysis_summary(returns)
+    
+    hurst_estimate = estimate_hurst_from_regimes(
+        returns, 
+        results.get('viterbi_states', np.zeros(n, dtype=int)),
+        n_regimes
+    )
+    
+    trend = float(np.sum(returns[-min(50, n):]) / min(50, n))
+    volatility = float(np.std(returns) * np.sqrt(252))
+    
+    return {
+        'current_regime': current_regime,
+        'regime_name': regime_name,
+        'regime_probs': regime_probs.tolist(),
+        'market_regime': market_analysis.get('market_regime', 'SIDEWAYS'),
+        'trend': trend,
+        'volatility': volatility,
+        'hurst': hurst_estimate,
+        'confidence': float(model.get_regime_confidence(returns)),
+        'regime_returns': [market_analysis['regime_returns'].get(i, 0.0) for i in range(n_regimes)],
+        'regime_volatility': [market_analysis['regime_volatility'].get(i, 0.0) for i in range(n_regimes)],
+        'avg_duration': results.get('regime_durations', {}).get('mean', [np.nan] * n_regimes),
+        'transition_matrix': transition_matrix_to_dict(results.get('transition_matrix', np.eye(n_regimes))),
+        'viterbi_states': results.get('viterbi_states', [0] * n),
+        'n_observations': n,
+        'converged': results.get('converged', False),
+        'method': 'hmm_baum_welch'
+    }
+
+
+def estimate_hurst_from_regimes(returns: np.ndarray, viterbi_states: np.ndarray, n_regimes: int) -> float:
+    """Estimate Hurst exponent from regime switching pattern."""
+    if len(returns) < 20:
+        return 0.5
+    
+    n = len(returns)
+    
+    regime_autocorr = []
+    for i in range(n_regimes):
+        mask = viterbi_states == i
+        if np.sum(mask) > 10:
+            regime_returns = returns[mask]
+            if len(regime_returns) > 1:
+                autocorr = np.corrcoef(regime_returns[:-1], regime_returns[1:])[0, 1]
+                if not np.isnan(autocorr):
+                    regime_autocorr.append(autocorr)
+    
+    if regime_autocorr:
+        avg_autocorr = np.mean(regime_autocorr)
+        H = 0.5 + 0.5 * avg_autocorr
+    else:
+        H = 0.5
+    
+    return float(np.clip(H, 0.1, 0.9))
+
+
+def transition_matrix_to_dict(P: np.ndarray) -> Dict[str, Dict[str, float]]:
+    """Convert transition matrix to dictionary format."""
+    n = len(P)
+    result = {}
+    for i in range(n):
+        result[f'from_{i}'] = {f'to_{j}': float(P[i, j]) for j in range(n)}
+    return result
+
+
+def get_regime_recommendation(regime_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Get trading strategy recommendations based on detected regime.
+    
+    Parameters
+    ----------
+    regime_data : Dict
+        Output from detect_regime()
+        
+    Returns
+    -------
+    Dict
+        Strategy recommendations including:
+        - preferred_strategy: 'momentum', 'mean_reversion', or 'neutral'
+        - position_size_modifier: Multiplier for position size (0-1)
+        - stop_loss_widen: Whether to widen stops
+        - timeframe_bias: 'shorter' or 'longer'
+        - confidence_threshold: Minimum confidence for trades
+        - description: Human-readable explanation
+    """
+    market_regime = regime_data.get('market_regime', 'SIDEWAYS')
+    confidence = regime_data.get('confidence', 0.5)
+    volatility = regime_data.get('volatility', 0.20)
+    
+    recommendations = {
+        'preferred_strategy': 'neutral',
+        'position_size_modifier': 1.0,
+        'stop_loss_widen': False,
+        'timeframe_bias': 'neutral',
+        'confidence_threshold': 0.6,
+        'description': 'Standard trading conditions'
+    }
+    
+    if 'HIGH_VOL' in market_regime:
+        recommendations['position_size_modifier'] = 0.7
+        recommendations['stop_loss_widen'] = True
+        recommendations['description'] = 'High volatility - reduce exposure, widen stops'
+    
+    if 'TRENDING' in market_regime or 'BULL' in market_regime or 'BEAR' in market_regime:
+        recommendations['preferred_strategy'] = 'momentum'
+        recommendations['timeframe_bias'] = 'longer'
+        recommendations['description'] = f'Trending market ({market_regime}) - momentum strategies'
+    
+    if 'SIDEWAYS' in market_regime or 'LOW_VOL' in market_regime:
+        if volatility < 0.15:
+            recommendations['preferred_strategy'] = 'mean_reversion'
+            recommendations['timeframe_bias'] = 'shorter'
+            recommendations['description'] = 'Low volatility sideways - mean reversion strategies'
+    
+    if confidence < 0.5:
+        recommendations['position_size_modifier'] *= 0.8
+        recommendations['confidence_threshold'] = 0.7
+        recommendations['description'] += ' (low confidence - reduce risk)'
+    
+    return recommendations

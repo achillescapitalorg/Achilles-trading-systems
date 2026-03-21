@@ -1,187 +1,285 @@
 # Trading Terminal - Project Context
 
 ## Overview
-A comprehensive trading terminal application with a Flask backend, React/TypeScript frontend, and MT5/Exness trading integration.
+
+A professional algorithmic trading dashboard built with **Plotly Dash** featuring real-time market data, quantitative finance models, and a standalone trading bot for Gold (XAUUSD), Bitcoin (BTCUSD), and other instruments.
+
+**Note:** This project uses a Dash-based frontend. A React/TypeScript frontend and Flask backend were originally planned but not implemented.
 
 ## Architecture
 
-### Backend (`/backend`)
-- **Framework**: Flask with async support
-- **Database**: SQLite (`trading_data.db`)
-- **Key Patterns**: Singleton, Factory, Strategy, Pipeline patterns
+### Main Application (`/frontend`)
+- **Framework**: Plotly Dash (standalone web app)
+- **Backend**: None (Dash handles both frontend and API)
+- **Styling**: Dash Bootstrap Components (Cyborg theme) + Custom CSS
+- **Charts**: Plotly (Candlestick, 3D Surface)
+- **State**: Python in-memory state + Dash callbacks
 
-### Frontend (`/frontend`)
-- **Framework**: React with TypeScript
-- **Build Tool**: Vite
-- **Styling**: Tailwind CSS + shadcn/ui components
-- **Charts**: Recharts
-- **State**: React Query for server state
+### Trading Bot (`/trading_bot/`)
+- **Standalone**: Can run independently of the Dash UI
+- **Broker Integration**: Exness MT5 (paper trading by default)
+- **Data**: Yahoo Finance for market data
+
+### Services (`/services/`)
+- **Data Layer**: Yahoo Finance API integration
+- **ML/Quant**: Black-Scholes, Heston, SABR, Q-Learning agent
+- **News**: Multi-source news scraping
+
+## Project Structure
+
+```
+frontend/
+├── app.py                      # Main Dash application (3068 lines)
+├── volatility_models.py         # GARCH, EGARCH, Heston models (1051 lines)
+├── requirements.txt            # Python dependencies
+├── assets/
+│   ├── chart_enhancements.js   # Custom chart JS
+│   └── style.css               # Pure black theme CSS
+├── services/
+│   ├── __init__.py
+│   ├── market_data.py          # Yahoo Finance data fetching
+│   ├── news_scraper.py         # Multi-source news (1452 lines)
+│   ├── advanced_models.py      # Black-Scholes, SABR, VaR (718 lines)
+│   └── rl_agent.py             # Q-Learning trading agent (592 lines)
+├── trading_bot/
+│   ├── __init__.py
+│   ├── trading_bot.py          # Main multi-signal bot (686 lines)
+│   ├── exness_bridge.py        # MT5/Exness execution (1009 lines)
+│   ├── technical_indicators.py # 50+ indicators (553 lines)
+│   ├── quantitative_signals.py # Mean reversion, momentum (599 lines)
+│   ├── risk_management.py      # Kelly, position sizing (627 lines)
+│   ├── sentiment_analysis.py   # News sentiment (573 lines)
+│   ├── backtester.py          # Backtesting engine (523 lines)
+│   ├── run_bot.py             # Bot runner script
+│   └── config.json             # Bot configuration
+├── layouts/                    # (Empty - reserved for future layouts)
+├── config/                    # (Empty - reserved for configuration)
+└── plan/                      # (Empty - project planning files)
+```
 
 ## Key Dependencies
 
-### Backend
-- `flask`, `flask-cors`, `flask-socketio`
-- `sqlalchemy` (ORM)
-- `python-dotenv`
-- `yfinance` (stock data)
-- `MetaTrader5` (MT5 trading)
-- `requests`, `beautifulsoup4` (web scraping)
-- `apscheduler` (scheduling)
-- `ta`, `pandas`, `numpy` (technical analysis)
+### Core
+- `dash>=2.14.0` - Web framework
+- `dash-bootstrap-components>=1.5.0` - UI components
+- `dash-ag-grid>=2.21.0` - Advanced data grid
+- `plotly>=5.18.0` - Visualization
 
-### Frontend
-- `react`, `react-dom`, `react-router-dom`
-- `@tanstack/react-query`
-- `recharts` (visualization)
-- `framer-motion` (animations)
-- `lucide-react` (icons)
-- `clsx`, `tailwind-merge` (utilities)
-- `zustand` (client state)
-
-## Core Components
-
-### Backend Modules
-
-#### `app.py` (3068 lines)
-Main Flask application with WebSocket support (`flask-socketio`). Handles:
-- Trading signals and portfolio management
-- Real-time market data streaming
-- WebSocket events for live updates
-- API endpoints for all trading operations
-
-#### `ExnessBroker` (`/backend/services/exness_service.py`)
-- Implements `BrokerInterface`
-- Manages MT5 connection via Exness
-- Methods: `connect()`, `get_account_info()`, `get_positions()`, `get_pending_orders()`, `open_position()`, `close_position()`, `modify_position()`, `get_symbols()`, `get_candles()`
-
-#### `DataManager` (`/backend/services/data_manager.py`)
-- Singleton pattern for market data
-- Methods: `get_candles()`, `get_ticker()`, `get_forex_symbols()`
-- Data sources: Yahoo Finance, Exness MT5
-
-#### `VolatilityModels` (`/backend/services/volatility_models.py`)
-Volatility calculations and regime detection:
-- `VolatilityCalculator`: ATR, Bollinger Bands, Standard Deviation
-- `VolatilityRegimeDetector`: Identifies low/medium/high volatility regimes
-- `VolatilitySignalGenerator`: Generates volatility-based trading signals
-
-#### `NewsService` (`/backend/services/news_service.py`)
-- Async web scraping for news
-- Uses `httpx` for async HTTP requests
-- Scrapes forexfactory.com and news sources
-
-#### `TradingBot` (`/backend/services/trading_bot.py`)
-- Multi-timeframe analysis
-- Implements entry/exit strategies
-- Risk management rules
-
-### Frontend Components
-
-#### Dashboard (`/src/components/dashboard/`)
-- `Dashboard.tsx` - Main trading dashboard
-- `MarketOverview.tsx` - Market summary and indices
-- `PortfolioSummary.tsx` - Account and position overview
-- `SignalTable.tsx` - Trading signals display
-
-#### Charts (`/src/components/charts/`)
-- `MainChart.tsx` - Primary price chart with indicators
-- `IndicatorPanel.tsx` - Technical indicator configuration
-- `ChartToolbar.tsx` - Timeframe and chart type controls
-
-#### Trading (`/src/components/trading/`)
-- `TradePanel.tsx` - Trade execution interface
-- `OrderBook.tsx` - Market depth display
-- `PositionsPanel.tsx` - Open positions management
-- `HistoryPanel.tsx` - Trade history
-- `SignalGenerator.tsx` - Trading signal generation UI
-
-#### Broker Integration (`/src/components/broker/`)
-- `BrokerConnection.tsx` - MT5/Exness connection status
-- `BrokerSettings.tsx` - Broker configuration
-
-## API Endpoints
+### Data Analysis
+- `pandas>=2.0.0` - Data manipulation
+- `numpy>=1.24.0` - Numerical computing
+- `scipy>=1.7.0` - Scientific computing
+- `scikit-learn>=1.3.0` - Machine learning
 
 ### Market Data
-- `GET /api/market/candles/<symbol>` - OHLCV data
-- `GET /api/market/ticker/<symbol>` - Current price
-- `GET /api/market/forex-symbols` - Available forex pairs
+- `yfinance>=0.2.31` - Yahoo Finance API
+- `ccxt>=4.0.0` - Crypto exchange API
 
-### Trading
-- `GET /api/trading/positions` - Open positions
-- `POST /api/trading/open-position` - Open new position
-- `POST /api/trading/close-position` - Close position
-- `GET /api/trading/history` - Trade history
+### HTTP & Scraping
+- `requests>=2.31.0` - HTTP requests
+- `httpx>=0.25.0` - Async HTTP
+- `aiohttp>=3.9.0` - Async networking
+- `beautifulsoup4>=4.12.0` - HTML parsing
+- `lxml>=4.9.0` - XML/HTML parser
 
-### Signals
-- `GET /api/signals` - All trading signals
-- `POST /api/signals/generate` - Generate new signal
-- `POST /api/signals/execute/<id>` - Execute signal
+### Machine Learning
+- `torch>=2.1.0` - PyTorch (RL agent)
+- `gymnasium>=0.29.0` - RL environments
 
-### Broker
-- `GET /api/broker/info` - Account information
-- `GET /api/broker/connection-status` - MT5 connection status
+## Core Modules
 
-### WebSocket Events
-- `market_update` - Real-time price updates
-- `signal_update` - New signals generated
-- `position_update` - Position changes
-- `volatility_update` - Volatility regime changes
+### `app.py` (3068 lines)
+Main Dash application handling:
+- Real-time price charts with candlesticks
+- Volatility surface (3D implied volatility)
+- Market metrics (Hurst exponent, skewness, kurtosis)
+- Technical indicator signals (RSI, MACD, Bollinger, Supertrend)
+- Order form with stop loss/take profit
+- News feed with sentiment analysis
+- Auto-refresh (5-second intervals)
+
+### `volatility_models.py` (1051 lines)
+Professional volatility models:
+- **GARCH(p, q)** - Generalized ARCH
+- **EGARCH** - Exponential GARCH
+- **GJR-GARCH** - Asymmetric GARCH
+- **Heston** - Stochastic Volatility Model
+- **Realized Volatility** - High-frequency estimators
+- **Parkinson** - Range-based estimator
+- **Garman-Klass** - OHLC estimator
+- **Yang-Zhang** - Drift-independent estimator
+
+### Services
+
+#### `market_data.py`
+- Yahoo Finance symbol mapping
+- Real-time price fetching
+- Historical OHLCV data
+- Fallback mock data generation
+
+#### `news_scraper.py` (1452 lines)
+Multi-source financial news:
+- Bloomberg, CNBC, Reuters
+- FXStreet, Forex Factory, DailyFX
+- Investing.com, Yahoo Finance
+- CoinDesk, Crypto Panic
+- MarketWatch, Kitco
+
+#### `advanced_models.py` (718 lines)
+Quantitative finance models:
+- **Black-Scholes** - Option pricing + Greeks
+- **Heston Model** - Stochastic volatility
+- **SABR Model** - Volatility smile
+- **Regime Switching** - Market regime detection
+- **VaR/CVaR** - Risk metrics
+- **Sharpe/Sortino/Max Drawdown** - Performance metrics
+
+#### `rl_agent.py` (592 lines)
+Reinforcement learning trading:
+- **QLearningAgent** - Q-table based learning
+- **TradingEnvironment** - Gym-like environment
+- **Deep RL** - PyTorch neural network agent
+- Bellman equation for value iteration
+
+### Trading Bot (`/trading_bot/`)
+
+#### `trading_bot.py` (686 lines)
+Multi-signal trading bot architecture:
+1. Data Collection - Fetch OHLCV from MT5
+2. Technical Analysis - Calculate indicators
+3. Quantitative Signals - Mean reversion, momentum
+4. Sentiment Analysis - News sentiment
+5. Signal Aggregation - Weighted combination
+6. Risk Management - Position sizing, stops
+7. Execution - Place orders via MT5
+
+#### `exness_bridge.py` (1009 lines)
+MT5/Exness trading bridge:
+- **ExnessMT5Bridge** - Real MT5 connection
+- **PaperTradingBridge** - Simulated trading
+- Market and pending orders
+- Position management
+- Real-time price feeds
+
+#### `technical_indicators.py` (553 lines)
+50+ technical indicators:
+- **Trend**: EMA, SMA, WMA, Hull MA, VWAP, Ichimoku
+- **Momentum**: RSI, MACD, Stochastic, CCI, Williams %R
+- **Volatility**: Bollinger Bands, ATR, Keltner Channel
+- **Volume**: OBV, Volume Profile, Money Flow
+- **Custom**: Supertrend, Pivot Points, Fibonacci
+
+#### `quantitative_signals.py` (599 lines)
+Institutional-grade signals:
+- **Mean Reversion** - Bollinger, RSI, Statistical
+- **Momentum** - Time-series, Cross-sectional
+- **Volatility Breakout** - ATR-based
+- **Statistical Arbitrage** - Pairs trading
+- **Market Regime** - Regime detection
+
+#### `risk_management.py` (627 lines)
+Professional risk controls:
+- **Position Sizing**: Fixed %, Kelly Criterion, Volatility Targeting
+- **Stop Loss**: Fixed, ATR-based, Support/Resistance
+- **Portfolio Limits**: Max exposure, correlation
+- **Drawdown Controls**: Trailing stops, circuit breakers
+
+#### `sentiment_analysis.py` (573 lines)
+Multi-source sentiment:
+- Social media (Twitter, Reddit)
+- Financial news APIs
+- Crypto-specific sources
+- Gold/precious metals reports
+- Economic calendar events
+
+#### `backtester.py` (523 lines)
+Backtesting framework:
+- Event-driven backtesting
+- Transaction costs and slippage
+- Walk-forward analysis
+- Monte Carlo simulation
+- Performance metrics (Sharpe, Sortino, Calmar)
+
+## Trading Instruments
+
+| Symbol | Name | Type | Yahoo Finance |
+|--------|------|------|---------------|
+| XAUUSD | Gold | Metal | GC=F |
+| BTCUSD | Bitcoin | Crypto | BTC-USD |
+| ETHUSD | Ethereum | Crypto | ETH-USD |
+| EURUSD | Euro/USD | Forex | EURUSD=X |
+| GBPUSD | GBP/USD | Forex | GBPUSD=X |
+| USDJPY | USD/JPY | Forex | USDJPY=X |
+| SPX500 | S&P 500 | Index | ^GSPC |
+| NAS100 | Nasdaq 100 | Index | ^NDX |
+
+## UI Theme
+
+**Pure Black Theme:**
+- Background: `#000000` (Pure Black)
+- Surface: `#0a0a0a` (Near Black)
+- Surface Light: `#121212`
+- Primary: `#1a1a1a`
+- Accent/Success: `#00ff88` (Neon Green)
+- Danger: `#ff4757` (Red)
+- Warning: `#ffa502` (Orange)
+- Info: `#00d4ff` (Cyan)
+- Text: `#ffffff`
+- Text Secondary: `#888888`
 
 ## Configuration
 
-### Environment Variables (`.env`)
-- `MT5_PATH` - MetaTrader 5 terminal path
-- `EXNESS_ACCOUNT` - Exness account ID
-- `FLASK_SECRET_KEY` - Flask secret key
-- `DATABASE_URL` - SQLite database path
+### Environment Variables
+- `API_URL` - Backend API URL (default: http://localhost:8000)
 
-### Chart Configuration
-- Default indicators: SMA, EMA, RSI, MACD, Bollinger Bands
-- Timeframes: M1, M5, M15, H1, H4, D1
+### Chart Timeframes
+- M5, M15, H1, H4, D1
 
-## Technical Analysis Features
+### Bot Configuration (`config.json`)
+- Assets to trade
+- Risk parameters
+- Signal thresholds
+- MT5 credentials (for live trading)
 
-### Indicators
-- SMA (Simple Moving Average)
-- EMA (Exponential Moving Average)
-- RSI (Relative Strength Index)
-- MACD (Moving Average Convergence Divergence)
-- Bollinger Bands
-- ATR (Average True Range)
-- VWAP
-- Stochastic Oscillator
-- ADX (Average Directional Index)
-- Fibonacci Retracements
+## Data Sources
 
-### Volatility Analysis
-- Real-time ATR calculation
-- Bollinger Band width analysis
-- Standard deviation monitoring
-- Regime detection (low/medium/high volatility)
+### Primary
+- **Yahoo Finance** - Real-time prices and historical data
+
+### Fallback
+- **Synthetic data generation** - If Yahoo Finance unavailable
 
 ## Development
 
-### Running the Application
+### Running the Dashboard
 ```bash
-# Backend
-cd backend
+cd frontend
+source venv/bin/activate  # Linux/Mac
+pip install -r requirements.txt
 python app.py
-
-# Frontend
-npm run dev
 ```
+**Dashboard:** http://localhost:8050
 
-### Database Schema
-- `signals` table - Trading signals
-- `portfolio` table - Portfolio holdings
-- `trades` table - Trade history
-- `positions` table - Current positions
-- `market_data` table - Cached market data
+### Running the Trading Bot
+```bash
+cd frontend/trading_bot
+pip install -r requirements.txt
+python run_bot.py
+```
 
 ## Important Notes
 
-1. **MT5 Connection**: Requires MetaTrader 5 terminal installed and running
-2. **Data Sources**: Yahoo Finance for stocks, MT5/Exness for forex/metal
-3. **Async Operations**: News service uses async/await for non-blocking scraping
-4. **WebSocket Updates**: Real-time updates via Socket.IO for live trading data
-5. **Risk Management**: Built-in position sizing and stop-loss calculations
+1. **Standalone Architecture**: Dash app runs independently (no separate backend required)
+2. **Paper Trading Default**: Trading bot uses paper trading by default
+3. **MT5 Optional**: Requires MetaTrader 5 terminal for live trading
+4. **Yahoo Finance Limits**: Free tier has rate limits; app gracefully degrades to synthetic data
+5. **Risk Warning**: Trading involves substantial risk; always test with paper trading first
+
+## Future Enhancements (Planned)
+
+- [ ] React/TypeScript frontend (per original spec)
+- [ ] Flask backend with WebSocket support
+- [ ] SQLite database for trade persistence
+- [ ] Real-time MT5/Exness trading execution
+- [ ] User authentication and portfolios
+- [ ] Mobile-responsive design

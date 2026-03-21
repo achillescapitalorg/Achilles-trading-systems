@@ -443,12 +443,12 @@ class QuantitativeSignals:
         )
     
     # =========================================================================
-    # Market Regime Detection
+    # Market Regime Detection (Improved)
     # =========================================================================
     
     def detect_market_regime(self) -> Dict[str, any]:
         """
-        Detect current market regime using HMM-like approach.
+        Detect current market regime using statistical analysis.
         
         Regimes:
         - BULL_LOW_VOL
@@ -456,37 +456,60 @@ class QuantitativeSignals:
         - BEAR_LOW_VOL
         - BEAR_HIGH_VOL
         - SIDEWAYS
+        
+        Uses:
+        - Trend strength (linear regression slope)
+        - Volatility regime (historical percentile)
+        - Autocorrelation (Hurst-like)
+        - Statistical thresholds based on data distribution
         """
-        close = self.df['close'].iloc[-self.lookback:]
-        returns = close.pct_change().dropna()
+        close = self.df['close'].iloc[-self.lookback:].values
+        returns = np.diff(close) / close[:-1]
         
-        # Metrics
-        trend = (close.iloc[-1] - close.iloc[0]) / close.iloc[0]
-        volatility = returns.std() * np.sqrt(252)
-        skewness = returns.skew()
-        kurtosis = returns.kurtosis()
+        if len(returns) < 20:
+            return self._default_regime_result()
         
-        # Historical comparison
-        vol_percentile = (returns.rolling(window=60).std().iloc[-1] / 
-                         returns.rolling(window=252).std().iloc[-1])
+        n = len(returns)
         
-        # Regime classification
-        if abs(trend) < 0.05:
+        trend = self._calculate_trend_strength(close)
+        volatility = np.std(returns) * np.sqrt(252)
+        
+        skewness = float(pd.Series(returns).skew()) if len(returns) > 2 else 0.0
+        kurtosis = float(pd.Series(returns).kurtosis()) if len(returns) > 3 else 0.0
+        
+        vol_history = pd.Series(returns).rolling(window=min(60, n//4)).std() * np.sqrt(252)
+        if len(vol_history) > 20:
+            vol_percentile = float(np.sum(vol_history.dropna() < volatility) / len(vol_history.dropna()))
+        else:
+            vol_percentile = 0.5
+        
+        vol_threshold = 0.6 if vol_percentile > 0.6 else (0.4 if vol_percentile < 0.4 else 0.5)
+        
+        autocorr = self._calculate_autocorrelation(returns)
+        
+        abs_trend_threshold = self._calculate_trend_threshold(returns)
+        
+        if abs(trend) < abs_trend_threshold:
             regime = 'SIDEWAYS'
-            regime_confidence = 0.7
+            regime_confidence = 1.0 - min(abs(trend) / abs_trend_threshold, 1.0)
         elif trend > 0:
-            if vol_percentile < 1:
+            if vol_percentile < vol_threshold:
                 regime = 'BULL_LOW_VOL'
             else:
                 regime = 'BULL_HIGH_VOL'
-            regime_confidence = min(abs(trend) / 0.1, 1.0)
+            regime_confidence = min(abs(trend) / (abs_trend_threshold * 2), 1.0)
         else:
-            if vol_percentile < 1:
+            if vol_percentile < vol_threshold:
                 regime = 'BEAR_LOW_VOL'
             else:
                 regime = 'BEAR_HIGH_VOL'
-            regime_confidence = min(abs(trend) / 0.1, 1.0)
-            
+            regime_confidence = min(abs(trend) / (abs_trend_threshold * 2), 1.0)
+        
+        if autocorr > 0.3:
+            regime_confidence *= 1.2
+        
+        regime_confidence = min(regime_confidence, 1.0)
+        
         return {
             'regime': regime,
             'confidence': regime_confidence,
@@ -494,31 +517,101 @@ class QuantitativeSignals:
             'volatility': volatility,
             'skewness': skewness,
             'kurtosis': kurtosis,
-            'vol_percentile': vol_percentile
+            'vol_percentile': vol_percentile,
+            'autocorrelation': autocorr,
+            'trend_threshold': abs_trend_threshold,
+            'vol_threshold': vol_threshold
+        }
+    
+    def _calculate_trend_strength(self, prices: np.ndarray) -> float:
+        """Calculate trend strength using linear regression."""
+        if len(prices) < 10:
+            return 0.0
+        
+        x = np.arange(len(prices))
+        x_mean = x.mean()
+        
+        slope = np.sum((x - x_mean) * (prices - prices.mean())) / np.sum((x - x_mean) ** 2)
+        trend = slope * len(prices) / prices.mean()
+        
+        return float(trend)
+    
+    def _calculate_autocorrelation(self, returns: np.ndarray, lag: int = 1) -> float:
+        """Calculate autocorrelation at given lag."""
+        if len(returns) <= lag:
+            return 0.0
+        
+        n = len(returns) - lag
+        c0 = np.sum(returns[:n] ** 2) / n
+        c1 = np.sum(returns[:n] * returns[lag:lag+n]) / n
+        
+        if c0 < 1e-10:
+            return 0.0
+        
+        return float(c1 / c0)
+    
+    def _calculate_trend_threshold(self, returns: np.ndarray) -> float:
+        """Calculate adaptive trend threshold based on return distribution."""
+        if len(returns) < 10:
+            return 0.05
+        
+        mean_ret = np.mean(returns)
+        std_ret = np.std(returns)
+        
+        threshold = max(0.02, min(0.10, 2.0 * std_ret + abs(mean_ret)))
+        
+        return float(threshold)
+    
+    def _default_regime_result(self) -> Dict[str, any]:
+        """Return default regime result for insufficient data."""
+        return {
+            'regime': 'SIDEWAYS',
+            'confidence': 0.5,
+            'trend': 0.0,
+            'volatility': 0.20,
+            'skewness': 0.0,
+            'kurtosis': 0.0,
+            'vol_percentile': 0.5,
+            'autocorrelation': 0.0,
+            'trend_threshold': 0.05,
+            'vol_threshold': 0.5
         }
     
     def regime_adjusted_signal(self) -> QuantSignal:
         """
         Generate signal adjusted for current market regime.
+        
+        Adapts strategy based on detected regime:
+        - High volatility regimes: reduce position size, wider stops
+        - Trending regimes: momentum strategies favored
+        - Sideways: mean reversion strategies favored
         """
         regime_data = self.detect_market_regime()
         regime = regime_data['regime']
+        confidence = regime_data['confidence']
         
-        # Different strategies for different regimes
+        vol_multiplier = 1.0
+        if 'HIGH_VOL' in regime:
+            vol_multiplier = 0.7
+        elif 'LOW_VOL' in regime:
+            vol_multiplier = 1.0
+        
         if regime in ['BULL_LOW_VOL', 'BULL_HIGH_VOL']:
             signal = 'BUY'
-            confidence = regime_data['confidence'] * 0.7
+            adjusted_confidence = confidence * 0.8 * vol_multiplier
         elif regime in ['BEAR_LOW_VOL', 'BEAR_HIGH_VOL']:
             signal = 'SELL'
-            confidence = regime_data['confidence'] * 0.7
+            adjusted_confidence = confidence * 0.8 * vol_multiplier
         else:
             signal = 'NEUTRAL'
-            confidence = 0.3
+            adjusted_confidence = confidence * 0.4
+        
+        adjusted_confidence = min(adjusted_confidence, 1.0)
             
         return QuantSignal(
             signal_type=SignalType.MARKET_REGIME,
             signal=signal,
-            confidence=confidence,
+            confidence=adjusted_confidence,
             metadata=regime_data
         )
     

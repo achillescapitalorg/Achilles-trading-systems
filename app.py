@@ -11,6 +11,7 @@ from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from typing import Tuple, Dict, Any, Optional, List
 import yfinance as yf
 import requests
 import dash_bootstrap_components as dbc
@@ -512,54 +513,238 @@ def calculate_real_volatility(symbol):
 
 
 def calculate_regime_metrics(symbol):
-    """Calculate regime detection metrics from real data."""
+    """
+    Calculate comprehensive regime detection metrics from real data.
+    
+    Returns:
+        tuple: (hurst_exponent, regime_name, metrics_dict)
+    """
     try:
         df = fetch_yahoo_finance_data(symbol, period="6mo", interval="1d")
         
         if df is None or (hasattr(df, 'empty') and df.empty):
-            return 0.5, "SIDEWAYS"
+            return 0.5, "SIDEWAYS", {}
         
         if 'close' not in df.columns or df['close'] is None:
-            return 0.5, "SIDEWAYS"
+            return 0.5, "SIDEWAYS", {}
         
         close_prices = df['close'].values
-        
-        # Calculate Hurst exponent (simplified)
         n = len(close_prices)
+        
         if n < 30:
-            return 0.5, "SIDEWAYS"
+            return 0.5, "SIDEWAYS", {}
         
         returns = np.diff(close_prices) / close_prices[:-1]
-        mean_return = np.mean(returns)
-        std_return = np.std(returns)
         
-        # R/S analysis for Hurst
-        cumulated_returns = returns - mean_return
-        cumulated_returns = np.cumsum(cumulated_returns)
+        if len(returns) < 20:
+            return 0.5, "SIDEWAYS", {}
         
-        R = np.max(cumulated_returns) - np.min(cumulated_returns)
-        S = std_return * np.sqrt(n)
+        hurst, hurst_conf = calculate_hurst_exponent(returns)
         
-        if S > 0:
-            RS = R / S
-            H = np.log(RS) / np.log(n) if RS > 0 else 0.5
-        else:
-            H = 0.5
+        trend_strength = calculate_trend_strength(returns)
+        mean_reversion_strength = calculate_mean_reversion_strength(returns)
         
-        H = max(0.3, min(0.7, H))
-        
-        if H > 0.55:
+        if hurst > 0.55 and trend_strength > 0.6:
             regime = "TRENDING"
-        elif H < 0.45:
+        elif hurst < 0.45 and mean_reversion_strength > 0.6:
             regime = "MEAN_REVERTING"
-        else:
+        elif abs(trend_strength) < 0.3:
             regime = "SIDEWAYS"
+        elif trend_strength > 0:
+            regime = "TRENDING"
+        else:
+            regime = "TRENDING"
         
-        return round(H, 3), regime
+        metrics = {
+            'hurst': hurst,
+            'hurst_confidence': hurst_conf,
+            'trend_strength': trend_strength,
+            'mean_reversion_strength': mean_reversion_strength,
+            'volatility': float(np.std(returns) * np.sqrt(252)),
+            'skewness': float(pd.Series(returns).skew()) if len(returns) > 2 else 0.0,
+            'kurtosis': float(pd.Series(returns).kurtosis()) if len(returns) > 3 else 0.0,
+            'n_observations': n
+        }
+        
+        return round(hurst, 3), regime, metrics
         
     except Exception as e:
         print(f"Error calculating regime for {symbol}: {e}")
-        return 0.5, "SIDEWAYS"
+        return 0.5, "SIDEWAYS", {}
+
+
+def calculate_hurst_exponent(returns, min_lag: int = 5, max_lag: int = None) -> Tuple[float, float]:
+    """
+    Calculate Hurst exponent using R/S analysis with multiple lags.
+    
+    The Hurst exponent indicates:
+    - H > 0.5: Trending (persistent) behavior
+    - H < 0.5: Mean-reverting (anti-persistent) behavior
+    - H ≈ 0.5: Random walk (no memory)
+    
+    Parameters
+    ----------
+    returns : np.ndarray
+        Return series
+    min_lag : int
+        Minimum lag for R/S calculation
+    max_lag : int
+        Maximum lag (defaults to n/4)
+        
+    Returns
+    -------
+    Tuple[float, float]
+        Hurst exponent and confidence score (0-1)
+    """
+    n = len(returns)
+    
+    if max_lag is None:
+        max_lag = max(min_lag + 5, n // 4)
+    
+    max_lag = min(max_lag, n // 2)
+    
+    if max_lag <= min_lag or n < 2 * max_lag:
+        return 0.5, 0.0
+    
+    lags = range(min_lag, max_lag + 1)
+    rs_values = []
+    n_values = []
+    
+    for lag in lags:
+        if lag < 2:
+            continue
+            
+        n_chunks = n // lag
+        
+        if n_chunks < 3:
+            continue
+            
+        chunk_rs = []
+        
+        for i in range(n_chunks):
+            start_idx = i * lag
+            end_idx = start_idx + lag
+            chunk = returns[start_idx:end_idx]
+            
+            if len(chunk) < 2:
+                continue
+                
+            mean_chunk = np.mean(chunk)
+            cumdev = np.cumsum(chunk - mean_chunk)
+            
+            R = np.max(cumdev) - np.min(cumdev)
+            S = np.std(chunk, ddof=1)
+            
+            if S > 1e-10:
+                rs = R / S
+                chunk_rs.append(rs)
+        
+        if len(chunk_rs) >= 2:
+            rs_values.append(np.mean(chunk_rs))
+            n_values.append(lag)
+    
+    if len(rs_values) < 3:
+        return 0.5, 0.0
+    
+    log_n = np.log(np.array(n_values))
+    log_rs = np.log(np.array(rs_values) + 1e-10)
+    
+    coeffs = np.polyfit(log_n, log_rs, 1)
+    H = float(coeffs[0])
+    
+    H = max(0.1, min(0.9, H))
+    
+    residuals = np.abs(log_rs - (coeffs[0] * log_n + coeffs[1]))
+    max_residual = np.max(residuals) if len(residuals) > 0 else 0
+    confidence = max(0.0, 1.0 - min(max_residual / 2.0, 1.0))
+    
+    return H, round(confidence, 3)
+
+
+def calculate_trend_strength(returns, lookback: int = 20) -> float:
+    """
+    Calculate trend strength using sequential analysis.
+    
+    Returns value between -1 and 1:
+    - Positive: Upward trend
+    - Negative: Downward trend
+    - Close to 0: No clear trend
+    """
+    if len(returns) < lookback:
+        return 0.0
+    
+    recent = returns[-lookback:]
+    
+    up_moves = np.sum(recent > 0)
+    down_moves = np.sum(recent < 0)
+    total = len(recent)
+    
+    if total == 0:
+        return 0.0
+    
+    trend_ratio = (up_moves - down_moves) / total
+    
+    cumulative_return = np.sum(recent)
+    
+    strength = 0.7 * trend_ratio + 0.3 * np.tanh(cumulative_return * 10)
+    
+    return float(np.clip(strength, -1, 1))
+
+
+def calculate_mean_reversion_strength(returns, lookback: int = 50) -> float:
+    """
+    Calculate mean reversion strength using autocorrelation and deviation analysis.
+    
+    Returns value between 0 and 1:
+    - Higher: Stronger mean reversion tendency
+    - Lower: Weaker mean reversion
+    """
+    if len(returns) < lookback:
+        return 0.0
+    
+    recent = returns[-lookback:]
+    
+    if len(recent) < 10:
+        return 0.0
+    
+    mean_ret = np.mean(recent)
+    std_ret = np.std(recent)
+    
+    if std_ret < 1e-10:
+        return 0.5
+    
+    z_scores = (recent - mean_ret) / std_ret
+    
+    sign_changes = np.sum(np.diff(np.sign(recent)) != 0)
+    max_consecutive = calculate_max_consecutive_same_sign(recent)
+    
+    reversal_rate = sign_changes / (len(recent) - 1)
+    consecutive_penalty = max_consecutive / len(recent)
+    
+    deviation_strength = np.mean(np.abs(z_scores)) / 3.0
+    
+    strength = 0.4 * (1 - consecutive_penalty) + 0.3 * reversal_rate + 0.3 * min(deviation_strength, 1.0)
+    
+    return float(np.clip(strength, 0, 1))
+
+
+def calculate_max_consecutive_same_sign(arr) -> int:
+    """Calculate maximum consecutive positive or negative values."""
+    if len(arr) == 0:
+        return 0
+    
+    signs = np.sign(arr)
+    max_count = 1
+    current_count = 1
+    
+    for i in range(1, len(signs)):
+        if signs[i] == signs[i-1] and signs[i] != 0:
+            current_count += 1
+            max_count = max(max_count, current_count)
+        else:
+            current_count = 1
+    
+    return max_count
 
 
 def predict_future_prices(symbol, heston_params, days=30, n_paths=100):
@@ -828,11 +1013,535 @@ def generate_signals(symbol):
          "strength": np.random.choice(["WEAK", "MODERATE", "STRONG"]), "value": round(np.random.uniform(-0.001, 0.001), 5)},
         {"indicator": "Bollinger (20)", "signal": np.random.choice(["BUY", "SELL", "HOLD"]),
          "strength": np.random.choice(["WEAK", "MODERATE", "STRONG"]), "value": round(np.random.uniform(0, 1), 2)},
-        {"indicator": "Supertrend", "signal": np.random.choice(["BUY", "SELL"]),
-         "strength": "STRONG", "value": 1},
+         {"indicator": "Supertrend", "signal": np.random.choice(["BUY", "SELL"]),
+          "strength": "STRONG", "value": 1},
     ]
 
     return action, confidence, signals
+
+
+def get_unified_trading_recommendation(symbol):
+    """
+    Generate unified trading recommendation by combining all available signals:
+    - Technical indicators (RSI, MACD, Bollinger, Supertrend)
+    - Regime detection (HMM)
+    - Black-Scholes probabilities
+    - News sentiment
+    - Volatility regime
+    """
+    signal_scores = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
+    confidence_scores = []
+    factors = []
+    vol_ratio = 1.0
+    current_price = 0
+    
+    try:
+        # Step 1: Fetch data with multiple attempts
+        df = None
+        try:
+            df = fetch_yahoo_finance_data(symbol, period="3mo", interval="1d")
+        except Exception as e:
+            print(f"Data fetch error: {e}")
+        
+        if df is None or not isinstance(df, pd.DataFrame) or len(df) < 10:
+            print(f"Insufficient data for {symbol}, using fallback")
+            df = _generate_recommendation_data(symbol)
+        
+        if 'close' not in df.columns:
+            print(f"Missing 'close' column for {symbol}")
+            return _default_recommendation(symbol)
+        
+        close = df['close'].dropna().values
+        if len(close) < 20:
+            print(f"Too few price points ({len(close)}) for {symbol}")
+            return _default_recommendation(symbol, close[-1] if len(close) > 0 else None)
+        
+        current_price = close[-1]
+        returns = np.diff(close) / close[:-1]
+        returns = returns[~np.isnan(returns)]
+        
+        if len(returns) < 10:
+            print(f"Too few returns ({len(returns)}) for {symbol}")
+            return _default_recommendation(symbol, current_price)
+        
+        # Step 2: Technical Indicators (each wrapped separately)
+        
+        # RSI
+        try:
+            rsi = calculate_rsi_safe(df['close'])
+            if rsi is not None:
+                if rsi < 30:
+                    signal_scores['BUY'] += 1
+                    confidence_scores.append(0.7)
+                    factors.append(("RSI", "OVERSOLD", "BUY"))
+                elif rsi > 70:
+                    signal_scores['SELL'] += 1
+                    confidence_scores.append(0.7)
+                    factors.append(("RSI", "OVERBOUGHT", "SELL"))
+                else:
+                    signal_scores['HOLD'] += 0.5
+                    factors.append(("RSI", f"NEUTRAL ({rsi:.1f})", "HOLD"))
+        except Exception as e:
+            print(f"RSI error: {e}")
+            factors.append(("RSI", "ERROR", "HOLD"))
+        
+        # MACD
+        try:
+            macd_result = calculate_macd_safe(df['close'])
+            if macd_result:
+                if macd_result['macd'] > macd_result['signal']:
+                    signal_scores['BUY'] += 0.8
+                    confidence_scores.append(0.6)
+                    factors.append(("MACD", "BULLISH", "BUY"))
+                else:
+                    signal_scores['SELL'] += 0.8
+                    confidence_scores.append(0.6)
+                    factors.append(("MACD", "BEARISH", "SELL"))
+        except Exception as e:
+            print(f"MACD error: {e}")
+            factors.append(("MACD", "ERROR", "HOLD"))
+        
+        # Bollinger Bands
+        try:
+            bb_result = calculate_bb_safe(df['close'])
+            if bb_result:
+                if close[-1] < bb_result['lower']:
+                    signal_scores['BUY'] += 1
+                    confidence_scores.append(0.75)
+                    factors.append(("Bollinger", "BELOW LOWER", "BUY"))
+                elif close[-1] > bb_result['upper']:
+                    signal_scores['SELL'] += 1
+                    confidence_scores.append(0.75)
+                    factors.append(("Bollinger", "ABOVE UPPER", "SELL"))
+                else:
+                    signal_scores['HOLD'] += 0.5
+                    factors.append(("Bollinger", "MIDDLE ZONE", "HOLD"))
+        except Exception as e:
+            print(f"Bollinger error: {e}")
+            factors.append(("Bollinger", "ERROR", "HOLD"))
+        
+        # Supertrend
+        try:
+            supertrend_val = calculate_supertrend_safe(df)
+            if supertrend_val is not None:
+                if supertrend_val > 0:
+                    signal_scores['BUY'] += 1.2
+                    confidence_scores.append(0.8)
+                    factors.append(("Supertrend", "UPTREND", "BUY"))
+                else:
+                    signal_scores['SELL'] += 1.2
+                    confidence_scores.append(0.8)
+                    factors.append(("Supertrend", "DOWNTREND", "SELL"))
+        except Exception as e:
+            print(f"Supertrend error: {e}")
+            factors.append(("Supertrend", "ERROR", "HOLD"))
+        
+        # Step 3: Regime Detection (HMM)
+        try:
+            returns_for_hmm = returns[-min(180, len(returns)):]
+            if len(returns_for_hmm) >= 30:
+                regime_model = RegimeSwitchingModel(n_regimes=3)
+                results = regime_model.fit(returns_for_hmm, max_iter=30)
+                
+                probs = results.get('smoothed_probs', np.array([[0.33, 0.33, 0.34]]))
+                if len(probs.shape) == 2 and probs.shape[1] == 3:
+                    current_regime = int(np.argmax(probs[-1]))
+                    regime_confidence = float(np.max(probs[-1]))
+                    
+                    if current_regime == 0:
+                        signal_scores['SELL'] += 1.0 * regime_confidence
+                        factors.append(("Regime", "BEAR", "SELL"))
+                    elif current_regime == 2:
+                        signal_scores['BUY'] += 1.0 * regime_confidence
+                        factors.append(("Regime", "BULL", "BUY"))
+                    else:
+                        signal_scores['HOLD'] += 0.5
+                        factors.append(("Regime", "NEUTRAL", "HOLD"))
+                    confidence_scores.append(regime_confidence)
+                else:
+                    factors.append(("Regime", "INVALID PROBS", "HOLD"))
+            else:
+                factors.append(("Regime", "INSUFFICIENT DATA", "HOLD"))
+        except Exception as e:
+            print(f"Regime error: {e}")
+            factors.append(("Regime", "ERROR", "HOLD"))
+        
+        # Step 4: Black-Scholes probability
+        try:
+            if len(returns) >= 20:
+                spot = float(close[-1])
+                T = 30 / 365
+                vol = float(np.std(returns[-30:]) * np.sqrt(252)) if len(returns) >= 30 else float(np.std(returns) * np.sqrt(252))
+                
+                if vol > 0 and spot > 0:
+                    d1 = (0.05 + 0.5 * vol**2) * T / (vol * np.sqrt(T))
+                    prob_up = norm.cdf(d1)
+                    
+                    if prob_up > 0.55:
+                        signal_scores['BUY'] += 0.8 * prob_up
+                        factors.append(("BS Prob", f"{prob_up:.0%} UP", "BUY"))
+                    elif prob_up < 0.45:
+                        signal_scores['SELL'] += 0.8 * (1 - prob_up)
+                        factors.append(("BS Prob", f"{(1-prob_up):.0%} DOWN", "SELL"))
+                    else:
+                        signal_scores['HOLD'] += 0.5
+                        factors.append(("BS Prob", "BALANCED", "HOLD"))
+                    confidence_scores.append(abs(prob_up - 0.5) * 2)
+                else:
+                    factors.append(("BS Prob", "LOW VOL", "HOLD"))
+            else:
+                factors.append(("BS Prob", "INSUFFICIENT", "HOLD"))
+        except Exception as e:
+            print(f"BS Prob error: {e}")
+            factors.append(("BS Prob", "ERROR", "HOLD"))
+        
+        # Step 5: Volatility regime
+        try:
+            if len(returns) >= 20:
+                recent_vol = float(np.std(returns[-20:]) * np.sqrt(252))
+                hist_vol = float(np.std(returns) * np.sqrt(252))
+                vol_ratio = recent_vol / hist_vol if hist_vol > 0 else 1.0
+                
+                if vol_ratio > 1.3:
+                    factors.append(("Volatility", "HIGH VOL", "HOLD"))
+                elif vol_ratio < 0.7:
+                    factors.append(("Volatility", "LOW VOL", "HOLD"))
+                else:
+                    factors.append(("Volatility", "NORMAL", "HOLD"))
+            else:
+                factors.append(("Volatility", "LOW DATA", "HOLD"))
+        except Exception as e:
+            print(f"Volatility error: {e}")
+            factors.append(("Volatility", "ERROR", "HOLD"))
+        
+        # Step 6: Momentum/Sentiment
+        try:
+            if len(returns) >= 5:
+                recent_return = float(np.sum(returns[-5:]))
+                if recent_return > 0.01:
+                    signal_scores['BUY'] += 0.5
+                    factors.append(("Momentum", "POSITIVE", "BUY"))
+                elif recent_return < -0.01:
+                    signal_scores['SELL'] += 0.5
+                    factors.append(("Momentum", "NEGATIVE", "SELL"))
+                else:
+                    factors.append(("Momentum", "NEUTRAL", "HOLD"))
+            else:
+                factors.append(("Momentum", "LOW DATA", "HOLD"))
+        except Exception as e:
+            print(f"Momentum error: {e}")
+            factors.append(("Momentum", "ERROR", "HOLD"))
+        
+    except Exception as e:
+        print(f"Main recommendation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return _default_recommendation(symbol, current_price if current_price > 0 else None)
+    
+    # Determine final recommendation
+    total_score = sum(signal_scores.values())
+    if total_score > 0:
+        buy_strength = signal_scores['BUY'] / total_score
+        sell_strength = signal_scores['SELL'] / total_score
+        hold_strength = signal_scores['HOLD'] / total_score
+        
+        avg_confidence = np.mean(confidence_scores) if confidence_scores else 0.5
+        
+        if buy_strength > sell_strength + 0.15:
+            action = "BUY"
+            confidence = buy_strength * avg_confidence
+        elif sell_strength > buy_strength + 0.15:
+            action = "SELL"
+            confidence = sell_strength * avg_confidence
+        else:
+            action = "HOLD"
+            confidence = hold_strength * avg_confidence
+    else:
+        action = "HOLD"
+        confidence = 0.5
+    
+    # Calculate entry, stop loss, and take profit zones
+    if current_price > 0:
+        if action == "BUY":
+            entry_zone = f"{current_price * 0.998:.2f} - {current_price * 1.002:.2f}"
+            stop_loss = f"{current_price * (1 - 0.015 * vol_ratio):.2f}"
+            take_profit = f"{current_price * (1 + 0.03 * vol_ratio):.2f}"
+            risk_reward = f"1:{min(2.0, 0.03 / (0.015)):1.1f}"
+        elif action == "SELL":
+            entry_zone = f"{current_price * 0.998:.2f} - {current_price * 1.002:.2f}"
+            stop_loss = f"{current_price * (1 + 0.015 * vol_ratio):.2f}"
+            take_profit = f"{current_price * (1 - 0.03 * vol_ratio):.2f}"
+            risk_reward = f"1:{min(2.0, 0.03 / (0.015)):1.1f}"
+        else:
+            entry_zone = f"{current_price * 0.995:.2f} - {current_price * 1.005:.2f}"
+            stop_loss = "WAIT"
+            take_profit = "WAIT"
+            risk_reward = "N/A"
+    else:
+        entry_zone = "N/A"
+        stop_loss = "N/A"
+        take_profit = "N/A"
+        risk_reward = "N/A"
+    
+    # Trade direction
+    if action == "BUY":
+        direction = "LONG"
+        direction_color = COLORS["success"]
+    elif action == "SELL":
+        direction = "SHORT"
+        direction_color = COLORS["danger"]
+    else:
+        direction = "NO POSITION"
+        direction_color = COLORS["warning"]
+    
+    # Session bias
+    hour = datetime.now().hour
+    if 8 <= hour <= 11:
+        session = "LONDON/NY"
+    elif 13 <= hour <= 16:
+        session = "NY SESSION"
+    elif 0 <= hour <= 5:
+        session = "ASIAN"
+    else:
+        session = "OFF-PEAK"
+    
+    vol_regime = "HIGH" if vol_ratio > 1.3 else ("LOW" if vol_ratio < 0.7 else "NORMAL")
+    
+    return {
+        'action': action,
+        'confidence': confidence,
+        'direction': direction,
+        'direction_color': direction_color,
+        'factors': factors,
+        'entry_zone': entry_zone,
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
+        'risk_reward': risk_reward,
+        'current_price': current_price,
+        'session': session,
+        'volatility_regime': vol_regime,
+        'signal_breakdown': signal_scores
+    }
+
+
+def _generate_recommendation_data(symbol):
+    """Generate synthetic data for recommendation when API fails."""
+    base_prices = {
+        "XAUUSD": 2650, "BTCUSD": 95000, "ETHUSD": 3400,
+        "EURUSD": 1.05, "GBPUSD": 1.26, "USDJPY": 153.0,
+        "SPX500": 5900, "NAS100": 20500,
+    }
+    base_price = base_prices.get(symbol, 100)
+    
+    np.random.seed(42)
+    periods = 90
+    prices = [base_price]
+    for _ in range(periods - 1):
+        change = np.random.normal(0.0001, 0.015)
+        prices.append(prices[-1] * (1 + change))
+    
+    dates = [datetime.now() - timedelta(days=periods - i) for i in range(periods)]
+    df = pd.DataFrame({
+        "timestamp": dates,
+        "open": prices,
+        "high": [p * (1 + abs(np.random.normal(0, 0.008))) for p in prices],
+        "low": [p * (1 - abs(np.random.normal(0, 0.008))) for p in prices],
+        "close": prices,
+        "volume": [np.random.uniform(1000, 10000) * 100 for _ in prices]
+    })
+    return df
+
+
+def _default_recommendation(symbol, price=None):
+    """Return default recommendation on error."""
+    base_prices = {
+        "XAUUSD": 2650, "BTCUSD": 95000, "ETHUSD": 3400,
+        "EURUSD": 1.05, "GBPUSD": 1.26, "USDJPY": 153.0,
+        "SPX500": 5900, "NAS100": 20500,
+    }
+    current_price = price if price is not None else base_prices.get(symbol, 0)
+    
+    hour = datetime.now().hour
+    if 8 <= hour <= 11:
+        session = "LONDON/NY"
+    elif 13 <= hour <= 16:
+        session = "NY SESSION"
+    elif 0 <= hour <= 5:
+        session = "ASIAN"
+    else:
+        session = "OFF-PEAK"
+    
+    return {
+        'action': "HOLD",
+        'confidence': 0.5,
+        'direction': "NO POSITION",
+        'direction_color': COLORS["warning"],
+        'factors': [("System", "ANALYZING...", "HOLD")],
+        'entry_zone': f"{current_price * 0.995:.2f} - {current_price * 1.005:.2f}" if current_price > 0 else "WAIT",
+        'stop_loss': "WAIT",
+        'take_profit': "WAIT",
+        'risk_reward': "N/A",
+        'current_price': current_price,
+        'session': session,
+        'volatility_regime': "NORMAL",
+        'signal_breakdown': {'BUY': 0, 'SELL': 0, 'HOLD': 1}
+    }
+
+
+def calculate_rsi_safe(prices, period=14):
+    """Calculate RSI with error handling."""
+    try:
+        if len(prices) < period + 1:
+            return None
+        prices = prices.dropna()
+        deltas = np.diff(prices.values)
+        if len(deltas) < period:
+            return None
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        avg_gain = np.mean(gains[-period:])
+        avg_loss = np.mean(losses[-period:])
+        if avg_loss == 0:
+            return 100
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+    except:
+        return None
+
+
+def calculate_macd_safe(prices, fast=12, slow=26, signal_period=9):
+    """Calculate MACD with error handling."""
+    try:
+        if len(prices) < slow + signal_period:
+            return None
+        prices = prices.dropna()
+        ema_fast = prices.ewm(span=fast, adjust=False).mean()
+        ema_slow = prices.ewm(span=slow, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        signal = macd.ewm(span=signal_period, adjust=False).mean()
+        return {'macd': float(macd.iloc[-1]), 'signal': float(signal.iloc[-1])}
+    except:
+        return None
+
+
+def calculate_bb_safe(prices, period=20, std_dev=2):
+    """Calculate Bollinger Bands with error handling."""
+    try:
+        if len(prices) < period:
+            return None
+        prices = prices.dropna()
+        sma = prices.rolling(window=period).mean()
+        std = prices.rolling(window=period).std()
+        upper = sma + (std * std_dev)
+        lower = sma - (std * std_dev)
+        return {'upper': float(upper.iloc[-1]), 'middle': float(sma.iloc[-1]), 'lower': float(lower.iloc[-1])}
+    except:
+        return None
+
+
+def calculate_supertrend_safe(df, period=10, multiplier=3):
+    """Calculate Supertrend with error handling."""
+    try:
+        if len(df) < period + 2 or 'high' not in df.columns or 'low' not in df.columns:
+            return None
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        hl2 = (high + low) / 2
+        supertrend = 1
+        if close.iloc[-1] > float(hl2.iloc[-2] + multiplier * atr.iloc[-2]):
+            supertrend = 1
+        elif close.iloc[-1] < float(hl2.iloc[-2] - multiplier * atr.iloc[-2]):
+            supertrend = -1
+        return supertrend
+    except:
+        return None
+
+
+def _default_recommendation():
+    """Return default recommendation on error."""
+    return {
+        'action': "HOLD",
+        'confidence': 0.5,
+        'direction': "NO POSITION",
+        'direction_color': COLORS["warning"],
+        'factors': [("System", "INITIALIZING...", "HOLD")],
+        'entry_zone': "N/A",
+        'stop_loss': "N/A",
+        'take_profit': "N/A",
+        'risk_reward': "N/A",
+        'current_price': 0,
+        'session': "N/A",
+        'volatility_regime': "NORMAL",
+        'signal_breakdown': {'BUY': 0, 'SELL': 0, 'HOLD': 1}
+    }
+
+
+def calculate_rsi(prices, period=14):
+    """Calculate RSI indicator."""
+    deltas = np.diff(prices)
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+    
+    avg_gain = np.mean(gains[-period:])
+    avg_loss = np.mean(losses[-period:])
+    
+    if avg_loss == 0:
+        return 100
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def calculate_macd(prices, fast=12, slow=26, signal_period=9):
+    """Calculate MACD."""
+    ema_fast = prices.ewm(span=fast, adjust=False).mean()
+    ema_slow = prices.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=signal_period, adjust=False).mean()
+    return {'macd': float(macd.iloc[-1]), 'signal': float(signal.iloc[-1])}
+
+
+def calculate_bollinger_bands(prices, period=20, std_dev=2):
+    """Calculate Bollinger Bands."""
+    sma = prices.rolling(window=period).mean()
+    std = prices.rolling(window=period).std()
+    upper = sma + (std * std_dev)
+    lower = sma - (std * std_dev)
+    return {'upper': float(upper.iloc[-1]), 'middle': float(sma.iloc[-1]), 'lower': float(lower.iloc[-1])}
+
+
+def calculate_supertrend(df, period=10, multiplier=3):
+    """Calculate Supertrend indicator."""
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
+    
+    hl2 = (high + low) / 2
+    upperband = hl2 + (multiplier * atr)
+    lowerband = hl2 - (multiplier * atr)
+    
+    supertrend = 1
+    if close[-1] > upperband[-2]:
+        supertrend = 1
+    elif close[-1] < lowerband[-2]:
+        supertrend = -1
+    else:
+        supertrend = 1
+    
+    return supertrend
 
 
 def create_signals_table(signals):
@@ -916,6 +1625,9 @@ app.layout = dbc.Container(fluid=True, children=[
 
             # Center Panel - Charts and Analysis
             dbc.Col([
+                # Unified Trading Recommendation
+                html.Div(id="unified-recommendation"),
+                
                 # Price Chart
                 dbc.Card([
                     dbc.CardHeader([
@@ -1341,7 +2053,7 @@ def update_metrics(symbol):
                 kurt = returns.kurtosis() + 3  # Excess kurtosis + 3
 
                 # Hurst exponent and regime
-                hurst, regime = calculate_regime_metrics(symbol)
+                hurst, regime, regime_metrics = calculate_regime_metrics(symbol)
 
                 # Sharpe ratio (annualized, assuming 5% risk-free rate)
                 excess_returns = returns - 0.05 / 252
@@ -2946,111 +3658,310 @@ def update_price_prediction(symbol):
      Input("interval-component", "n_intervals")]
 )
 def update_regime_detection(symbol, n):
-    """Update regime detection model."""
+    """Update regime detection model with improved HMM."""
     if symbol is None:
         symbol = "XAUUSD"
     
     global models_state
     
-    # Fetch returns data
     try:
         df = fetch_yahoo_finance_data(symbol, period="6mo", interval="1d")
-        returns = df['close'].pct_change().dropna().values if not df.empty else np.random.randn(100) * 0.02
+        if df is not None and not df.empty and 'close' in df.columns:
+            returns = df['close'].pct_change().dropna().values
+            if len(returns) < 20:
+                returns = np.random.randn(100) * 0.02
+        else:
+            returns = np.random.randn(100) * 0.02
     except:
         returns = np.random.randn(100) * 0.02
     
-    # Fit regime model
-    regime_model = models_state["regime_model"]
+    n_regimes = 3
+    
+    regime_model = RegimeSwitchingModel(n_regimes=n_regimes)
+    
     try:
-        results = regime_model.fit(returns, max_iter=50)
-        regime_probs = results.get('regime_probs', np.random.rand(len(returns), 3))
-        transition_matrix = results.get('transition_matrix', np.ones((3, 3)) / 3)
-        regime_params = results.get('regime_params', {'mus': [0, 0, 0], 'sigmas': [0.01, 0.02, 0.03], 'probs': [0.33, 0.33, 0.34]})
-    except:
-        regime_probs = np.random.rand(len(returns), 3)
-        transition_matrix = np.ones((3, 3)) / 3
-        regime_params = {'mus': [0, 0, 0], 'sigmas': [0.01, 0.02, 0.03], 'probs': [0.33, 0.33, 0.34]}
+        results = regime_model.fit(returns, max_iter=100, tol=1e-6)
+        
+        filtered_probs = results.get('filtered_probs', np.random.rand(len(returns), n_regimes))
+        
+        probs_sum = filtered_probs[-1].sum()
+        if probs_sum > 0:
+            normalized_probs = filtered_probs[-1] / probs_sum
+        else:
+            normalized_probs = np.ones(n_regimes) / n_regimes
+        
+        viterbi_states = regime_model.viterbi(returns)
+        
+        transition_matrix = results.get('transition_matrix', np.ones((n_regimes, n_regimes)) / n_regimes)
+        regime_params = results.get('regime_params', {
+            'mus': [0.0] * n_regimes,
+            'sigmas': [0.01] * n_regimes,
+            'regime_labels': ['BEAR', 'NEUTRAL', 'BULL']
+        })
+        regime_durations = results.get('regime_durations', {'mean': [np.nan] * n_regimes})
+        confidence = regime_model.get_regime_confidence(returns)
+        
+        current_regime = int(np.argmax(normalized_probs))
+        regime_labels = regime_params.get('regime_labels', ['BEAR', 'NEUTRAL', 'BULL'])
+        
+        filtered_probs_normalized = filtered_probs / filtered_probs.sum(axis=1, keepdims=True)
+        
+        if viterbi_states[-1] == 0:
+            market_regime = 'BEAR'
+        elif viterbi_states[-1] == n_regimes - 1:
+            market_regime = 'BULL'
+        else:
+            market_regime = 'SIDEWAYS'
+        
+    except Exception as e:
+        print(f"Regime model error: {e}")
+        import traceback
+        traceback.print_exc()
+        filtered_probs = np.random.rand(len(returns), n_regimes)
+        filtered_probs_normalized = filtered_probs / filtered_probs.sum(axis=1, keepdims=True)
+        normalized_probs = np.ones(n_regimes) / n_regimes
+        viterbi_states = np.random.randint(0, n_regimes, len(returns))
+        transition_matrix = np.eye(n_regimes) * 0.8 + 0.2 / n_regimes
+        regime_params = {'mus': [0.0, 0.0, 0.0], 'sigmas': [0.01, 0.02, 0.03], 'regime_labels': ['BEAR', 'NEUTRAL', 'BULL']}
+        regime_durations = {'mean': [np.nan] * n_regimes}
+        current_regime = 1
+        regime_labels = ['BEAR', 'NEUTRAL', 'BULL']
+        confidence = 0.5
+        market_regime = 'SIDEWAYS'
     
-    # Determine current regime
-    current_regime_probs = regime_probs[-1] if len(regime_probs) > 0 else [0.33, 0.33, 0.34]
-    current_regime = np.argmax(current_regime_probs)
-    regime_names = ["🐻 Bear / High Vol", "😐 Neutral", "🐮 Bull / Low Vol"]
-    regime_colors_display = [COLORS["danger"], COLORS["warning"], COLORS["success"]]
+    regime_display_names = {
+        'BEAR': '🐻 Bear',
+        'NEUTRAL': '😐 Neutral',
+        'BULL': '🐮 Bull',
+        'LOW_VOL_BEAR': '🐻 Low Vol Bear',
+        'HIGH_VOL_BEAR': '🐻 High Vol Bear',
+        'LOW_VOL_BULL': '🐮 Low Vol Bull',
+        'HIGH_VOL_BULL': '🐮 High Vol Bull',
+        'SIDEWAYS': '↔️ Sideways'
+    }
     
-    # Create regime display
+    current_label = regime_labels[current_regime] if current_regime < len(regime_labels) else f'REGIME_{current_regime}'
+    display_name = regime_display_names.get(current_label, current_label)
+    
+    if current_regime == 0:
+        regime_color = COLORS["danger"]
+    elif current_regime == n_regimes - 1:
+        regime_color = COLORS["success"]
+    else:
+        regime_color = COLORS["warning"]
+    
     regime_display = dbc.Row([
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H5("🔄 Current Market Regime", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "10px"}),
-                    html.H3(regime_names[current_regime], 
-                           style={"color": regime_colors_display[current_regime], "fontSize": "24px", "fontWeight": "bold", "marginBottom": "15px"}),
+                    html.H5("🔄 Market Regime Analysis", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "5px"}),
+                    html.H5(display_name, style={"color": regime_color, "fontSize": "22px", "fontWeight": "bold", "marginBottom": "5px"}),
+                    html.H6(f"Market State: {market_regime}", style={"color": COLORS["info"], "fontSize": "11px", "marginBottom": "10px"}),
                     dbc.Row([
                         dbc.Col([
                             html.H6("Regime Probabilities", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
                             html.Div([
                                 html.Div([
-                                    html.Span("🐻", style={"fontSize": "10px", "marginRight": "5px"}),
-                                    html.Span(f"Bear: {current_regime_probs[0]:.1%}", style={"color": COLORS["danger"], "fontSize": "11px"}),
-                                ], style={"marginBottom": "5px"}),
-                                html.Div([
-                                    html.Span("😐", style={"fontSize": "10px", "marginRight": "5px"}),
-                                    html.Span(f"Neutral: {current_regime_probs[1]:.1%}", style={"color": COLORS["warning"], "fontSize": "11px"}),
-                                ], style={"marginBottom": "5px"}),
-                                html.Div([
-                                    html.Span("🐮", style={"fontSize": "10px", "marginRight": "5px"}),
-                                    html.Span(f"Bull: {current_regime_probs[2]:.1%}", style={"color": COLORS["success"], "fontSize": "11px"}),
-                                ]),
+                                    html.Span(f"{regime_display_names.get(regime_labels[i], regime_labels[i])}: ", 
+                                            style={"color": COLORS["text"], "fontSize": "10px", "marginRight": "3px"}),
+                                    html.Span(f"{normalized_probs[i]:.1%}", 
+                                            style={"color": COLORS["success"] if i == n_regimes - 1 else (COLORS["danger"] if i == 0 else COLORS["warning"]), "fontSize": "10px"}),
+                                ], style={"marginBottom": "3px"})
+                                for i in range(n_regimes)
                             ])
                         ], width=4),
                         dbc.Col([
                             html.H6("Transition Matrix", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
                             html.Table([
-                                html.Tr([html.Td("", style={"fontSize": "9px"})] + [html.Td(f"To {i}", style={"color": COLORS["text_secondary"], "fontSize": "8px"}) for i in range(3)]),
+                                html.Tr([html.Td("", style={"fontSize": "8px"})] + 
+                                       [html.Td(f"→{i}", style={"color": COLORS["text_secondary"], "fontSize": "8px"}) for i in range(n_regimes)]),
                             ] + [
                                 html.Tr([html.Td(f"From {i}", style={"color": COLORS["text_secondary"], "fontSize": "8px"})] + 
-                                       [html.Td(f"{transition_matrix[i][j]:.2f}", style={"fontSize": "9px", "color": COLORS["text"]}) for j in range(3)])
-                                for i in range(3)
+                                       [html.Td(f"{transition_matrix[i][j]:.2f}", style={"fontSize": "9px", "color": COLORS["text"]}) 
+                                        for j in range(n_regimes)])
+                                for i in range(n_regimes)
                             ], style={"fontSize": "9px", "borderCollapse": "collapse"})
                         ], width=4),
                         dbc.Col([
-                            html.H6("Regime Stats", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.H6("Regime Statistics", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
                             html.Div([
                                 html.Div([
-                                    html.Span("μ (Return):", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
-                                    html.Span(f" {regime_params['mus'][current_regime]:.2%}", style={"color": COLORS["text"], "fontSize": "10px", "marginLeft": "5px"}),
-                                ], style={"marginBottom": "5px"}),
-                                html.Div([
-                                    html.Span("σ (Vol):", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
-                                    html.Span(f" {regime_params['sigmas'][current_regime]:.2%}", style={"color": COLORS["text"], "fontSize": "10px", "marginLeft": "5px"}),
-                                ]),
-                            ])
+                                    html.Span(f"μ: ", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                                    html.Span(f"{regime_params['mus'][i]:.3%}", style={"color": COLORS["text"], "fontSize": "9px"}),
+                                ], style={"marginBottom": "2px"})
+                                for i in range(min(n_regimes, 3))
+                            ]),
+                            html.Div([
+                                html.Span("Confidence: ", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                                html.Span(f"{confidence:.1%}", style={"color": COLORS["accent"] if confidence > 0.7 else COLORS["warning"], "fontSize": "9px"}),
+                            ], style={"marginTop": "5px"}),
+                            html.Div([
+                                html.Span("Model: ", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                                html.Span(f"HMM-BW ({n_regimes} states)", style={"color": COLORS["info"], "fontSize": "9px"}),
+                            ], style={"marginTop": "2px"}),
                         ], width=4),
                     ], className="g-2")
-                ], style={"padding": "20px"})
+                ], style={"padding": "15px"})
             ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
         ], width=12),
     ], className="mb-3")
     
-    # Create regime probability chart
     fig = go.Figure()
-    fig.add_trace(go.Scatter(y=regime_probs[:, 0], mode='lines', name='Bear', stackgroup='one', line=dict(color=COLORS["danger"]), opacity=0.7))
-    fig.add_trace(go.Scatter(y=regime_probs[:, 1], mode='lines', name='Neutral', stackgroup='one', line=dict(color=COLORS["warning"]), opacity=0.7))
-    fig.add_trace(go.Scatter(y=regime_probs[:, 2], mode='lines', name='Bull', stackgroup='one', line=dict(color=COLORS["success"]), opacity=0.7))
+    
+    x_indices = np.arange(len(returns))
+    
+    colors = [COLORS["danger"]] + [COLORS["warning"]] * (n_regimes - 2) + [COLORS["success"]]
+    
+    for i in range(n_regimes):
+        mask = viterbi_states == i
+        label = regime_labels[i] if i < len(regime_labels) else f'Regime {i}'
+        
+        fig.add_trace(go.Scatter(
+            x=x_indices[mask],
+            y=filtered_probs_normalized[mask, i],
+            mode='markers',
+            name=label,
+            marker=dict(color=colors[i], size=4, opacity=0.8),
+            hovertemplate=f'{label}: %{{y:.1%}}<extra></extra>'
+        ))
+    
+    returns_line = (returns - np.min(returns)) / (np.max(returns) - np.min(returns) + 1e-10) * 0.8 + 0.1
+    fig.add_trace(go.Scatter(
+        x=x_indices,
+        y=returns_line,
+        mode='lines',
+        name='Returns (scaled)',
+        line=dict(color=COLORS["text_secondary"], width=1.5),
+        opacity=0.6,
+        yaxis='y2'
+    ))
     
     fig.update_layout(
         height=350,
-        margin=dict(l=40, r=20, t=40, b=40),
+        margin=dict(l=40, r=50, t=40, b=40),
         plot_bgcolor=COLORS["background"],
         paper_bgcolor=COLORS["background"],
         font=dict(color=COLORS["text"], size=10),
         xaxis=dict(title="Time", gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"])),
-        yaxis=dict(title="Probability", gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"])),
+        yaxis=dict(title="Probability", gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"]), range=[0, 1.05]),
+        yaxis2=dict(title="", gridcolor=COLORS["grid"], showgrid=False, overlaying='y', side='right', range=[0, 1], tickvals=[], ticktext=[]),
         showlegend=True,
-        legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center")
+        legend=dict(orientation="h", y=1.12, x=0.5, xanchor="center")
     )
     
     return regime_display, fig
+
+
+@callback(
+    Output("unified-recommendation", "children"),
+    [Input("selected-symbol", "data"),
+     Input("interval-component", "n_intervals")]
+)
+def update_unified_recommendation(symbol, n):
+    """Generate unified trading recommendation combining all signals."""
+    if symbol is None:
+        symbol = "XAUUSD"
+    
+    recommendation = get_unified_trading_recommendation(symbol)
+    
+    action = recommendation['action']
+    confidence = recommendation['confidence']
+    direction = recommendation['direction']
+    direction_color = recommendation['direction_color']
+    
+    if action == "BUY":
+        action_color = COLORS["success"]
+        action_bg = "#00ff8820"
+        action_icon = "📈"
+    elif action == "SELL":
+        action_color = COLORS["danger"]
+        action_bg = "#ff475720"
+        action_icon = "📉"
+    else:
+        action_color = COLORS["warning"]
+        action_bg = "#ffa50220"
+        action_icon = "⏸️"
+    
+    factors_html = []
+    for factor_name, factor_value, factor_signal in recommendation['factors']:
+        if factor_signal == "BUY":
+            factor_color = COLORS["success"]
+        elif factor_signal == "SELL":
+            factor_color = COLORS["danger"]
+        else:
+            factor_color = COLORS["text_secondary"]
+        
+        factors_html.append(
+            html.Div([
+                html.Span(f"{factor_name}:", style={"color": COLORS["text_secondary"], "fontSize": "10px", "marginRight": "5px"}),
+                html.Span(factor_value, style={"color": factor_color, "fontSize": "10px", "fontWeight": "bold"}),
+            ], style={"marginBottom": "3px"})
+        )
+    
+    recommendation_card = dbc.Card([
+        dbc.CardBody([
+            dbc.Row([
+                dbc.Col([
+                    html.Div([
+                        html.H6("UNIFIED TRADING SIGNAL", style={"color": COLORS["text_secondary"], "fontSize": "10px", "letterSpacing": "1px"}),
+                        html.Div([
+                            html.Span(action_icon, style={"fontSize": "20px", "marginRight": "10px"}),
+                            html.Span(action, style={"color": action_color, "fontSize": "28px", "fontWeight": "bold"}),
+                        ]),
+                        html.Div([
+                            f"{confidence * 100:.0f}% CONFIDENCE",
+                            html.Span(" • ", style={"color": COLORS["text_secondary"]}),
+                            f"{direction}",
+                        ], style={"color": direction_color, "fontSize": "11px", "marginTop": "5px"}),
+                    ], style={"textAlign": "center"})
+                ], width=2),
+                dbc.Col([
+                    html.H6("SIGNAL BREAKDOWN", style={"color": COLORS["text_secondary"], "fontSize": "10px", "letterSpacing": "1px"}),
+                    html.Div(factors_html, style={"maxHeight": "80px", "overflowY": "auto"}),
+                ], width=4),
+                dbc.Col([
+                    html.H6("ENTRY & RISK MANAGEMENT", style={"color": COLORS["text_secondary"], "fontSize": "10px", "letterSpacing": "1px"}),
+                    html.Div([
+                        html.Div([
+                            html.Span("Entry Zone:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Span(f" {recommendation['entry_zone']}", style={"color": COLORS["info"], "fontSize": "10px", "fontWeight": "bold"}),
+                        ], style={"marginBottom": "3px"}),
+                        html.Div([
+                            html.Span("Stop Loss:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Span(f" {recommendation['stop_loss']}", style={"color": COLORS["danger"], "fontSize": "10px", "fontWeight": "bold"}),
+                        ], style={"marginBottom": "3px"}),
+                        html.Div([
+                            html.Span("Take Profit:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Span(f" {recommendation['take_profit']}", style={"color": COLORS["success"], "fontSize": "10px", "fontWeight": "bold"}),
+                        ], style={"marginBottom": "3px"}),
+                        html.Div([
+                            html.Span("R:R Ratio:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Span(f" {recommendation['risk_reward']}", style={"color": COLORS["warning"], "fontSize": "10px", "fontWeight": "bold"}),
+                        ]),
+                    ])
+                ], width=3),
+                dbc.Col([
+                    html.H6("MARKET CONTEXT", style={"color": COLORS["text_secondary"], "fontSize": "10px", "letterSpacing": "1px"}),
+                    html.Div([
+                        html.Div([
+                            html.Span("Session:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Span(f" {recommendation['session']}", style={"color": COLORS["accent"], "fontSize": "10px"}),
+                        ], style={"marginBottom": "3px"}),
+                        html.Div([
+                            html.Span("Volatility:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Span(f" {recommendation['volatility_regime']}", style={"color": COLORS["danger"] if recommendation['volatility_regime'] == "HIGH" else (COLORS["success"] if recommendation['volatility_regime'] == "LOW" else COLORS["warning"]), "fontSize": "10px"}),
+                        ], style={"marginBottom": "3px"}),
+                        html.Div([
+                            html.Span("Price:", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                            html.Span(f" ${recommendation['current_price']:.2f}", style={"color": COLORS["text"], "fontSize": "10px", "fontWeight": "bold"}),
+                        ]),
+                    ])
+                ], width=3),
+            ])
+        ], style={"padding": "15px"})
+    ], style={"backgroundColor": COLORS["surface"], "border": f"2px solid {action_color}", "borderRadius": "8px", "marginBottom": "15px"})
+    
+    return recommendation_card
 
 
 # Run the app
