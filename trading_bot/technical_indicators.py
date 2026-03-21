@@ -282,7 +282,7 @@ class TechnicalIndicators:
         upper = middle + multiplier * atr
         lower = middle - multiplier * atr
         
-        return {'upper': upper, 'middle': lower, 'lower': lower}
+        return {'upper': upper, 'middle': middle, 'lower': lower}
     
     def donchian_channel(self, period: int = 20) -> Dict[str, pd.Series]:
         """Donchian Channel - Highest high and lowest low."""

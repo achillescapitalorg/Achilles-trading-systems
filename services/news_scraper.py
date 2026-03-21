@@ -1446,7 +1446,7 @@ def get_news_sources() -> List[Dict]:
             "name": "CoinTelegraph",
             "icon": "📱",
             "url": "https://cointelegraph.com",
-            "color": "#CHOCO",
+            "color": "#E67E22",
             "description": "Crypto News & Trends"
         },
     ]

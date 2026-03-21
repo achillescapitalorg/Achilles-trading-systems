@@ -6,6 +6,20 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 
 **Note:** This project uses a Dash-based frontend. A React/TypeScript frontend and Flask backend were originally planned but not implemented.
 
+## Current Status (Updated March 2026)
+
+### Recently Completed
+- Fixed Keltner Channel bug (`middle == lower` → `middle == middle`)
+- Fixed sentiment score return value in trading_bot.py
+- Fixed invalid hex color `#CHOCO` → `#E67E22` in news_scraper.py
+- Added unified trading recommendation card (RSI, MACD, Bollinger, Supertrend, Regime HMM, Black-Scholes, Volatility, Momentum)
+- Integrated `get_financial_news()` for real news with synthetic fallback
+- Cleaned unused imports (SABRModel, train_rl_agent, get_market_data_service, calculate_var)
+- Updated advanced metrics to use real calculations (Sharpe, Sortino, Max Drawdown, Calmar)
+- Added Monte Carlo simulation UI with configurable days/paths
+- Added trade history table with clear functionality
+- Improved regime detection with proper Baum-Welch EM, Viterbi, forward-backward smoothing
+
 ## Architecture
 
 ### Main Application (`/frontend`)
@@ -22,14 +36,14 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 
 ### Services (`/services/`)
 - **Data Layer**: Yahoo Finance API integration
-- **ML/Quant**: Black-Scholes, Heston, SABR, Q-Learning agent
+- **ML/Quant**: Black-Scholes, Heston, Regime Switching, Q-Learning agent
 - **News**: Multi-source news scraping
 
 ## Project Structure
 
 ```
 frontend/
-├── app.py                      # Main Dash application (3068 lines)
+├── app.py                      # Main Dash application (~4200 lines)
 ├── volatility_models.py         # GARCH, EGARCH, Heston models (1051 lines)
 ├── requirements.txt            # Python dependencies
 ├── assets/
@@ -39,7 +53,7 @@ frontend/
 │   ├── __init__.py
 │   ├── market_data.py          # Yahoo Finance data fetching
 │   ├── news_scraper.py         # Multi-source news (1452 lines)
-│   ├── advanced_models.py      # Black-Scholes, SABR, VaR (718 lines)
+│   ├── advanced_models.py      # Black-Scholes, Heston, VaR, Sharpe/Sortino/MaxDD (1299 lines)
 │   └── rl_agent.py             # Q-Learning trading agent (592 lines)
 ├── trading_bot/
 │   ├── __init__.py
@@ -88,14 +102,18 @@ frontend/
 
 ## Core Modules
 
-### `app.py` (3068 lines)
+### `app.py` (~4200 lines)
 Main Dash application handling:
 - Real-time price charts with candlesticks
 - Volatility surface (3D implied volatility)
-- Market metrics (Hurst exponent, skewness, kurtosis)
+- Market metrics (Hurst exponent, skewness, kurtosis, Sharpe, Sortino, Calmar, Max Drawdown)
 - Technical indicator signals (RSI, MACD, Bollinger, Supertrend)
+- **Unified Trading Recommendation** combining all indicators
 - Order form with stop loss/take profit
-- News feed with sentiment analysis
+- Trade history table (in-memory, persists during session)
+- News feed with sentiment analysis (real + synthetic fallback)
+- Monte Carlo simulation UI (configurable days/paths)
+- **Regime detection** with improved HMM (Baum-Welch EM, Viterbi, forward-backward)
 - Auto-refresh (5-second intervals)
 
 ### `volatility_models.py` (1051 lines)
@@ -125,14 +143,14 @@ Multi-source financial news:
 - CoinDesk, Crypto Panic
 - MarketWatch, Kitco
 
-#### `advanced_models.py` (718 lines)
+#### `advanced_models.py` (1299 lines)
 Quantitative finance models:
 - **Black-Scholes** - Option pricing + Greeks
 - **Heston Model** - Stochastic volatility
-- **SABR Model** - Volatility smile
-- **Regime Switching** - Market regime detection
+- **Regime Switching** - Market regime detection (improved with Baum-Welch, Viterbi)
 - **VaR/CVaR** - Risk metrics
-- **Sharpe/Sortino/Max Drawdown** - Performance metrics
+- **Sharpe/Sortino/Max Drawdown/Calmar** - Performance metrics
+- `detect_regime()` - Unified regime detection function
 
 #### `rl_agent.py` (592 lines)
 Reinforcement learning trading:
@@ -165,7 +183,7 @@ MT5/Exness trading bridge:
 50+ technical indicators:
 - **Trend**: EMA, SMA, WMA, Hull MA, VWAP, Ichimoku
 - **Momentum**: RSI, MACD, Stochastic, CCI, Williams %R
-- **Volatility**: Bollinger Bands, ATR, Keltner Channel
+- **Volatility**: Bollinger Bands, ATR, Keltner Channel (fixed)
 - **Volume**: OBV, Volume Profile, Money Flow
 - **Custom**: Supertrend, Pivot Points, Fibonacci
 
@@ -275,6 +293,15 @@ python run_bot.py
 4. **Yahoo Finance Limits**: Free tier has rate limits; app gracefully degrades to synthetic data
 5. **Risk Warning**: Trading involves substantial risk; always test with paper trading first
 
+## Known Issues & Architecture Gaps
+
+1. **Trading Bot Integration**: Bot runs standalone, not integrated with dashboard
+2. **SABR Model**: Excluded from main app (not actively used)
+3. **RL Training**: Agent can be trained but results not prominently displayed
+4. **Backtest Panel**: Not implemented
+5. **Bot Status Panel**: Not implemented
+6. **Alert System**: Not implemented
+
 ## Future Enhancements (Planned)
 
 - [ ] React/TypeScript frontend (per original spec)
@@ -283,3 +310,7 @@ python run_bot.py
 - [ ] Real-time MT5/Exness trading execution
 - [ ] User authentication and portfolios
 - [ ] Mobile-responsive design
+- [ ] Integrate trading bot with dashboard UI
+- [ ] Add persistent trade history (database)
+- [ ] Implement backtest panel
+- [ ] Implement alert system

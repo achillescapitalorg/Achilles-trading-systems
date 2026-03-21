@@ -21,16 +21,14 @@ from scipy.stats import norm
 
 # Import services
 from services.advanced_models import (
-    BlackScholes, HestonModel, HestonParams, SABRModel, SABRParams,
-    RegimeSwitchingModel, calculate_var, calculate_expected_shortfall,
+    BlackScholes, HestonModel, HestonParams,
+    RegimeSwitchingModel, calculate_expected_shortfall,
     calculate_sharpe_ratio, calculate_sortino_ratio, calculate_max_drawdown
 )
 from services.rl_agent import (
-    Action, QLearningAgent, TradingEnvironment, train_rl_agent, TradingState
+    Action, QLearningAgent, TradingEnvironment, TradingState
 )
-from services.market_data import get_market_data_service
 from services.news_scraper import get_financial_news, NewsArticle, NewsSource
-from services.news_scraper import get_financial_news
 
 # Initialize the Dash app
 app = dash.Dash(
@@ -121,6 +119,9 @@ CALENDAR_EVENTS = [
     {"time": "07:00", "currency": "EUR", "event": "ECB Rate Decision", "impact": "HIGH", "url": "https://www.fxstreet.com/economic-calendar"},
     {"time": "02:00", "currency": "GBP", "event": "BoE Rate Decision", "impact": "HIGH", "url": "https://www.forexfactory.com/calendar"},
 ]
+
+# Trade history (in-memory)
+TRADE_HISTORY = []
 
 
 def fetch_yahoo_finance_data(symbol, period="5d", interval="15m"):
@@ -932,7 +933,22 @@ def calculate_bs_probability(symbol, days=30):
 
 def create_advanced_metrics_cards(symbol):
     """Create advanced metrics cards - Advanced Tab."""
-    np.random.seed(hash(symbol) % 2**32)
+    try:
+        df = fetch_yahoo_finance_data(symbol, period="3mo", interval="1d")
+        if df is not None and 'close' in df.columns and len(df) > 30:
+            returns = df['close'].pct_change().dropna().values
+            equity_curve = (1 + returns).cumprod()
+            sortino = calculate_sortino_ratio(returns)
+            sharpe = calculate_sharpe_ratio(returns)
+            max_dd = calculate_max_drawdown(equity_curve)
+            annual_return = np.mean(returns) * 252
+            calmar = annual_return / max_dd if max_dd > 0 else 0
+        else:
+            sortino = sharpe = 0.5
+            calmar = max_dd = 0.1
+    except Exception:
+        sortino = sharpe = 0.5
+        calmar = max_dd = 0.1
     
     cards = dbc.Row([
         dbc.Col([
@@ -942,7 +958,7 @@ def create_advanced_metrics_cards(symbol):
                         html.Span("🎯", style={"fontSize": "24px", "marginRight": "8px"}),
                         html.H6("Sortino Ratio", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "8px", "display": "inline"}),
                     ]),
-                    html.H3(f"{round(np.random.uniform(-0.5, 2), 4):.3f}", style={"color": COLORS["text"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
+                    html.H3(f"{sortino:.3f}", style={"color": COLORS["text"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
                     html.Small("Downside risk-adjusted return", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
                 ], style={"padding": "20px"})
             ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "8px", "height": "100%"})
@@ -954,8 +970,32 @@ def create_advanced_metrics_cards(symbol):
                         html.Span("📊", style={"fontSize": "24px", "marginRight": "8px"}),
                         html.H6("Calmar Ratio", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "8px", "display": "inline"}),
                     ]),
-                    html.H3(f"{round(np.random.uniform(-0.5, 2), 4):.3f}", style={"color": COLORS["text"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
+                    html.H3(f"{calmar:.3f}", style={"color": COLORS["text"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
                     html.Small("Return vs max drawdown", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                ], style={"padding": "20px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "8px", "height": "100%"})
+        ], width=6),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.Div([
+                        html.Span("📉", style={"fontSize": "24px", "marginRight": "8px"}),
+                        html.H6("Max Drawdown", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "8px", "display": "inline"}),
+                    ]),
+                    html.H3(f"{max_dd:.2%}", style={"color": COLORS["danger"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
+                    html.Small("Largest peak-to-trough decline", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                ], style={"padding": "20px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "8px", "height": "100%"})
+        ], width=6),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.Div([
+                        html.Span("📈", style={"fontSize": "24px", "marginRight": "8px"}),
+                        html.H6("Sharpe Ratio", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "8px", "display": "inline"}),
+                    ]),
+                    html.H3(f"{sharpe:.3f}", style={"color": COLORS["success"] if sharpe > 0 else COLORS["danger"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
+                    html.Small("Risk-adjusted return", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
                 ], style={"padding": "20px"})
             ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "8px", "height": "100%"})
         ], width=6),
@@ -966,7 +1006,21 @@ def create_advanced_metrics_cards(symbol):
 
 def create_risk_metrics_cards(symbol):
     """Create risk metrics cards - Risk Tab."""
-    np.random.seed(hash(symbol) % 2**32)
+    try:
+        df = fetch_yahoo_finance_data(symbol, period="3mo", interval="1d")
+        if df is not None and 'close' in df.columns and len(df) > 30:
+            returns = df['close'].pct_change().dropna().values
+            var_95 = np.percentile(returns, 5)
+            es_95 = calculate_expected_shortfall(returns, 0.05)
+            max_dd = calculate_max_drawdown((1 + returns).cumprod())
+        else:
+            var_95 = -0.02
+            es_95 = -0.03
+            max_dd = 0.05
+    except Exception:
+        var_95 = -0.02
+        es_95 = -0.03
+        max_dd = 0.05
     
     cards = dbc.Row([
         dbc.Col([
@@ -976,11 +1030,11 @@ def create_risk_metrics_cards(symbol):
                         html.Span("⚠️", style={"fontSize": "24px", "marginRight": "8px"}),
                         html.H6("Value at Risk (95%)", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "8px", "display": "inline"}),
                     ]),
-                    html.H3(f"{round(np.random.uniform(0.01, 0.05), 4):.2%}", style={"color": COLORS["danger"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
+                    html.H3(f"{abs(var_95):.2%}", style={"color": COLORS["danger"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
                     html.Small("Maximum daily loss (95% confidence)", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
                 ], style={"padding": "20px"})
             ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "8px", "height": "100%"})
-        ], width=6),
+        ], width=4),
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
@@ -988,11 +1042,23 @@ def create_risk_metrics_cards(symbol):
                         html.Span("🔥", style={"fontSize": "24px", "marginRight": "8px"}),
                         html.H6("Expected Shortfall", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "8px", "display": "inline"}),
                     ]),
-                    html.H3(f"{round(np.random.uniform(0.02, 0.08), 4):.2%}", style={"color": COLORS["danger"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
+                    html.H3(f"{abs(es_95):.2%}", style={"color": COLORS["danger"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
                     html.Small("Loss beyond VaR threshold", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
                 ], style={"padding": "20px"})
             ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "8px", "height": "100%"})
-        ], width=6),
+        ], width=4),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.Div([
+                        html.Span("📉", style={"fontSize": "24px", "marginRight": "8px"}),
+                        html.H6("Max Drawdown", style={"color": COLORS["text_secondary"], "fontSize": "12px", "marginBottom": "8px", "display": "inline"}),
+                    ]),
+                    html.H3(f"{max_dd:.2%}", style={"color": COLORS["warning"], "marginBottom": "8px", "fontSize": "28px", "fontWeight": "bold"}),
+                    html.Small("Peak-to-trough decline", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                ], style={"padding": "20px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "8px", "height": "100%"})
+        ], width=4),
     ], className="g-3")
 
     return cards
@@ -1463,25 +1529,6 @@ def calculate_supertrend_safe(df, period=10, multiplier=3):
         return None
 
 
-def _default_recommendation():
-    """Return default recommendation on error."""
-    return {
-        'action': "HOLD",
-        'confidence': 0.5,
-        'direction': "NO POSITION",
-        'direction_color': COLORS["warning"],
-        'factors': [("System", "INITIALIZING...", "HOLD")],
-        'entry_zone': "N/A",
-        'stop_loss': "N/A",
-        'take_profit': "N/A",
-        'risk_reward': "N/A",
-        'current_price': 0,
-        'session': "N/A",
-        'volatility_regime': "NORMAL",
-        'signal_breakdown': {'BUY': 0, 'SELL': 0, 'HOLD': 1}
-    }
-
-
 def calculate_rsi(prices, period=14):
     """Calculate RSI indicator."""
     deltas = np.diff(prices)
@@ -1764,6 +1811,34 @@ app.layout = dbc.Container(fluid=True, children=[
                         ], active_tab="metrics", style={"backgroundColor": COLORS["background"]})
                     ], style={"padding": "0"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
+
+                # Monte Carlo Simulation Card
+                dbc.Card([
+                    dbc.CardHeader([
+                        html.Span("🎲 MONTE CARLO SIMULATION", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
+                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                html.Label("Forecast Days", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                dbc.Input(type="number", id="mc-days", value=30, min=1, max=365,
+                                         style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"], "fontSize": "11px"}),
+                            ], width=4),
+                            dbc.Col([
+                                html.Label("Simulations", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                                dbc.Input(type="number", id="mc-paths", value=1000, min=100, max=10000, step=100,
+                                         style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"], "fontSize": "11px"}),
+                            ], width=4),
+                            dbc.Col([
+                                html.Label(" ", style={"fontSize": "5px"}),
+                                dbc.Button("Run", id="mc-run-btn", color="primary", size="sm", className="w-100",
+                                          style={"marginTop": "4px"}),
+                            ], width=4),
+                        ], className="mb-3"),
+                        html.Div(id="mc-results", style={"fontSize": "10px"}),
+                        dcc.Graph(id="mc-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "200px"}),
+                    ], style={"padding": "12px"})
+                ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
             ], width=7),
 
             # Right Sidebar - Signals and Orders
@@ -1842,6 +1917,18 @@ app.layout = dbc.Container(fluid=True, children=[
                     ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
                     dbc.CardBody([
                         html.Div(id="economic-calendar", style={"maxHeight": "250px", "overflowY": "auto"})
+                    ], style={"padding": "12px"})
+                ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
+
+                # Trade History
+                dbc.Card([
+                    dbc.CardHeader([
+                        html.Span("📋 TRADE HISTORY", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
+                        dbc.Button("Clear", id="clear-trades-btn", size="sm", color="link", 
+                                  style={"float": "right", "fontSize": "10px", "padding": "0 5px"})
+                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
+                    dbc.CardBody([
+                        html.Div(id="trade-history-table", style={"maxHeight": "300px", "overflowY": "auto"})
                     ], style={"padding": "12px"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
             ], width=3),
@@ -2419,30 +2506,14 @@ def update_news_sources(n):
      Input("interval-component", "n_intervals")]
 )
 def update_news(symbol, n):
-    """Update news feed with instrument-specific news including sentiment, timestamp, and impact."""
+    """Update news feed with symbol-specific news including sentiment and expected impact."""
     if symbol is None:
         symbol = "XAUUSD"
     
-    # Map symbols to news keywords
-    symbol_keywords = {
-        "XAUUSD": {"name": "Gold", "keywords": ["gold", "xau", "precious metals", "silver", "spot gold", "gold price", "gold futures"]},
-        "BTCUSD": {"name": "Bitcoin", "keywords": ["bitcoin", "btc", "crypto", "cryptocurrency", "bitcoin price", "satoshi"]},
-        "ETHUSD": {"name": "Ethereum", "keywords": ["ethereum", "eth", "ether", "defi", "web3", "blockchain"]},
-        "EURUSD": {"name": "EUR/USD", "keywords": ["eurusd", "euro", "ecb", "european", "euro zone", "euro area"]},
-        "GBPUSD": {"name": "GBP/USD", "keywords": ["gbpusd", "pound", "sterling", "boe", "bank of england", "uk economy"]},
-        "USDJPY": {"name": "USD/JPY", "keywords": ["usdjpy", "yen", "boj", "bank of japan", "japanese yen"]},
-        "SPX500": {"name": "S&P 500", "keywords": ["s&p 500", "spx", "sp500", "us500", "wall street", "dow jones", "us indices"]},
-        "NAS100": {"name": "Nasdaq 100", "keywords": ["nasdaq", "ndx", "nasdaq100", "tech stocks", "faang", "silicon valley"]},
-    }
-    
-    symbol_info = symbol_keywords.get(symbol, {"name": symbol, "keywords": [symbol.lower()]})
-    
-    # Generate relevant news with timestamps and impact
-    news_templates = _generate_instrument_news(symbol, symbol_info)
+    news = _generate_instrument_news(symbol, {})
     
     news_items = []
-    for item in news_templates:
-        # Sentiment styling
+    for item in news:
         sentiment = item.get("sentiment", 0)
         if sentiment > 0.3:
             sentiment_color = COLORS["success"]
@@ -2460,39 +2531,30 @@ def update_news(symbol, n):
             sentiment_icon = "➡️"
             sentiment_text = "NEUTRAL"
         
-        # Impact styling
         impact = item.get("impact", "MEDIUM")
-        impact_colors = {"HIGH": COLORS["danger"], "MEDIUM": COLORS["warning"], "LOW": COLORS["info"]}
-        impact_color = impact_colors.get(impact, COLORS["text_secondary"])
+        impact_color = {"HIGH": COLORS["danger"], "MEDIUM": COLORS["warning"], "LOW": COLORS["info"]}.get(impact, COLORS["text_secondary"])
+        impact_bg = f"{impact_color}15"
         
-        # Time formatting
-        time_ago = item.get("time_ago", "1 hour ago")
+        source_icon = item.get("source_icon", "📰")
         
         news_items.append(
             html.A(
                 html.Div([
-                    # Header row: Source, Time, Symbol badge
                     html.Div([
-                        html.Div([
-                            html.Span(item.get("source_icon", "📰"), style={"fontSize": "12px", "marginRight": "4px"}),
-                            html.Small(item.get("source", "News"), style={"color": COLORS["text_secondary"], "fontSize": "9px", "fontWeight": "bold", "letterSpacing": "0.5px"}),
-                        ], style={"display": "flex", "alignItems": "center"}),
-                        html.Div([
-                            html.Span(symbol, style={"color": COLORS["accent"], "fontSize": "8px", "backgroundColor": f"{COLORS['accent']}20", "padding": "2px 6px", "borderRadius": "3px", "marginRight": "6px"}),
-                            html.Small(f"⏰ {time_ago}", style={"color": COLORS["text_secondary"], "fontSize": "8px"}),
-                        ], style={"display": "flex", "alignItems": "center"}),
-                    ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": "6px"}),
+                        html.Span(source_icon, style={"fontSize": "14px", "marginRight": "6px"}),
+                        html.Span(item.get("source", "News"), style={"color": COLORS["text_secondary"], "fontSize": "9px", "fontWeight": "bold", "letterSpacing": "0.5px"}),
+                        html.Span(symbol, style={"color": COLORS["accent"], "fontSize": "8px", "backgroundColor": f"{COLORS['accent']}20", "padding": "2px 6px", "borderRadius": "3px", "marginLeft": "8px", "marginRight": "8px"}),
+                        html.Span(f"⏰ {item.get('time_ago', '1 hour ago')}", style={"color": COLORS["text_secondary"], "fontSize": "8px"}),
+                    ], style={"display": "flex", "alignItems": "center", "marginBottom": "6px"}),
                     
-                    # News headline
                     html.P(item.get("headline", "Market update"), style={
                         "color": COLORS["text"], 
                         "fontSize": "11px", 
-                        "marginBottom": "6px", 
+                        "marginBottom": "8px", 
                         "fontWeight": "500",
                         "lineHeight": "1.3"
                     }),
                     
-                    # Sentiment and Impact row
                     html.Div([
                         html.Div([
                             html.Span(sentiment_icon, style={"fontSize": "10px", "marginRight": "4px"}),
@@ -2503,7 +2565,8 @@ def update_news(symbol, n):
                             "backgroundColor": sentiment_bg,
                             "padding": "3px 8px",
                             "borderRadius": "4px",
-                            "border": f"1px solid {sentiment_color}40"
+                            "border": f"1px solid {sentiment_color}40",
+                            "marginRight": "8px"
                         }),
                         html.Div([
                             html.Span("⚡", style={"fontSize": "10px", "marginRight": "4px"}),
@@ -2511,25 +2574,15 @@ def update_news(symbol, n):
                         ], style={
                             "display": "flex", 
                             "alignItems": "center",
-                            "marginLeft": "8px",
-                            "backgroundColor": f"{impact_color}15",
+                            "backgroundColor": impact_bg,
                             "padding": "3px 8px",
                             "borderRadius": "4px",
                         }),
-                        html.Div([
-                            html.Span("🎯", style={"fontSize": "10px", "marginRight": "4px"}),
-                            html.Span(item.get("affected_pairs", ""), style={"color": COLORS["info"], "fontSize": "8px"}),
-                        ], style={
-                            "display": "flex", 
-                            "alignItems": "center",
-                            "marginLeft": "auto",
-                        }) if item.get("affected_pairs") else html.Div(),
                     ], style={"display": "flex", "alignItems": "center"}),
                     
-                    # Impact timing if available
                     html.Div([
-                        html.Small(f"📅 Expected Impact: {item.get('impact_timing', 'Today')}", style={"color": COLORS["warning"], "fontSize": "8px", "marginTop": "4px"}),
-                    ], style={"marginTop": "4px"}) if item.get("impact_timing") else html.Div(),
+                        html.Span(f"📅 Expected Impact: {item.get('impact_timing', 'Today')}", style={"color": COLORS["warning"], "fontSize": "8px", "marginTop": "6px"}),
+                    ]) if item.get("impact_timing") else None,
                 ], 
                 style={
                     "padding": "10px", 
@@ -2546,92 +2599,93 @@ def update_news(symbol, n):
             )
         )
     
-    return news_items
+    return news_items if news_items else [html.P("No news available", style={"color": COLORS["text_secondary"], "textAlign": "center", "padding": "20px"})]
 
 
 def _generate_instrument_news(symbol, symbol_info):
-    """Generate realistic news for the selected instrument based on current market conditions."""
+    """Generate relevant synthetic news for the selected instrument."""
     import random
+    random.seed(hash(symbol) % 2**32)
     
-    # Define news templates per instrument type
-    gold_news = [
-        {"headline": "Gold prices surge as Fed signals potential rate cuts in 2026", "sentiment": 0.7, "impact": "HIGH", "time_ago": "15 min ago", "source": "Bloomberg", "source_icon": "💼", "affected_pairs": "XAUUSD, GOLD", "impact_timing": "High volatility expected", "url": "https://www.bloomberg.com/markets/commodities"},
-        {"headline": "Central banks increase gold reserves amid geopolitical tensions", "sentiment": 0.6, "impact": "HIGH", "time_ago": "1 hour ago", "source": "Reuters", "source_icon": "📰", "affected_pairs": "XAUUSD, GOLD", "impact_timing": "Sustained support", "url": "https://www.reuters.com/markets/"},
-        {"headline": "Gold holds above $2,650 as dollar weakens on inflation data", "sentiment": 0.5, "impact": "MEDIUM", "time_ago": "2 hours ago", "source": "Kitco", "source_icon": "🥇", "affected_pairs": "XAUUSD", "impact_timing": "Within trading session", "url": "https://www.kitco.com/news/"},
-        {"headline": "Gold miners report strong Q4 earnings, outlook positive", "sentiment": 0.6, "impact": "LOW", "time_ago": "3 hours ago", "source": "FXStreet", "source_icon": "💱", "affected_pairs": "XAUUSD, GOLD", "impact_timing": "Limited impact", "url": "https://www.fxstreet.com/news/forex"},
-        {"headline": "Technical analysis: Gold forming bull flag pattern on daily chart", "sentiment": 0.4, "impact": "MEDIUM", "time_ago": "4 hours ago", "source": "DailyFX", "source_icon": "📊", "affected_pairs": "XAUUSD", "impact_timing": "Watch resistance levels", "url": "https://www.dailyfx.com/"},
-        {"headline": "FOMC minutes release scheduled - Gold traders await cues", "sentiment": 0.2, "impact": "HIGH", "time_ago": "5 hours ago", "source": "Investing", "source_icon": "📈", "affected_pairs": "XAUUSD, GOLD, EURUSD", "impact_timing": "High volatility expected", "url": "https://www.investing.com/news/commodities-news"},
-        {"headline": "Silver outperformance signals broader precious metals rally", "sentiment": 0.7, "impact": "LOW", "time_ago": "6 hours ago", "source": "Kitco", "source_icon": "🥇", "affected_pairs": "XAUUSD, XAGUSD", "impact_timing": "Minor correlation", "url": "https://www.kitco.com/news/"},
-        {"headline": "Gold ETF inflows increase for third consecutive week", "sentiment": 0.5, "impact": "LOW", "time_ago": "8 hours ago", "source": "Bloomberg", "source_icon": "💼", "affected_pairs": "XAUUSD", "impact_timing": "Gradual price support", "url": "https://www.bloomberg.com/markets/commodities"},
-    ]
-    
-    btc_news = [
-        {"headline": "Bitcoin breaks $95,000 resistance as institutional buying surges", "sentiment": 0.8, "impact": "HIGH", "time_ago": "20 min ago", "source": "CoinDesk", "source_icon": "₿", "affected_pairs": "BTCUSD", "impact_timing": "Immediate volatility", "url": "https://www.coindesk.com/"},
-        {"headline": "SEC approves new Bitcoin ETF options, market reacts positively", "sentiment": 0.7, "impact": "HIGH", "time_ago": "45 min ago", "source": "Bloomberg", "source_icon": "💼", "affected_pairs": "BTCUSD, ETHUSD", "impact_timing": "Sustained interest", "url": "https://www.bloomberg.com/technology"},
-        {"headline": "On-chain metrics show healthy Bitcoin accumulation phase", "sentiment": 0.6, "impact": "MEDIUM", "time_ago": "2 hours ago", "source": "CoinDesk", "source_icon": "₿", "affected_pairs": "BTCUSD", "impact_timing": "Bullish signals", "url": "https://www.coindesk.com/markets"},
-        {"headline": "Crypto market cap reaches $3.5 trillion amid broad rally", "sentiment": 0.7, "impact": "HIGH", "time_ago": "3 hours ago", "source": "CNBC", "source_icon": "📺", "affected_pairs": "BTCUSD, ETHUSD, CRYPTO", "impact_timing": "Market-wide impact", "url": "https://www.cnbc.com/cryptocurrency/"},
-        {"headline": "Bitcoin whale activity increases - Large wallets accumulating", "sentiment": 0.5, "impact": "MEDIUM", "time_ago": "4 hours ago", "source": "CoinTelegraph", "source_icon": "📱", "affected_pairs": "BTCUSD", "impact_timing": "Potential breakout", "url": "https://cointelegraph.com/"},
-        {"headline": "Mining difficulty reaches all-time high, network stronger than ever", "sentiment": 0.3, "impact": "LOW", "time_ago": "5 hours ago", "source": "CoinDesk", "source_icon": "₿", "affected_pairs": "BTCUSD", "impact_timing": "Minimal price impact", "url": "https://www.coindesk.com/"},
-        {"headline": "Major exchange reports record trading volumes in Q1 2026", "sentiment": 0.6, "impact": "LOW", "time_ago": "7 hours ago", "source": "CoinDesk", "source_icon": "₿", "affected_pairs": "BTCUSD, CRYPTO", "impact_timing": "Market confidence up", "url": "https://www.coindesk.com/markets"},
-    ]
-    
-    eth_news = [
-        {"headline": "Ethereum staking yields attract record institutional inflows", "sentiment": 0.7, "impact": "HIGH", "time_ago": "30 min ago", "source": "CoinDesk", "source_icon": "₿", "affected_pairs": "ETHUSD", "impact_timing": "Positive pressure", "url": "https://www.coindesk.com/markets"},
-        {"headline": "Ethereum network processes 1.5M daily transactions - New record", "sentiment": 0.6, "impact": "MEDIUM", "time_ago": "1 hour ago", "source": "CoinTelegraph", "source_icon": "📱", "affected_pairs": "ETHUSD", "impact_timing": "Network strength", "url": "https://cointelegraph.com/"},
-        {"headline": "DeFi total value locked reaches $200B milestone", "sentiment": 0.7, "impact": "HIGH", "time_ago": "2 hours ago", "source": "CoinDesk", "source_icon": "₿", "affected_pairs": "ETHUSD, CRYPTO", "impact_timing": "Bullish ecosystem", "url": "https://www.coindesk.com/markets"},
-        {"headline": "Ethereum layer-2 solutions see 300% growth in 6 months", "sentiment": 0.6, "impact": "MEDIUM", "time_ago": "4 hours ago", "source": "CoinTelegraph", "source_icon": "📱", "affected_pairs": "ETHUSD", "impact_timing": "Long-term positive", "url": "https://cointelegraph.com/"},
-        {"headline": "Major protocol announces major upgrade - Community excited", "sentiment": 0.5, "impact": "MEDIUM", "time_ago": "5 hours ago", "source": "CoinDesk", "source_icon": "₿", "affected_pairs": "ETHUSD", "impact_timing": "Potential catalyst", "url": "https://www.coindesk.com/"},
-    ]
-    
-    forex_news = [
-        {"headline": "EUR/USD holds 1.05 support amid ECB policy uncertainty", "sentiment": 0.3, "impact": "HIGH", "time_ago": "25 min ago", "source": "FXStreet", "source_icon": "💱", "affected_pairs": "EURUSD", "impact_timing": "Watch ECB speakers", "url": "https://www.fxstreet.com/news/forex"},
-        {"headline": "Dollar index weakens as traders await US jobs data", "sentiment": -0.4, "impact": "HIGH", "time_ago": "1 hour ago", "source": "Reuters", "source_icon": "📰", "affected_pairs": "EURUSD, GBPUSD, USDJPY", "impact_timing": "Major volatility", "url": "https://www.reuters.com/markets/"},
-        {"headline": "Bank of England holds rates steady, Pound reacts mixed", "sentiment": 0.2, "impact": "HIGH", "time_ago": "2 hours ago", "source": "Forex Factory", "source_icon": "🏭", "affected_pairs": "GBPUSD", "impact_timing": "BoE decision", "url": "https://www.forexfactory.com/"},
-        {"headline": "USD/JPY approaches 153 resistance - BOJ intervention risk", "sentiment": -0.5, "impact": "HIGH", "time_ago": "3 hours ago", "source": "Investing", "source_icon": "📈", "affected_pairs": "USDJPY", "impact_timing": "Intervention watch", "url": "https://www.investing.com/news/forex"},
-        {"headline": "European economic data surprises to upside, Euro gains", "sentiment": 0.5, "impact": "MEDIUM", "time_ago": "4 hours ago", "source": "FXStreet", "source_icon": "💱", "affected_pairs": "EURUSD", "impact_timing": "EUR strength", "url": "https://www.fxstreet.com/news/forex"},
-        {"headline": "Swiss Franc weakens as SNB maintains dovish stance", "sentiment": -0.4, "impact": "MEDIUM", "time_ago": "5 hours ago", "source": "Forex Factory", "source_icon": "🏭", "affected_pairs": "USDCHF", "impact_timing": "CHf weakness", "url": "https://www.forexfactory.com/"},
-        {"headline": "Carry trade unwinding supports higher-yielding currencies", "sentiment": 0.3, "impact": "MEDIUM", "time_ago": "6 hours ago", "source": "DailyFX", "source_icon": "📊", "affected_pairs": "AUDUSD, NZDUSD", "impact_timing": "Risk sentiment", "url": "https://www.dailyfx.com/"},
-        {"headline": "Technical: EUR/USD forming head and shoulders pattern", "sentiment": -0.3, "impact": "MEDIUM", "time_ago": "7 hours ago", "source": "FXStreet", "source_icon": "💱", "affected_pairs": "EURUSD", "impact_timing": "Breakout watch", "url": "https://www.fxstreet.com/analysis"},
-    ]
-    
-    index_news = [
-        {"headline": "S&P 500 hits fresh all-time high on tech earnings beat", "sentiment": 0.8, "impact": "HIGH", "time_ago": "10 min ago", "source": "Bloomberg", "source_icon": "💼", "affected_pairs": "SPX500, NAS100", "impact_timing": "US session volatility", "url": "https://www.bloomberg.com/markets"},
-        {"headline": "Nasdaq 100 surges 2% as AI chip demand exceeds forecasts", "sentiment": 0.8, "impact": "HIGH", "time_ago": "30 min ago", "source": "CNBC", "source_icon": "📺", "affected_pairs": "NAS100, SPX500", "impact_timing": "Tech rally continues", "url": "https://www.cnbc.com/markets/"},
-        {"headline": "Fed signals patient approach, markets rally on dovish tone", "sentiment": 0.7, "impact": "HIGH", "time_ago": "1 hour ago", "source": "Reuters", "source_icon": "📰", "affected_pairs": "SPX500, NAS100, US500", "impact_timing": "Bullish sentiment", "url": "https://www.reuters.com/markets"},
-        {"headline": "VIX drops to 14 - Low volatility environment continues", "sentiment": 0.5, "impact": "MEDIUM", "time_ago": "2 hours ago", "source": "MarketWatch", "source_icon": "⌚", "affected_pairs": "SPX500", "impact_timing": "Risk-on environment", "url": "https://www.marketwatch.com/"},
-        {"headline": "Technical analysis: SPX500 forming ascending triangle", "sentiment": 0.4, "impact": "MEDIUM", "time_ago": "3 hours ago", "source": "DailyFX", "source_icon": "📊", "affected_pairs": "SPX500", "impact_timing": "Breakout potential", "url": "https://www.dailyfx.com/"},
-        {"headline": "Semiconductor stocks lead gains on AI optimism", "sentiment": 0.7, "impact": "HIGH", "time_ago": "4 hours ago", "source": "Yahoo Finance", "source_icon": "🟣", "affected_pairs": "NAS100, SOX", "impact_timing": "Tech dominance", "url": "https://finance.yahoo.com/markets"},
-        {"headline": "Earnings preview: Major banks report next week", "sentiment": 0.3, "impact": "HIGH", "time_ago": "5 hours ago", "source": "MarketWatch", "source_icon": "⌚", "affected_pairs": "SPX500, BANKS", "impact_timing": "Major catalyst ahead", "url": "https://www.marketwatch.com/"},
-    ]
-    
-    # Map symbol to news list
-    news_map = {
-        "XAUUSD": gold_news,
-        "BTCUSD": btc_news,
-        "ETHUSD": eth_news,
-        "EURUSD": forex_news,
-        "GBPUSD": forex_news,
-        "USDJPY": forex_news,
-        "SPX500": index_news,
-        "NAS100": index_news,
+    source_icons = {
+        "Bloomberg": "💼", "Reuters": "📰", "CNBC": "📺", "FX Street": "💱",
+        "Daily FX": "📊", "MarketWatch": "⌚", "Yahoo Finance": "🟣",
+        "CoinDesk": "₿", "CoinTelegraph": "📱", "Kitco": "🥇",
+        "Forex Factory": "🏭", "Investing": "📈"
     }
     
-    # Get news for selected symbol, with some forex/news shared
-    base_news = news_map.get(symbol, forex_news)
+    impact_timings = {
+        "HIGH": ["Immediate volatility", "High volatility", "Sustained market reaction"],
+        "MEDIUM": ["10-30 min reaction", "Watch levels", "Within trading session"],
+        "LOW": ["Limited impact", "Stable conditions", "No major reaction"]
+    }
     
-    # Add some shared market news to all feeds
-    shared_news = [
-        {"headline": "Global markets rally on positive US-China trade talks", "sentiment": 0.6, "impact": "HIGH", "time_ago": "35 min ago", "source": "Bloomberg", "source_icon": "💼", "affected_pairs": "GLOBAL", "impact_timing": "Risk-on sentiment", "url": "https://www.bloomberg.com/markets"},
-        {"headline": "Oil prices stabilize after OPEC+ maintains production cuts", "sentiment": 0.3, "impact": "MEDIUM", "time_ago": "2 hours ago", "source": "Reuters", "source_icon": "📰", "affected_pairs": "USOIL, Brent", "impact_timing": "Commodity impact", "url": "https://www.reuters.com/markets/commodities"},
-    ]
+    news_templates = {
+        "XAUUSD": [
+            {"headline": "Gold holds steady near $2,000 as traders await Fed signals", "sentiment": 0.2, "impact": "MEDIUM", "source": "Reuters", "time_ago": "12 min ago", "impact_timing": "10-30 min reaction"},
+            {"headline": "Central banks boost gold reserves amid geopolitical uncertainty", "sentiment": 0.6, "impact": "HIGH", "source": "Bloomberg", "time_ago": "45 min ago", "impact_timing": "High volatility"},
+            {"headline": "Gold miners report strong Q4 earnings, beat expectations", "sentiment": 0.5, "impact": "LOW", "source": "Kitco", "time_ago": "1 hour ago", "impact_timing": "Limited impact"},
+            {"headline": "Silver outpaces gold with industrial demand surge", "sentiment": 0.7, "impact": "MEDIUM", "source": "Daily FX", "time_ago": "2 hours ago", "impact_timing": "Watch levels"},
+            {"headline": "Fed minutes hint at slower pace of rate hikes", "sentiment": 0.4, "impact": "HIGH", "source": "CNBC", "time_ago": "3 hours ago", "impact_timing": "High volatility"},
+        ],
+        "BTCUSD": [
+            {"headline": "Bitcoin consolidates near $43K as ETF flows remain strong", "sentiment": 0.3, "impact": "MEDIUM", "source": "CoinDesk", "time_ago": "8 min ago", "impact_timing": "Watch levels"},
+            {"headline": "Crypto markets rally on SEC approval of spot ETF", "sentiment": 0.8, "impact": "HIGH", "source": "CoinTelegraph", "time_ago": "30 min ago", "impact_timing": "High volatility"},
+            {"headline": "On-chain data shows increasing whale accumulation", "sentiment": 0.6, "impact": "MEDIUM", "source": "CoinDesk", "time_ago": "1 hour ago", "impact_timing": "Sustained market reaction"},
+            {"headline": "Lightning Network capacity reaches new all-time high", "sentiment": 0.5, "impact": "LOW", "source": "CoinDesk", "time_ago": "2 hours ago", "impact_timing": "Limited impact"},
+            {"headline": "MicroStrategy announces additional Bitcoin purchases", "sentiment": 0.7, "impact": "HIGH", "source": "Bloomberg", "time_ago": "4 hours ago", "impact_timing": "High volatility"},
+        ],
+        "ETHUSD": [
+            {"headline": "Ethereum staking yields attract institutional interest", "sentiment": 0.5, "impact": "MEDIUM", "source": "CoinDesk", "time_ago": "15 min ago", "impact_timing": "Watch levels"},
+            {"headline": "DeFi TVL rebounds as network activity increases", "sentiment": 0.6, "impact": "MEDIUM", "source": "CoinTelegraph", "time_ago": "1 hour ago", "impact_timing": "Sustained market reaction"},
+            {"headline": "Layer 2 solutions see record transaction volumes", "sentiment": 0.4, "impact": "LOW", "source": "CoinDesk", "time_ago": "2 hours ago", "impact_timing": "Limited impact"},
+            {"headline": "ETH/BTC ratio suggests potential altcoin season", "sentiment": 0.3, "impact": "MEDIUM", "source": "CoinTelegraph", "time_ago": "3 hours ago", "impact_timing": "Watch levels"},
+        ],
+        "EURUSD": [
+            {"headline": "EUR/USD pushes higher as dollar weakens post-Fed", "sentiment": 0.4, "impact": "MEDIUM", "source": "FX Street", "time_ago": "10 min ago", "impact_timing": "10-30 min reaction"},
+            {"headline": "ECB officials signal potential rate pause", "sentiment": 0.3, "impact": "HIGH", "source": "Reuters", "time_ago": "40 min ago", "impact_timing": "High volatility"},
+            {"headline": "German business confidence exceeds forecasts", "sentiment": 0.5, "impact": "MEDIUM", "source": "Bloomberg", "time_ago": "2 hours ago", "impact_timing": "Sustained market reaction"},
+            {"headline": "Eurozone inflation cools faster than expected", "sentiment": 0.6, "impact": "HIGH", "source": "CNBC", "time_ago": "3 hours ago", "impact_timing": "High volatility"},
+            {"headline": "EUR/USD tests key resistance at 1.0900", "sentiment": 0.2, "impact": "MEDIUM", "source": "Daily FX", "time_ago": "4 hours ago", "impact_timing": "Watch levels"},
+        ],
+        "GBPUSD": [
+            {"headline": "Pound gains as UK inflation data supports BoE stance", "sentiment": 0.4, "impact": "MEDIUM", "source": "FX Street", "time_ago": "20 min ago", "impact_timing": "10-30 min reaction"},
+            {"headline": "BoE maintains cautious tone on rate cuts", "sentiment": 0.1, "impact": "HIGH", "source": "Reuters", "time_ago": "1 hour ago", "impact_timing": "High volatility"},
+            {"headline": "UK GDP growth surprises to the upside", "sentiment": 0.5, "impact": "MEDIUM", "source": "Bloomberg", "time_ago": "2 hours ago", "impact_timing": "Sustained market reaction"},
+            {"headline": "GBP/USD breaks above key moving average", "sentiment": 0.4, "impact": "MEDIUM", "source": "Daily FX", "time_ago": "3 hours ago", "impact_timing": "Watch levels"},
+        ],
+        "USDJPY": [
+            {"headline": "Yen weakens as BoJ maintains ultra-loose policy", "sentiment": -0.3, "impact": "HIGH", "source": "Reuters", "time_ago": "15 min ago", "impact_timing": "High volatility"},
+            {"headline": "USD/JPY approaches 150 level, intervention risk rises", "sentiment": -0.5, "impact": "HIGH", "source": "FX Street", "time_ago": "45 min ago", "impact_timing": "Immediate volatility"},
+            {"headline": "Japanese trade deficit narrows on export growth", "sentiment": 0.2, "impact": "LOW", "source": "Bloomberg", "time_ago": "2 hours ago", "impact_timing": "Limited impact"},
+            {"headline": "BoJ Governor hints at policy shift timing", "sentiment": -0.4, "impact": "HIGH", "source": "CNBC", "time_ago": "3 hours ago", "impact_timing": "High volatility"},
+        ],
+        "SPX500": [
+            {"headline": "S&P 500 hits new high as tech earnings beat", "sentiment": 0.7, "impact": "HIGH", "source": "CNBC", "time_ago": "5 min ago", "impact_timing": "High volatility"},
+            {"headline": "Fed Chair signals soft landing remains possible", "sentiment": 0.5, "impact": "HIGH", "source": "Bloomberg", "time_ago": "30 min ago", "impact_timing": "Sustained market reaction"},
+            {"headline": "Corporate earnings season exceeds expectations", "sentiment": 0.6, "impact": "MEDIUM", "source": "MarketWatch", "time_ago": "1 hour ago", "impact_timing": "10-30 min reaction"},
+            {"headline": "VIX drops to lowest level in months", "sentiment": 0.3, "impact": "MEDIUM", "source": "Reuters", "time_ago": "2 hours ago", "impact_timing": "Stable conditions"},
+            {"headline": "Financial sector leads broad market rally", "sentiment": 0.5, "impact": "MEDIUM", "source": "Yahoo Finance", "time_ago": "3 hours ago", "impact_timing": "Watch levels"},
+        ],
+        "NAS100": [
+            {"headline": "Nasdaq surges as AI chip demand soars", "sentiment": 0.8, "impact": "HIGH", "source": "CNBC", "time_ago": "10 min ago", "impact_timing": "High volatility"},
+            {"headline": "Tech mega-caps report blowout earnings", "sentiment": 0.7, "impact": "HIGH", "source": "Bloomberg", "time_ago": "25 min ago", "impact_timing": "Sustained market reaction"},
+            {"headline": "Semiconductor stocks rally on strong guidance", "sentiment": 0.6, "impact": "MEDIUM", "source": "MarketWatch", "time_ago": "1 hour ago", "impact_timing": "10-30 min reaction"},
+            {"headline": "Cloud computing spending accelerates", "sentiment": 0.5, "impact": "MEDIUM", "source": "Reuters", "time_ago": "2 hours ago", "impact_timing": "Watch levels"},
+            {"headline": "Tech sector leads broader market higher", "sentiment": 0.6, "impact": "MEDIUM", "source": "Yahoo Finance", "time_ago": "3 hours ago", "impact_timing": "Sustained market reaction"},
+        ],
+    }
     
-    # Combine news
-    all_news = base_news[:6] + shared_news
+    templates = news_templates.get(symbol, news_templates["EURUSD"])
+    selected = random.sample(templates, min(4, len(templates)))
     
-    # Shuffle for variety but keep recent first
-    random.shuffle(all_news)
+    for item in selected:
+        item["source_icon"] = source_icons.get(item["source"], "📰")
+        item["url"] = "https://www.google.com/search?q=" + item["headline"].replace(" ", "+")
+        if not item.get("impact_timing"):
+            item["impact_timing"] = random.choice(impact_timings.get(item["impact"], ["Within trading session"]))
     
-    return all_news[:8]
+    return selected
 
 
 @callback(
@@ -2819,21 +2873,29 @@ def _get_impact_timing(event_name):
 
 
 @callback(
-    Output("order-status", "children"),
+    [Output("order-status", "children"),
+     Output("trade-history-table", "children")],
     [Input("buy-btn", "n_clicks"),
-     Input("sell-btn", "n_clicks")],
+     Input("sell-btn", "n_clicks"),
+     Input("clear-trades-btn", "n_clicks")],
     [State("selected-symbol", "data"),
      State("order-size", "value"),
      State("stop-loss", "value"),
      State("take-profit", "value")],
     prevent_initial_call=True
 )
-def execute_order(buy_clicks, sell_clicks, symbol, size, stop_loss, take_profit):
-    """Execute trading order."""
+def handle_trade_actions(buy_clicks, sell_clicks, clear_clicks, symbol, size, stop_loss, take_profit):
+    """Execute trading order or clear history."""
+    global TRADE_HISTORY
     if not ctx.triggered:
-        return ""
+        return "", ""
 
     button_id = ctx.triggered[0]["prop_id"]
+    
+    if "clear-trades-btn" in button_id:
+        TRADE_HISTORY = []
+        return "", _create_trade_history_table()
+    
     if "buy-btn" in button_id:
         action = "BUY"
         color = COLORS["success"]
@@ -2841,10 +2903,56 @@ def execute_order(buy_clicks, sell_clicks, symbol, size, stop_loss, take_profit)
         action = "SELL"
         color = COLORS["danger"]
 
+    price = get_current_price(symbol)
+    trade = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "symbol": symbol,
+        "action": action,
+        "size": size,
+        "price": price,
+        "sl": stop_loss,
+        "tp": take_profit,
+        "pnl": 0.0
+    }
+    TRADE_HISTORY.insert(0, trade)
+    if len(TRADE_HISTORY) > 20:
+        TRADE_HISTORY = TRADE_HISTORY[:20]
+
+    table = _create_trade_history_table()
     return html.Span(
         f"✅ {action} {size} lots of {symbol} executed!",
         style={"color": color, "fontWeight": "bold", "fontSize": "11px"}
-    )
+    ), table
+
+
+def _create_trade_history_table():
+    """Create trade history table HTML."""
+    if not TRADE_HISTORY:
+        return html.Div([
+            html.P("No trades yet", style={"color": COLORS["text_secondary"], "textAlign": "center", "fontSize": "11px", "padding": "20px"})
+        ])
+    
+    rows = []
+    for trade in TRADE_HISTORY:
+        action_color = COLORS["success"] if trade["action"] == "BUY" else COLORS["danger"]
+        rows.append(html.Tr([
+            html.Td(trade["time"], style={"fontSize": "10px", "padding": "4px"}),
+            html.Td(trade["symbol"], style={"fontSize": "10px", "padding": "4px"}),
+            html.Td(trade["action"], style={"fontSize": "10px", "color": action_color, "fontWeight": "bold", "padding": "4px"}),
+            html.Td(f"{trade['size']:.2f}", style={"fontSize": "10px", "padding": "4px"}),
+            html.Td(f"${trade['price']:.2f}", style={"fontSize": "10px", "padding": "4px"}),
+        ]))
+    
+    return html.Table([
+        html.Thead(html.Tr([
+            html.Th("Time", style={"fontSize": "10px", "padding": "4px"}),
+            html.Th("Symbol", style={"fontSize": "10px", "padding": "4px"}),
+            html.Th("Action", style={"fontSize": "10px", "padding": "4px"}),
+            html.Th("Size", style={"fontSize": "10px", "padding": "4px"}),
+            html.Th("Price", style={"fontSize": "10px", "padding": "4px"}),
+        ])),
+        html.Tbody(rows)
+    ], style={"width": "100%", "borderCollapse": "collapse"})
 
 
 @callback(
@@ -3649,6 +3757,112 @@ def update_price_prediction(symbol):
     fig.update_yaxes(gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"]))
     
     return cards, fig
+
+
+def run_monte_carlo_simulation(symbol, days, n_paths):
+    """Run Monte Carlo simulation for price paths."""
+    current_price = get_current_price(symbol)
+    df = fetch_yahoo_finance_data(symbol, period="3mo", interval="1d")
+    
+    if df is not None and 'close' in df.columns and len(df) > 30:
+        returns = df['close'].pct_change().dropna().values
+        mu = np.mean(returns)
+        sigma = np.std(returns)
+    else:
+        mu = 0.0002
+        sigma = 0.02
+    
+    dt = 1.0 / 252
+    paths = np.zeros((n_paths, days + 1))
+    paths[:, 0] = current_price
+    
+    for t in range(days):
+        shock = np.random.normal(mu * dt, sigma * np.sqrt(dt), n_paths)
+        paths[:, t + 1] = paths[:, t] * (1 + shock)
+    
+    final_prices = paths[:, -1]
+    mean_price = np.mean(final_prices)
+    median_price = np.median(final_prices)
+    ci_95 = (np.percentile(final_prices, 2.5), np.percentile(final_prices, 97.5))
+    prob_up = np.mean(final_prices > current_price)
+    
+    return {
+        "paths": paths,
+        "current_price": current_price,
+        "mean_price": mean_price,
+        "median_price": median_price,
+        "ci_95": ci_95,
+        "prob_up": prob_up,
+        "expected_return": (mean_price - current_price) / current_price
+    }
+
+
+@callback(
+    [Output("mc-results", "children"),
+     Output("mc-chart", "figure")],
+    [Input("mc-run-btn", "n_clicks"),
+     Input("selected-symbol", "data")],
+    [State("mc-days", "value"),
+     State("mc-paths", "value")],
+    prevent_initial_call=True
+)
+def update_monte_carlo(n_clicks, symbol, days, n_paths):
+    """Run and display Monte Carlo simulation."""
+    if symbol is None:
+        symbol = "XAUUSD"
+    if days is None:
+        days = 30
+    if n_paths is None:
+        n_paths = 1000
+    
+    n_paths = min(n_paths, 5000)
+    days = min(days, 365)
+    
+    result = run_monte_carlo_simulation(symbol, days, n_paths)
+    
+    result_text = html.Div([
+        dbc.Row([
+            dbc.Col([
+                html.Span(f"Mean: ${result['mean_price']:.2f}", style={"color": COLORS["accent"], "fontSize": "11px"}),
+            ], width=4),
+            dbc.Col([
+                html.Span(f"95% CI: ${result['ci_95'][0]:.0f}-${result['ci_95'][1]:.0f}", style={"color": COLORS["info"], "fontSize": "11px"}),
+            ], width=8),
+        ]),
+        dbc.Row([
+            dbc.Col([
+                html.Span(f"P(up): {result['prob_up']:.1%}", style={"color": COLORS["success"] if result['prob_up'] > 0.5 else COLORS["danger"], "fontSize": "11px"}),
+            ], width=4),
+            dbc.Col([
+                html.Span(f"Return: {result['expected_return']:+.1%}", style={"color": COLORS["success"] if result['expected_return'] > 0 else COLORS["danger"], "fontSize": "11px"}),
+            ], width=8),
+        ]),
+    ])
+    
+    sample_paths = result['paths'][::max(1, n_paths // 50)]
+    fig = go.Figure()
+    for i, path in enumerate(sample_paths):
+        color = COLORS["accent"] if path[-1] > result['current_price'] else COLORS["danger"]
+        opacity = 0.3 if i > 0 else 0.8
+        fig.add_trace(go.Scatter(
+            y=path, mode='lines', line=dict(color=color, width=1),
+            opacity=opacity, showlegend=False
+        ))
+    
+    fig.add_hline(y=result['current_price'], line_dash="dash", line_color=COLORS["text"], 
+                  annotation_text="Current", annotation_position="bottom")
+    fig.add_hline(y=result['mean_price'], line_dash="dot", line_color=COLORS["accent"],
+                  annotation_text=f"Mean: ${result['mean_price']:.0f}", annotation_position="top")
+    
+    fig.update_layout(
+        height=200, margin=dict(l=30, r=20, t=30, b=30),
+        plot_bgcolor=COLORS["background"], paper_bgcolor=COLORS["background"],
+        font=dict(color=COLORS["text"], size=10),
+        xaxis=dict(showgrid=True, gridcolor=COLORS["grid"], showticklabels=False),
+        yaxis=dict(showgrid=True, gridcolor=COLORS["grid"], tickfont=dict(color=COLORS["text_secondary"]))
+    )
+    
+    return result_text, fig
 
 
 @callback(

@@ -258,7 +258,7 @@ class GoldBTCTradingBot:
         signal, confidence, metadata = self.sentiment_analyzer.get_signal(asset)
 
         details = {
-            'sentiment_score': getattr(metadata.get('sentiment', None), 'sentiment_score', 0) if isinstance(metadata.get('sentiment', None), object) else 0,
+            'sentiment_score': metadata.get('sentiment', SentimentSignal('NEUTRAL', 0, 0, 0, [], [])).sentiment_score if hasattr(metadata.get('sentiment'), 'sentiment_score') else 0,
             'news_count': metadata.get('news_count', 0),
             'sources': metadata.get('sources', []),
             'economic_events': metadata.get('economic_events', {}),
