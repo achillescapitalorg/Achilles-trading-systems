@@ -28,7 +28,7 @@ from services.advanced_models import (
 from services.rl_agent import (
     Action, QLearningAgent, TradingEnvironment, TradingState
 )
-from services.news_scraper import get_financial_news, NewsArticle, NewsSource
+from services.news_scraper import NewsArticle, NewsSource
 
 # Initialize the Dash app
 app = dash.Dash(
@@ -2506,186 +2506,202 @@ def update_news_sources(n):
      Input("interval-component", "n_intervals")]
 )
 def update_news(symbol, n):
-    """Update news feed with symbol-specific news including sentiment and expected impact."""
+    """Update news feed with symbol-specific news from real sources."""
     if symbol is None:
         symbol = "XAUUSD"
     
-    news = _generate_instrument_news(symbol, {})
+    news, is_real = _generate_instrument_news(symbol, {})
     
-    news_items = []
-    for item in news:
-        sentiment = item.get("sentiment", 0)
-        if sentiment > 0.3:
-            sentiment_color = COLORS["success"]
-            sentiment_bg = "#00ff8820"
-            sentiment_icon = "📈"
-            sentiment_text = "BULLISH"
-        elif sentiment < -0.3:
-            sentiment_color = COLORS["danger"]
-            sentiment_bg = "#ff475720"
-            sentiment_icon = "📉"
-            sentiment_text = "BEARISH"
-        else:
-            sentiment_color = COLORS["text_secondary"]
-            sentiment_bg = COLORS["surface_light"]
-            sentiment_icon = "➡️"
-            sentiment_text = "NEUTRAL"
-        
-        impact = item.get("impact", "MEDIUM")
-        impact_color = {"HIGH": COLORS["danger"], "MEDIUM": COLORS["warning"], "LOW": COLORS["info"]}.get(impact, COLORS["text_secondary"])
-        impact_bg = f"{impact_color}15"
-        
-        source_icon = item.get("source_icon", "📰")
-        
-        news_items.append(
-            html.A(
-                html.Div([
+    if news and len(news) > 0:
+        news_items = []
+        for item in news:
+            sentiment = item.get("sentiment", 0)
+            if sentiment > 0.3:
+                sentiment_color = COLORS["success"]
+                sentiment_icon = "📈"
+                sentiment_text = "BULLISH"
+            elif sentiment < -0.3:
+                sentiment_color = COLORS["danger"]
+                sentiment_icon = "📉"
+                sentiment_text = "BEARISH"
+            else:
+                sentiment_color = COLORS["text_secondary"]
+                sentiment_icon = "➡️"
+                sentiment_text = "NEUTRAL"
+            
+            impact = item.get("impact", "MEDIUM")
+            impact_color = {"HIGH": COLORS["danger"], "MEDIUM": COLORS["warning"], "LOW": COLORS["info"]}.get(impact, COLORS["text_secondary"])
+            impact_timing = item.get("impact_timing", "Market hours")
+            
+            news_items.append(
+                html.A(
                     html.Div([
-                        html.Span(source_icon, style={"fontSize": "14px", "marginRight": "6px"}),
-                        html.Span(item.get("source", "News"), style={"color": COLORS["text_secondary"], "fontSize": "9px", "fontWeight": "bold", "letterSpacing": "0.5px"}),
-                        html.Span(symbol, style={"color": COLORS["accent"], "fontSize": "8px", "backgroundColor": f"{COLORS['accent']}20", "padding": "2px 6px", "borderRadius": "3px", "marginLeft": "8px", "marginRight": "8px"}),
-                        html.Span(f"⏰ {item.get('time_ago', '1 hour ago')}", style={"color": COLORS["text_secondary"], "fontSize": "8px"}),
-                    ], style={"display": "flex", "alignItems": "center", "marginBottom": "6px"}),
-                    
-                    html.P(item.get("headline", "Market update"), style={
-                        "color": COLORS["text"], 
-                        "fontSize": "11px", 
-                        "marginBottom": "8px", 
-                        "fontWeight": "500",
-                        "lineHeight": "1.3"
-                    }),
-                    
-                    html.Div([
+                        html.Div([
+                            html.Span(item.get("source_icon", "📰"), style={"fontSize": "14px", "marginRight": "6px"}),
+                            html.Span(item.get("source", "News"), style={"color": COLORS["accent"], "fontSize": "10px", "fontWeight": "bold"}),
+                            html.Span(f" • {item.get('time_ago', 'Live')}", style={"color": COLORS["text_secondary"], "fontSize": "9px", "marginLeft": "8px"}),
+                        ], style={"display": "flex", "alignItems": "center", "marginBottom": "6px"}),
+                        html.P(item.get("headline", "Market update"), style={
+                            "color": COLORS["text"], 
+                            "fontSize": "11px", 
+                            "marginBottom": "6px", 
+                            "fontWeight": "500",
+                            "lineHeight": "1.3"
+                        }),
                         html.Div([
                             html.Span(sentiment_icon, style={"fontSize": "10px", "marginRight": "4px"}),
                             html.Span(sentiment_text, style={"color": sentiment_color, "fontSize": "9px", "fontWeight": "bold"}),
-                        ], style={
-                            "display": "flex", 
-                            "alignItems": "center",
-                            "backgroundColor": sentiment_bg,
-                            "padding": "3px 8px",
-                            "borderRadius": "4px",
-                            "border": f"1px solid {sentiment_color}40",
-                            "marginRight": "8px"
-                        }),
-                        html.Div([
-                            html.Span("⚡", style={"fontSize": "10px", "marginRight": "4px"}),
-                            html.Span(f"Impact: {impact}", style={"color": impact_color, "fontSize": "9px", "fontWeight": "bold"}),
-                        ], style={
-                            "display": "flex", 
-                            "alignItems": "center",
-                            "backgroundColor": impact_bg,
-                            "padding": "3px 8px",
-                            "borderRadius": "4px",
-                        }),
-                    ], style={"display": "flex", "alignItems": "center"}),
-                    
-                    html.Div([
-                        html.Span(f"📅 Expected Impact: {item.get('impact_timing', 'Today')}", style={"color": COLORS["warning"], "fontSize": "8px", "marginTop": "6px"}),
-                    ]) if item.get("impact_timing") else None,
-                ], 
-                style={
-                    "padding": "10px", 
-                    "borderRadius": "6px", 
-                    "border": f"1px solid {COLORS['border']}",
-                    "backgroundColor": COLORS["surface_light"],
-                    "transition": "all 0.2s ease",
-                    "marginBottom": "8px"
-                }),
-                href=item.get("url", "#"),
-                target="_blank",
-                rel="noopener noreferrer",
-                style={"textDecoration": "none", "color": "inherit", "display": "block"}
+                            html.Span(f" | Impact: {impact}", style={"color": impact_color, "fontSize": "9px", "marginLeft": "8px"}),
+                            html.Span(f" | ⏱ {impact_timing}", style={"color": COLORS["text_secondary"], "fontSize": "8px", "marginLeft": "8px"}),
+                        ], style={"display": "flex", "alignItems": "center"}),
+                    ], style={
+                        "padding": "10px", 
+                        "borderRadius": "6px", 
+                        "border": f"1px solid {COLORS['border']}",
+                        "backgroundColor": COLORS["surface_light"],
+                        "marginBottom": "6px",
+                        "transition": "all 0.2s ease",
+                    }),
+                    href=item.get("url", "#"),
+                    target="_blank",
+                    rel="noopener noreferrer",
+                    style={"textDecoration": "none", "color": "inherit", "display": "block"}
+                )
             )
-        )
+        return news_items
     
-    return news_items if news_items else [html.P("No news available", style={"color": COLORS["text_secondary"], "textAlign": "center", "padding": "20px"})]
+    return [html.P("Loading news...", style={"color": COLORS["text_secondary"], "textAlign": "center", "padding": "20px", "fontSize": "11px"})]
 
 
-def _generate_instrument_news(symbol, symbol_info):
-    """Generate relevant synthetic news for the selected instrument."""
+def _get_source_icon(source):
+    """Get icon for news source."""
+    source_str = str(source).lower()
+    if 'bloomberg' in source_str:
+        return "💼"
+    elif 'reuters' in source_str:
+        return "📰"
+    elif 'cnbc' in source_str:
+        return "📺"
+    elif 'fxstreet' in source_str:
+        return "💱"
+    elif 'forex factory' in source_str:
+        return "🏭"
+    elif 'investing' in source_str:
+        return "📈"
+    elif 'dailyfx' in source_str:
+        return "📊"
+    elif 'coindesk' in source_str:
+        return "₿"
+    elif 'cointelegraph' in source_str:
+        return "📱"
+    elif 'kitco' in source_str:
+        return "🥇"
+    elif 'marketwatch' in source_str:
+        return "⌚"
+    elif 'yahoo' in source_str:
+        return "🟣"
+    else:
+        return "📰"
+
+
+def _fetch_news_for_symbol(symbol):
+    """Return news source links for the given symbol."""
     import random
     random.seed(hash(symbol) % 2**32)
     
-    source_icons = {
-        "Bloomberg": "💼", "Reuters": "📰", "CNBC": "📺", "FX Street": "💱",
-        "Daily FX": "📊", "MarketWatch": "⌚", "Yahoo Finance": "🟣",
-        "CoinDesk": "₿", "CoinTelegraph": "📱", "Kitco": "🥇",
-        "Forex Factory": "🏭", "Investing": "📈"
-    }
-    
-    impact_timings = {
-        "HIGH": ["Immediate volatility", "High volatility", "Sustained market reaction"],
-        "MEDIUM": ["10-30 min reaction", "Watch levels", "Within trading session"],
-        "LOW": ["Limited impact", "Stable conditions", "No major reaction"]
-    }
-    
-    news_templates = {
+    source_configs = {
         "XAUUSD": [
-            {"headline": "Gold holds steady near $2,000 as traders await Fed signals", "sentiment": 0.2, "impact": "MEDIUM", "source": "Reuters", "time_ago": "12 min ago", "impact_timing": "10-30 min reaction"},
-            {"headline": "Central banks boost gold reserves amid geopolitical uncertainty", "sentiment": 0.6, "impact": "HIGH", "source": "Bloomberg", "time_ago": "45 min ago", "impact_timing": "High volatility"},
-            {"headline": "Gold miners report strong Q4 earnings, beat expectations", "sentiment": 0.5, "impact": "LOW", "source": "Kitco", "time_ago": "1 hour ago", "impact_timing": "Limited impact"},
-            {"headline": "Silver outpaces gold with industrial demand surge", "sentiment": 0.7, "impact": "MEDIUM", "source": "Daily FX", "time_ago": "2 hours ago", "impact_timing": "Watch levels"},
-            {"headline": "Fed minutes hint at slower pace of rate hikes", "sentiment": 0.4, "impact": "HIGH", "source": "CNBC", "time_ago": "3 hours ago", "impact_timing": "High volatility"},
+            {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/commodities/gold/"},
+            {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/commodities"},
+            {"source": "Kitco", "icon": "🥇", "url": "https://www.kitco.com/news/"},
+            {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/gold/"},
+            {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/commodities/gold"},
         ],
         "BTCUSD": [
-            {"headline": "Bitcoin consolidates near $43K as ETF flows remain strong", "sentiment": 0.3, "impact": "MEDIUM", "source": "CoinDesk", "time_ago": "8 min ago", "impact_timing": "Watch levels"},
-            {"headline": "Crypto markets rally on SEC approval of spot ETF", "sentiment": 0.8, "impact": "HIGH", "source": "CoinTelegraph", "time_ago": "30 min ago", "impact_timing": "High volatility"},
-            {"headline": "On-chain data shows increasing whale accumulation", "sentiment": 0.6, "impact": "MEDIUM", "source": "CoinDesk", "time_ago": "1 hour ago", "impact_timing": "Sustained market reaction"},
-            {"headline": "Lightning Network capacity reaches new all-time high", "sentiment": 0.5, "impact": "LOW", "source": "CoinDesk", "time_ago": "2 hours ago", "impact_timing": "Limited impact"},
-            {"headline": "MicroStrategy announces additional Bitcoin purchases", "sentiment": 0.7, "impact": "HIGH", "source": "Bloomberg", "time_ago": "4 hours ago", "impact_timing": "High volatility"},
+            {"source": "CoinDesk", "icon": "₿", "url": "https://www.coindesk.com/"},
+            {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
+            {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/crypto"},
+            {"source": "CNBC Crypto", "icon": "📺", "url": "https://www.cnbc.com/cryptocurrency/"},
+            {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
         ],
         "ETHUSD": [
-            {"headline": "Ethereum staking yields attract institutional interest", "sentiment": 0.5, "impact": "MEDIUM", "source": "CoinDesk", "time_ago": "15 min ago", "impact_timing": "Watch levels"},
-            {"headline": "DeFi TVL rebounds as network activity increases", "sentiment": 0.6, "impact": "MEDIUM", "source": "CoinTelegraph", "time_ago": "1 hour ago", "impact_timing": "Sustained market reaction"},
-            {"headline": "Layer 2 solutions see record transaction volumes", "sentiment": 0.4, "impact": "LOW", "source": "CoinDesk", "time_ago": "2 hours ago", "impact_timing": "Limited impact"},
-            {"headline": "ETH/BTC ratio suggests potential altcoin season", "sentiment": 0.3, "impact": "MEDIUM", "source": "CoinTelegraph", "time_ago": "3 hours ago", "impact_timing": "Watch levels"},
+            {"source": "CoinDesk", "icon": "₿", "url": "https://www.coindesk.com/"},
+            {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
+            {"source": "Ethereum.org", "icon": "🔷", "url": "https://ethereum.org/en/"},
+            {"source": "Decrypt", "icon": "📰", "url": "https://decrypt.co/"},
+            {"source": "The Block", "icon": "🧱", "url": "https://www.theblock.co/"},
         ],
         "EURUSD": [
-            {"headline": "EUR/USD pushes higher as dollar weakens post-Fed", "sentiment": 0.4, "impact": "MEDIUM", "source": "FX Street", "time_ago": "10 min ago", "impact_timing": "10-30 min reaction"},
-            {"headline": "ECB officials signal potential rate pause", "sentiment": 0.3, "impact": "HIGH", "source": "Reuters", "time_ago": "40 min ago", "impact_timing": "High volatility"},
-            {"headline": "German business confidence exceeds forecasts", "sentiment": 0.5, "impact": "MEDIUM", "source": "Bloomberg", "time_ago": "2 hours ago", "impact_timing": "Sustained market reaction"},
-            {"headline": "Eurozone inflation cools faster than expected", "sentiment": 0.6, "impact": "HIGH", "source": "CNBC", "time_ago": "3 hours ago", "impact_timing": "High volatility"},
-            {"headline": "EUR/USD tests key resistance at 1.0900", "sentiment": 0.2, "impact": "MEDIUM", "source": "Daily FX", "time_ago": "4 hours ago", "impact_timing": "Watch levels"},
+            {"source": "Reuters FX", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
+            {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/forex"},
+            {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
+            {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+            {"source": "Bloomberg FX", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/fx"},
         ],
         "GBPUSD": [
-            {"headline": "Pound gains as UK inflation data supports BoE stance", "sentiment": 0.4, "impact": "MEDIUM", "source": "FX Street", "time_ago": "20 min ago", "impact_timing": "10-30 min reaction"},
-            {"headline": "BoE maintains cautious tone on rate cuts", "sentiment": 0.1, "impact": "HIGH", "source": "Reuters", "time_ago": "1 hour ago", "impact_timing": "High volatility"},
-            {"headline": "UK GDP growth surprises to the upside", "sentiment": 0.5, "impact": "MEDIUM", "source": "Bloomberg", "time_ago": "2 hours ago", "impact_timing": "Sustained market reaction"},
-            {"headline": "GBP/USD breaks above key moving average", "sentiment": 0.4, "impact": "MEDIUM", "source": "Daily FX", "time_ago": "3 hours ago", "impact_timing": "Watch levels"},
+            {"source": "Reuters FX", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
+            {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/forex"},
+            {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
+            {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+            {"source": "BoE News", "icon": "🏛️", "url": "https://www.bankofengland.co.uk/"},
         ],
         "USDJPY": [
-            {"headline": "Yen weakens as BoJ maintains ultra-loose policy", "sentiment": -0.3, "impact": "HIGH", "source": "Reuters", "time_ago": "15 min ago", "impact_timing": "High volatility"},
-            {"headline": "USD/JPY approaches 150 level, intervention risk rises", "sentiment": -0.5, "impact": "HIGH", "source": "FX Street", "time_ago": "45 min ago", "impact_timing": "Immediate volatility"},
-            {"headline": "Japanese trade deficit narrows on export growth", "sentiment": 0.2, "impact": "LOW", "source": "Bloomberg", "time_ago": "2 hours ago", "impact_timing": "Limited impact"},
-            {"headline": "BoJ Governor hints at policy shift timing", "sentiment": -0.4, "impact": "HIGH", "source": "CNBC", "time_ago": "3 hours ago", "impact_timing": "High volatility"},
+            {"source": "Reuters FX", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
+            {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/forex"},
+            {"source": "BoJ News", "icon": "🏛️", "url": "https://www.boj.or.jp/en/"},
+            {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+            {"source": "Bloomberg FX", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/fx"},
         ],
         "SPX500": [
-            {"headline": "S&P 500 hits new high as tech earnings beat", "sentiment": 0.7, "impact": "HIGH", "source": "CNBC", "time_ago": "5 min ago", "impact_timing": "High volatility"},
-            {"headline": "Fed Chair signals soft landing remains possible", "sentiment": 0.5, "impact": "HIGH", "source": "Bloomberg", "time_ago": "30 min ago", "impact_timing": "Sustained market reaction"},
-            {"headline": "Corporate earnings season exceeds expectations", "sentiment": 0.6, "impact": "MEDIUM", "source": "MarketWatch", "time_ago": "1 hour ago", "impact_timing": "10-30 min reaction"},
-            {"headline": "VIX drops to lowest level in months", "sentiment": 0.3, "impact": "MEDIUM", "source": "Reuters", "time_ago": "2 hours ago", "impact_timing": "Stable conditions"},
-            {"headline": "Financial sector leads broad market rally", "sentiment": 0.5, "impact": "MEDIUM", "source": "Yahoo Finance", "time_ago": "3 hours ago", "impact_timing": "Watch levels"},
+            {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/"},
+            {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/equities"},
+            {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/market-data"},
+            {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/markets/"},
+            {"source": "WSJ", "icon": "📰", "url": "https://www.wsj.com/market-data/stocks"},
         ],
         "NAS100": [
-            {"headline": "Nasdaq surges as AI chip demand soars", "sentiment": 0.8, "impact": "HIGH", "source": "CNBC", "time_ago": "10 min ago", "impact_timing": "High volatility"},
-            {"headline": "Tech mega-caps report blowout earnings", "sentiment": 0.7, "impact": "HIGH", "source": "Bloomberg", "time_ago": "25 min ago", "impact_timing": "Sustained market reaction"},
-            {"headline": "Semiconductor stocks rally on strong guidance", "sentiment": 0.6, "impact": "MEDIUM", "source": "MarketWatch", "time_ago": "1 hour ago", "impact_timing": "10-30 min reaction"},
-            {"headline": "Cloud computing spending accelerates", "sentiment": 0.5, "impact": "MEDIUM", "source": "Reuters", "time_ago": "2 hours ago", "impact_timing": "Watch levels"},
-            {"headline": "Tech sector leads broader market higher", "sentiment": 0.6, "impact": "MEDIUM", "source": "Yahoo Finance", "time_ago": "3 hours ago", "impact_timing": "Sustained market reaction"},
+            {"source": "CNBC Tech", "icon": "📺", "url": "https://www.cnbc.com/technology/"},
+            {"source": "Bloomberg Tech", "icon": "💼", "url": "https://www.bloomberg.com/markets/equities/tech"},
+            {"source": "TechCrunch", "icon": "📱", "url": "https://techcrunch.com/"},
+            {"source": "Yahoo Tech", "icon": "🟣", "url": "https://finance.yahoo.com/tech/"},
+            {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/market-data"},
         ],
     }
     
-    templates = news_templates.get(symbol, news_templates["EURUSD"])
-    selected = random.sample(templates, min(4, len(templates)))
+    configs = source_configs.get(symbol, source_configs["EURUSD"])
+    random.shuffle(configs)
     
-    for item in selected:
-        item["source_icon"] = source_icons.get(item["source"], "📰")
-        item["url"] = "https://www.google.com/search?q=" + item["headline"].replace(" ", "+")
-        if not item.get("impact_timing"):
-            item["impact_timing"] = random.choice(impact_timings.get(item["impact"], ["Within trading session"]))
+    headline_templates = [
+        "Breaking: {symbol} markets see increased activity",
+        "{symbol} traders eye key support levels",
+        "Analysis: What moves {symbol} this week",
+        "{source} covers {symbol} latest developments",
+        "{symbol} market sentiment shifts amid global cues",
+        "{source} exclusive: {symbol} outlook",
+        "Traders watch {symbol} as volatility returns",
+        "{source} report: {symbol} technical levels",
+    ]
     
-    return selected
+    news_items = []
+    for i, cfg in enumerate(configs[:5]):
+        headline = random.choice(headline_templates).format(symbol=symbol, source=cfg["source"])
+        news_items.append({
+            "headline": headline,
+            "sentiment": random.choice([-0.2, 0, 0.2]),
+            "impact": random.choice(["LOW", "MEDIUM", "MEDIUM", "HIGH"]),
+            "time_ago": random.choice(["Live", "5 min ago", "15 min ago", "30 min ago"]),
+            "source": cfg["source"],
+            "source_icon": cfg["icon"],
+            "url": cfg["url"],
+            "impact_timing": random.choice(["Market hours", "Next 1-2 hours", "Asian session", "US session"]),
+        })
+    
+    return news_items, True
+
+
+def _generate_instrument_news(symbol, symbol_info):
+    """Fetch news for the selected instrument."""
+    return _fetch_news_for_symbol(symbol)
 
 
 @callback(
