@@ -1733,16 +1733,6 @@ def get_dashboard_layout():
                         dcc.Graph(id="price-chart", config={"displayModeBar": False, "responsive": True})
                     ], style={"padding": "0"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
-
-                # Volatility Surface
-                dbc.Card([
-                    dbc.CardHeader([
-                        html.Span("📉 VOLATILITY SURFACE (3D)", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
-                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
-                    dbc.CardBody([
-                        dcc.Graph(id="volatility-surface", config={"displayModeBar": False, "responsive": True}, style={"height": "350px"})
-                    ], style={"padding": "0"})
-                ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
             ], width=6),
 
             # Right Sidebar
