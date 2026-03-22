@@ -1671,29 +1671,30 @@ def get_dashboard_layout():
         
         # Main Dashboard Row - Instruments + Price Chart + Trading Panel
         dbc.Row([
-            # Left Sidebar - Instruments (narrow)
+            # Left Sidebar - Instruments
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
                         html.Span("INSTRUMENTS", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
-                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "10px"}),
+                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
                     dbc.CardBody([
                         html.Div([
                             dbc.Button(
                                 html.Div([
-                                    html.Span(inst["symbol"], style={"fontWeight": "bold", "fontSize": "11px"}),
-                                ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"}),
+                                    html.Span(inst["symbol"], style={"fontWeight": "bold", "fontSize": "12px"}),
+                                    html.Span(inst["name"], style={"color": COLORS["text_secondary"], "fontSize": "10px", "marginLeft": "8px"}),
+                                ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "width": "100%"}),
                                 id={"type": "instrument-btn", "index": inst["symbol"]},
                                 className="w-100",
                                 style={
                                     "border": f"1px solid {COLORS['accent']}" if inst["symbol"] == "XAUUSD" else f"1px solid {COLORS['border']}",
                                     "borderRadius": "4px",
-                                    "padding": "8px 10px",
+                                    "padding": "10px 12px",
                                     "textAlign": "left",
                                     "backgroundColor": COLORS["accent"] if inst["symbol"] == "XAUUSD" else "transparent",
                                     "color": "#000000" if inst["symbol"] == "XAUUSD" else COLORS["text_secondary"],
                                     "width": "100%",
-                                    "marginBottom": "6px",
+                                    "marginBottom": "8px",
                                     "fontWeight": "bold" if inst["symbol"] == "XAUUSD" else "normal",
                                     "cursor": "pointer",
                                     "transition": "all 0.2s ease",
@@ -1701,11 +1702,11 @@ def get_dashboard_layout():
                             )
                             for inst in INSTRUMENTS
                         ])
-                    ], style={"padding": "8px"})
+                    ], style={"padding": "12px"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
-            ], width=1),
+            ], width=2),
             
-            # Center - Price Chart (wide)
+            # Center - Price Chart
             dbc.Col([
                 dbc.Card([
                     dbc.CardHeader([
@@ -1725,54 +1726,46 @@ def get_dashboard_layout():
                                 style={"width": "80px", "display": "inline-block"}
                             ),
                         ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"})
-                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "10px"}),
+                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
                     dbc.CardBody([
                         dcc.Graph(id="price-chart", config={"displayModeBar": False, "responsive": True})
                     ], style={"padding": "0"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
-            ], width=8),
+            ], width=7),
 
             # Right Sidebar - Trading Panel
             dbc.Col([
-                dbc.Row([
-                    # Trading Signals
-                    dbc.Col([
-                        dbc.Card([
-                            dbc.CardHeader([
-                                html.Span("🎯 SIGNALS", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
-                            ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "10px"}),
-                            dbc.CardBody([
-                                html.Div(id="trading-signals", style={"maxHeight": "180px", "overflowY": "auto"})
-                            ], style={"padding": "8px"})
-                        ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
-                    ], width=12, className="mb-3"),
-                    
-                    # Order Form
-                    dbc.Col([
-                        dbc.Card([
-                            dbc.CardHeader([
-                                html.Span("📝 ORDER", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
-                            ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "10px"}),
-                            dbc.CardBody([
-                                dbc.Row([
-                                    dbc.Col([
-                                        dbc.Button("BUY", id="buy-btn", color="success", className="w-100", style={"fontWeight": "bold", "fontSize": "11px"}),
-                                    ], width=6),
-                                    dbc.Col([
-                                        dbc.Button("SELL", id="sell-btn", color="danger", className="w-100", style={"fontWeight": "bold", "fontSize": "11px"}),
-                                    ], width=6),
-                                ], className="mb-2"),
-                                dbc.Input(type="number", id="order-size", placeholder="Lots", min=0.01, max=100, step=0.01, value=0.1,
-                                         style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"], "marginBottom": "6px", "fontSize": "11px"}),
-                                dbc.Input(type="number", id="stop-loss", placeholder="SL",
-                                         style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"], "marginBottom": "6px", "fontSize": "11px"}),
-                                dbc.Input(type="number", id="take-profit", placeholder="TP",
-                                         style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"], "marginBottom": "4px", "fontSize": "11px"}),
-                                html.Div(id="order-status", className="text-center", style={"fontSize": "10px"}),
-                            ], style={"padding": "10px"})
-                        ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
-                    ], width=12),
-                ]),
+                dbc.Card([
+                    dbc.CardHeader([
+                        html.Span("🎯 TRADING SIGNALS", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
+                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
+                    dbc.CardBody([
+                        html.Div(id="trading-signals", style={"maxHeight": "200px", "overflowY": "auto"})
+                    ], style={"padding": "12px"})
+                ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "12px"}),
+                
+                dbc.Card([
+                    dbc.CardHeader([
+                        html.Span("📝 ORDER FORM", style={"fontWeight": "bold", "color": COLORS["text"], "fontSize": "11px", "letterSpacing": "1px"}),
+                    ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Button("BUY", id="buy-btn", color="success", className="w-100", style={"fontWeight": "bold", "fontSize": "12px"}),
+                            ], width=6),
+                            dbc.Col([
+                                dbc.Button("SELL", id="sell-btn", color="danger", className="w-100", style={"fontWeight": "bold", "fontSize": "12px"}),
+                            ], width=6),
+                        ], className="mb-3"),
+                        dbc.Input(type="number", id="order-size", placeholder="Size (lots)", min=0.01, max=100, step=0.01, value=0.1,
+                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"], "marginBottom": "8px"}),
+                        dbc.Input(type="number", id="stop-loss", placeholder="Stop Loss",
+                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"], "marginBottom": "8px"}),
+                        dbc.Input(type="number", id="take-profit", placeholder="Take Profit",
+                                 style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"], "marginBottom": "8px"}),
+                        html.Div(id="order-status", className="text-center mt-2", style={"fontSize": "12px"}),
+                    ], style={"padding": "12px"})
+                ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
             ], width=3),
         ], className="mt-3"),
 
