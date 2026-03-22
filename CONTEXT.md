@@ -19,6 +19,9 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 - Added Monte Carlo simulation UI with configurable days/paths
 - Added trade history table with clear functionality
 - Improved regime detection with proper Baum-Welch EM, Viterbi, forward-backward smoothing
+- **Added multi-page routing**: Dashboard (/), News (/news), Analysis (/analysis)
+- Created `pages/news.py` with tabs: All News, By Instrument, By Topic
+- Fixed app.py syntax error by removing duplicate inline layout code
 
 ## Architecture
 
@@ -66,6 +69,10 @@ frontend/
 │   ├── backtester.py          # Backtesting engine (523 lines)
 │   ├── run_bot.py             # Bot runner script
 │   └── config.json             # Bot configuration
+├── pages/                      # Multi-page layouts
+│   ├── __init__.py             # Page registry
+│   ├── dashboard.py            # Dashboard page layout
+│   └── news.py                 # News page with tabs
 ├── layouts/                    # (Empty - reserved for future layouts)
 ├── config/                    # (Empty - reserved for configuration)
 └── plan/                      # (Empty - project planning files)
@@ -102,8 +109,12 @@ frontend/
 
 ## Core Modules
 
-### `app.py` (~4200 lines)
+### `app.py` (~3900 lines)
 Main Dash application handling:
+- **Multi-page routing** via `dcc.Location` and URL pathname callbacks
+- Dashboard page (/) with real-time charts and signals
+- News page (/news) with comprehensive news aggregation
+- Analysis page (/analysis) placeholder
 - Real-time price charts with candlesticks
 - Volatility surface (3D implied volatility)
 - Market metrics (Hurst exponent, skewness, kurtosis, Sharpe, Sortino, Calmar, Max Drawdown)
