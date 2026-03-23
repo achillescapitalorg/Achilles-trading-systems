@@ -99,6 +99,89 @@ def _get_all_news():
     return all_news
 
 
+def _calculate_instrument_sentiment():
+    """Calculate aggregated sentiment for each instrument."""
+    sentiment_data = {}
+    for inst in INSTRUMENTS:
+        symbol = inst["symbol"]
+        news_items = news_cache.get(symbol)
+        if news_items and len(news_items) > 0:
+            sentiments = [item.get("sentiment", 0) for item in news_items]
+            avg_sentiment = sum(sentiments) / len(sentiments)
+            sentiment_data[symbol] = {
+                "name": inst["name"],
+                "avg_sentiment": avg_sentiment,
+                "news_count": len(news_items),
+                "bullish_count": sum(1 for s in sentiments if s > 0),
+                "bearish_count": sum(1 for s in sentiments if s < 0),
+                "neutral_count": sum(1 for s in sentiments if s == 0)
+            }
+        else:
+            sentiment_data[symbol] = {
+                "name": inst["name"],
+                "avg_sentiment": 0,
+                "news_count": 0,
+                "bullish_count": 0,
+                "bearish_count": 0,
+                "neutral_count": 0
+            }
+    return sentiment_data
+
+
+def _render_sentiment_meter(sentiment_data):
+    """Render a sentiment overview bar for all instruments."""
+    items = []
+    for inst in INSTRUMENTS:
+        symbol = inst["symbol"]
+        data = sentiment_data.get(symbol, {"name": inst["name"], "avg_sentiment": 0, "news_count": 0})
+        
+        score = data["avg_sentiment"]
+        if score > 0.1:
+            color = COLORS["success"]
+            label = "BULLISH"
+            emoji = "📈"
+        elif score < -0.1:
+            color = COLORS["danger"]
+            label = "BEARISH"
+            emoji = "📉"
+        else:
+            color = COLORS["warning"]
+            label = "NEUTRAL"
+            emoji = "⏸️"
+        
+        bar_width = abs(score) * 50
+        bar_pos = 50 + (score * 50) if score > 0 else 50 - bar_width
+        
+        items.append(html.Div([
+            html.Div([
+                html.Span(f"{symbol}", style={"fontWeight": "bold", "fontSize": "11px", "color": COLORS["text"]}),
+                html.Span(f" {emoji} {label}", style={"fontSize": "10px", "color": color, "marginLeft": "5px"}),
+            ], style={"marginBottom": "4px"}),
+            html.Div([
+                html.Div(style={
+                    "width": f"{bar_width}%",
+                    "backgroundColor": color,
+                    "height": "8px",
+                    "borderRadius": "4px",
+                    "position": "relative",
+                    "left": f"{50 if score > 0 else 50}%"
+                }),
+                html.Div(style={"position": "absolute", "left": "50%", "top": "0", "bottom": "0", "width": "1px", "backgroundColor": COLORS["border"]})
+            ], style={"position": "relative", "width": "100%", "height": "8px", "backgroundColor": COLORS["surface_light"], "borderRadius": "4px", "overflow": "hidden"}),
+            html.Span(f"{data['news_count']} news | ↑{data['bullish_count']} ↓{data['bearish_count']}", style={"fontSize": "9px", "color": COLORS["text_secondary"], "marginTop": "2px", "display": "block"})
+        ], style={"width": "12%", "display": "inline-block", "marginRight": "1%", "verticalAlign": "top", "padding": "8px", "backgroundColor": COLORS["surface"], "borderRadius": "6px"}))
+    
+    return html.Div([
+        html.H5("📊 Market Sentiment Overview", style={"color": COLORS["text"], "fontSize": "14px", "marginBottom": "10px", "fontWeight": "bold"}),
+        html.Div(items, style={"marginBottom": "10px"}),
+        html.Div([
+            html.Span("← Bearish", style={"color": COLORS["danger"], "fontSize": "10px", "marginRight": "20px"}),
+            html.Span("Neutral", style={"color": COLORS["warning"], "fontSize": "10px", "marginRight": "20px"}),
+            html.Span("Bullish →", style={"color": COLORS["success"], "fontSize": "10px"})
+        ], style={"textAlign": "center", "marginTop": "5px"})
+    ], style={"padding": "15px", "backgroundColor": COLORS["surface"], "borderRadius": "8px", "marginBottom": "20px"})
+
+
 def _build_news_tabs():
     all_news = _get_all_news()
     news_by_instrument = {inst["symbol"]: [item for item in all_news if item.get("instrument") == inst["symbol"]] for inst in INSTRUMENTS}
@@ -163,9 +246,14 @@ def _build_news_tabs():
 
 
 tabs_content, article_count, last_updated = _build_news_tabs()
+sentiment_data = _calculate_instrument_sentiment()
+sentiment_meter = _render_sentiment_meter(sentiment_data)
 
 layout = dbc.Container(fluid=True, style={"backgroundColor": COLORS["background"], "minHeight": "100vh", "padding": "20px"}, children=[
     html.H3([html.Span("📰 ", style={"fontSize": "24px"}), "News Terminal"], style={"color": COLORS["text"], "marginBottom": "20px", "fontWeight": "bold"}),
+    
+    html.Div(id="sentiment-meter", children=sentiment_meter),
+    
     dbc.Row([
         dbc.Col([html.Div([html.Span("📊 ", style={"color": COLORS["accent"]}), html.Span(f"{article_count} articles", id="news-count", style={"color": COLORS["text_secondary"], "fontSize": "12px"})])], width=8),
         dbc.Col([html.Div([
@@ -182,12 +270,15 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": COLORS["background"
     Output("news-tabs-container", "children"),
     Output("news-count", "children"),
     Output("news-updated", "children"),
+    Output("sentiment-meter", "children"),
     Input("url", "pathname"),
     Input("refresh-btn", "n_clicks"),
     Input("refresh-interval", "n_intervals"),
 )
 def update_news(pathname, n_clicks, n_intervals):
     if pathname != "/news":
-        return dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     tabs, count, updated = _build_news_tabs()
-    return tabs, f"{count} articles", f"⏰ {updated}"
+    sentiment_data = _calculate_instrument_sentiment()
+    sentiment_meter = _render_sentiment_meter(sentiment_data)
+    return tabs, f"{count} articles", f"⏰ {updated}", sentiment_meter

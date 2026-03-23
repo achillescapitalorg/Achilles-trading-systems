@@ -2647,6 +2647,68 @@ NEWS_SOURCE_CONFIGS = {
 }
 
 
+def _analyze_sentiment(headline):
+    """Analyze sentiment of a news headline using keyword matching."""
+    if not headline:
+        return 0.0
+    
+    headline_lower = headline.lower()
+    
+    bullish_keywords = [
+        'rise', 'rises', 'rising', 'gain', 'gains', 'gaining', 'surge', 'surges', 'surging',
+        'rally', 'rallies', 'rallying', 'bullish', 'positive', 'upbeat', 'optimistic',
+        'upgrade', 'upgrades', 'beat', 'beats', 'exceed', 'exceeds', 'exceeding',
+        'strong', 'stronger', 'strength', 'higher', 'high', 'growth', 'growing', 'grew',
+        'boom', 'booming', 'soar', 'soars', 'soaring', 'jump', 'jumps', 'jumping',
+        'recovery', 'recover', 'rebound', 'bounce', 'breakout', 'breakthrough',
+        'historic', 'record', 'highs', 'peak', 'profit', 'profitable', 'success',
+        'bull', 'bulls', 'buy', 'buying', 'accumulate', 'accumulation',
+        'hawkish', 'dovish', 'support', 'supported', 'stable', 'stability', 'steady',
+        'inflated', 'stimulus', 'easing', 'expansion', 'improve', 'improving',
+        'beat', 'outperform', 'outperform', 'beat', 'exceed', 'exceeds',
+        'green', 'gains', 'up', 'higher', 'climb', 'climbs', 'advancing',
+        'optimism', 'hopes', 'rally', 'recover', 'turnaround', 'upside',
+        'attractive', 'undervalued', 'bargain', 'cheap', 'oversold', 'bounce',
+        'fed', 'rate cut', 'cuts rates', 'pivot', 'pause', 'easing cycle',
+        'inflation', 'cooler', 'tamed', 'falling', 'easing', 'peak'
+    ]
+    
+    bearish_keywords = [
+        'fall', 'falls', 'falling', 'drop', 'drops', 'dropping', 'plunge', 'plunges', 'plunging',
+        'crash', 'crashes', 'crashing', 'bearish', 'negative', 'pessimistic',
+        'downgrade', 'downgrades', 'miss', 'misses', 'missed', 'weak', 'weaker', 'weakness',
+        'lower', 'low', 'decline', 'declines', 'declining', 'loss', 'losses', 'losing',
+        'bust', 'busting', 'sink', 'sinks', 'sinking', 'slump', 'slumping',
+        'recession', 'depression', 'crisis', 'warning', 'warnings', 'risk', 'risks',
+        'bear', 'bears', 'sell', 'selling', 'selloff', 'sell-off', 'liquidate', 'liquidation',
+        'breakdown', 'rejection', 'rejected', 'failure', 'failed',
+        'concern', 'concerns', 'uncertain', 'uncertainty', 'volatile', 'volatility',
+        'hike', 'hikes', 'hiking', 'tighten', 'tightening', 'contraction',
+        'recession', 'slowdown', 'sluggish', 'soft', 'softening',
+        'red', 'down', 'lower', 'declining', 'slipping', 'tumbling',
+        'pessimism', 'worries', 'fears', 'panic', 'sell',
+        'overvalued', 'expensive', 'overbought', 'bubble', 'blowoff',
+        'rate hike', 'hikes rates', 'tightening', 'hawkish', 'aggressive',
+        'inflation', 'hot', 'sticky', 'elevated', 'acceleration', 'surprise'
+    ]
+    
+    bullish_count = sum(1 for word in bullish_keywords if word in headline_lower)
+    bearish_count = sum(1 for word in bearish_keywords if word in headline_lower)
+    
+    if bullish_count == 0 and bearish_count == 0:
+        return 0.0
+    
+    total = bullish_count + bearish_count
+    score = (bullish_count - bearish_count) / total
+    
+    if score > 0.2:
+        return 0.5
+    elif score < -0.2:
+        return -0.5
+    
+    return 0.0
+
+
 def _fetch_news_from_sources(symbol):
     """Fetch real news headlines from multiple sources (raw fetcher for background thread)."""
     import random
@@ -2685,9 +2747,10 @@ def _fetch_news_from_sources(symbol):
                             else:
                                 url = src["url"] + url
                         
+                        sentiment_score = _analyze_sentiment(title)
                         news_items.append({
                             "headline": title,
-                            "sentiment": 0,
+                            "sentiment": sentiment_score,
                             "impact": "MEDIUM",
                             "time_ago": "Live",
                             "source": src["source"],
@@ -2701,9 +2764,10 @@ def _fetch_news_from_sources(symbol):
     
     if len(news_items) < 3:
         for i in range(min(3, len(sources))):
+            fallback_headline = f"Visit {sources[i]['source']} for latest {symbol} market news"
             news_items.append({
-                "headline": f"Visit {sources[i]['source']} for latest {symbol} market news",
-                "sentiment": 0,
+                "headline": fallback_headline,
+                "sentiment": _analyze_sentiment(fallback_headline),
                 "impact": "MEDIUM",
                 "time_ago": "Live",
                 "source": sources[i]["source"],
