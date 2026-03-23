@@ -45,15 +45,29 @@ def _detect_topic(headline, source):
     return "General"
 
 
-def _get_sentiment_badge(sentiment, source):
-    if sentiment > 0:
+def _get_sentiment_badge(sentiment_label, sentiment_score, confidence):
+    sentiment_label = sentiment_label or "neutral"
+    
+    if sentiment_label == "bullish":
         color, emoji = COLORS["success"], "🟢"
-    elif sentiment < 0:
+        label = "BULLISH"
+    elif sentiment_label == "bearish":
         color, emoji = COLORS["danger"], "🔴"
-    else:
+        label = "BEARISH"
+    elif sentiment_label == "hold":
         color, emoji = COLORS["warning"], "🟡"
-    return html.Span([html.Span(emoji, style={"marginRight": "4px"}), html.Span(source, style={"fontSize": "10px"})],
-        style={"display": "inline-block", "backgroundColor": f"{color}20", "color": color, "padding": "2px 8px", "borderRadius": "4px", "marginRight": "4px", "marginBottom": "4px", "fontSize": "10px"})
+        label = "HOLD"
+    else:
+        color, emoji = COLORS["text_secondary"], "⚪"
+        label = "NEUTRAL"
+    
+    score_str = f"{sentiment_score:+.2f}" if sentiment_score else "0.00"
+    return html.Span([
+        html.Span(emoji, style={"marginRight": "4px"}),
+        html.Span(f"{label}", style={"fontWeight": "bold", "fontSize": "10px"}),
+        html.Span(f" ({score_str})", style={"fontSize": "9px", "opacity": 0.8})
+    ],
+        style={"display": "inline-flex", "alignItems": "center", "backgroundColor": f"{color}20", "color": color, "padding": "3px 8px", "borderRadius": "4px", "marginRight": "8px", "fontSize": "11px"})
 
 
 def _render_news_item(item, show_instrument=True):
@@ -67,8 +81,11 @@ def _render_news_item(item, show_instrument=True):
             html.Span(f"📊 {topic}", style={"color": COLORS["info"], "fontSize": "11px", "marginRight": "12px"}),
             html.Span(f"⚡ {item.get('impact', 'MEDIUM')}", style={"color": COLORS["warning"] if item.get('impact') == 'MEDIUM' else COLORS["danger"], "fontSize": "11px"}),
         ], style={"marginBottom": "6px"}),
-        html.Div([_get_sentiment_badge(item.get("sentiment", 0), item.get("source", "Unknown")),
-                  html.Span(f"📍 {item.get('instrument', '')}" if show_instrument else "", style={"color": COLORS["accent"], "fontSize": "10px", "marginLeft": "8px"})]),
+        html.Div([
+            _get_sentiment_badge(item.get("sentiment_label", "neutral"), item.get("sentiment", 0), item.get("confidence", 0)),
+            html.Span(f"Confidence: {item.get('confidence', 0):.0%}", style={"color": COLORS["text_secondary"], "fontSize": "9px", "marginRight": "8px"}),
+            html.Span(f"📍 {item.get('instrument', '')}" if show_instrument else "", style={"color": COLORS["accent"], "fontSize": "10px"})
+        ]),
         html.Hr(style={"borderColor": COLORS["border"], "margin": "12px 0"})
     ], style={"padding": "10px", "backgroundColor": COLORS["surface_light"], "borderRadius": "6px", "marginBottom": "10px"})
 
@@ -92,87 +109,140 @@ def _get_all_news():
             all_news.extend(news_items)
     if not all_news:
         for inst in INSTRUMENTS:
-            all_news.append({"headline": f"Latest {inst['name']} market analysis", "sentiment": 0, "impact": "MEDIUM", "time_ago": "Live",
+            all_news.append({"headline": f"Latest {inst['name']} market analysis", "sentiment": 0, "sentiment_label": "neutral", "impact": "MEDIUM", "time_ago": "Live",
                            "source": "VibeTrading", "source_icon": "📈", "url": "#", "instrument": inst["symbol"], "instrument_name": inst["name"]})
     random.seed(42)
     random.shuffle(all_news)
     return all_news
 
 
+def _get_news_with_aggregate():
+    """Get news and aggregate sentiment for each instrument."""
+    result = {}
+    for inst in INSTRUMENTS:
+        symbol = inst["symbol"]
+        news_items = news_cache.get(symbol)
+        if news_items is None:
+            try:
+                news_items = _fetch_news_from_sources(symbol)
+                if news_items:
+                    news_cache.set(symbol, news_items)
+            except:
+                news_items = []
+        
+        headlines = [item.get("headline", "") for item in news_items] if news_items else []
+        
+        result[symbol] = {
+            "news": news_items or [],
+            "headlines": headlines,
+        }
+    
+    return result
+
+
 def _calculate_instrument_sentiment():
-    """Calculate aggregated sentiment for each instrument."""
+    """Calculate aggregated sentiment for each instrument using DeepSeek analysis."""
+    from services.deepseek_sentiment import get_aggregate_sentiment
+    
     sentiment_data = {}
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
         news_items = news_cache.get(symbol)
+        
         if news_items and len(news_items) > 0:
+            headlines = [item.get("headline", "") for item in news_items]
+            
+            try:
+                aggregate = get_aggregate_sentiment(headlines)
+            except:
+                aggregate = {"sentiment": "neutral", "score": 0.0, "confidence": 0.0, "breakdown": {}}
+            
             sentiments = [item.get("sentiment", 0) for item in news_items]
             avg_sentiment = sum(sentiments) / len(sentiments)
+            
             sentiment_data[symbol] = {
                 "name": inst["name"],
                 "avg_sentiment": avg_sentiment,
+                "ai_sentiment": aggregate.get("sentiment", "neutral"),
+                "ai_score": aggregate.get("score", 0.0),
+                "ai_confidence": aggregate.get("confidence", 0.0),
                 "news_count": len(news_items),
                 "bullish_count": sum(1 for s in sentiments if s > 0),
                 "bearish_count": sum(1 for s in sentiments if s < 0),
-                "neutral_count": sum(1 for s in sentiments if s == 0)
+                "neutral_count": sum(1 for s in sentiments if s == 0),
+                "breakdown": aggregate.get("breakdown", {})
             }
         else:
             sentiment_data[symbol] = {
                 "name": inst["name"],
                 "avg_sentiment": 0,
+                "ai_sentiment": "neutral",
+                "ai_score": 0.0,
+                "ai_confidence": 0.0,
                 "news_count": 0,
                 "bullish_count": 0,
                 "bearish_count": 0,
-                "neutral_count": 0
+                "neutral_count": 0,
+                "breakdown": {}
             }
     return sentiment_data
 
 
 def _render_sentiment_meter(sentiment_data):
-    """Render a sentiment overview bar for all instruments."""
+    """Render a sentiment overview bar for all instruments with AI sentiment."""
     items = []
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
-        data = sentiment_data.get(symbol, {"name": inst["name"], "avg_sentiment": 0, "news_count": 0})
+        data = sentiment_data.get(symbol, {"name": inst["name"], "avg_sentiment": 0, "news_count": 0, "ai_sentiment": "neutral"})
         
-        score = data["avg_sentiment"]
-        if score > 0.1:
+        ai_sentiment = data.get("ai_sentiment", "neutral")
+        
+        if ai_sentiment == "bullish":
             color = COLORS["success"]
-            label = "BULLISH"
+            label = "🟢 BULLISH"
             emoji = "📈"
-        elif score < -0.1:
+        elif ai_sentiment == "bearish":
             color = COLORS["danger"]
-            label = "BEARISH"
+            label = "🔴 BEARISH"
             emoji = "📉"
-        else:
+        elif ai_sentiment == "hold":
             color = COLORS["warning"]
-            label = "NEUTRAL"
+            label = "🟡 HOLD"
+            emoji = "⏸️"
+        else:
+            color = COLORS["text_secondary"]
+            label = "⚪ NEUTRAL"
             emoji = "⏸️"
         
-        bar_width = abs(score) * 50
-        bar_pos = 50 + (score * 50) if score > 0 else 50 - bar_width
+        ai_score = data.get("ai_score", 0)
+        bar_width = abs(ai_score) * 50
         
         items.append(html.Div([
             html.Div([
                 html.Span(f"{symbol}", style={"fontWeight": "bold", "fontSize": "11px", "color": COLORS["text"]}),
-                html.Span(f" {emoji} {label}", style={"fontSize": "10px", "color": color, "marginLeft": "5px"}),
+                html.Span(f" {emoji}", style={"marginLeft": "5px"}),
+            ], style={"marginBottom": "4px"}),
+            html.Div([
+                html.Span(label, style={"fontSize": "9px", "color": color, "fontWeight": "bold"})
             ], style={"marginBottom": "4px"}),
             html.Div([
                 html.Div(style={
                     "width": f"{bar_width}%",
                     "backgroundColor": color,
-                    "height": "8px",
-                    "borderRadius": "4px",
+                    "height": "6px",
+                    "borderRadius": "3px",
                     "position": "relative",
-                    "left": f"{50 if score > 0 else 50}%"
+                    "left": f"{50 if ai_score >= 0 else 50 - bar_width}%"
                 }),
                 html.Div(style={"position": "absolute", "left": "50%", "top": "0", "bottom": "0", "width": "1px", "backgroundColor": COLORS["border"]})
-            ], style={"position": "relative", "width": "100%", "height": "8px", "backgroundColor": COLORS["surface_light"], "borderRadius": "4px", "overflow": "hidden"}),
-            html.Span(f"{data['news_count']} news | ↑{data['bullish_count']} ↓{data['bearish_count']}", style={"fontSize": "9px", "color": COLORS["text_secondary"], "marginTop": "2px", "display": "block"})
+            ], style={"position": "relative", "width": "100%", "height": "6px", "backgroundColor": COLORS["surface_light"], "borderRadius": "3px", "overflow": "hidden", "marginBottom": "4px"}),
+            html.Span(f"{data['news_count']} news", style={"fontSize": "9px", "color": COLORS["text_secondary"]})
         ], style={"width": "12%", "display": "inline-block", "marginRight": "1%", "verticalAlign": "top", "padding": "8px", "backgroundColor": COLORS["surface"], "borderRadius": "6px"}))
     
     return html.Div([
-        html.H5("📊 Market Sentiment Overview", style={"color": COLORS["text"], "fontSize": "14px", "marginBottom": "10px", "fontWeight": "bold"}),
+        html.H5([html.Span("🤖 ", style={"fontSize": "16px"}), "AI Market Sentiment", 
+                 html.Span(" (DeepSeek)", style={"fontSize": "10px", "color": COLORS["text_secondary"]})], 
+                style={"color": COLORS["text"], "fontSize": "14px", "marginBottom": "10px", "fontWeight": "bold"}),
         html.Div(items, style={"marginBottom": "10px"}),
         html.Div([
             html.Span("← Bearish", style={"color": COLORS["danger"], "fontSize": "10px", "marginRight": "20px"}),

@@ -30,6 +30,7 @@ from services.rl_agent import (
 )
 from services.news_scraper import NewsArticle, NewsSource
 from services.news_cache import NewsCache, start_background_refresh_thread
+from services.ai_news import get_intelligent_news
 import threading
 
 # Initialize the Dash app
@@ -2586,63 +2587,103 @@ def _get_source_icon(source):
         return "📰"
 
 
-# Source configurations for news fetching
+# Source configurations for news fetching - 10 sources per instrument
 NEWS_SOURCE_CONFIGS = {
     "XAUUSD": [
         {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/commodities/precious-metals/"},
-        {"source": "Kitco", "icon": "🥇", "url": "https://www.kitco.com/news/category/commodities/gold"},
-        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/commodities/metals/gold"},
         {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/commodities"},
         {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/commodities/"},
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/commodities/metals/gold"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/news"},
+        {"source": "Kitco", "icon": "🥇", "url": "https://www.kitco.com/news"},
+        {"source": "DailyFX", "icon": "📊", "url": "https://www.dailyfx.com/latest-news"},
+        {"source": "Investing.com", "icon": "📈", "url": "https://www.investing.com/news/commodities-news"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/investing/commodities/gold"},
+        {"source": "Trading Economics", "icon": "🌐", "url": "https://tradingeconomics.com/gold"},
     ],
     "BTCUSD": [
         {"source": "CoinDesk", "icon": "₿", "url": "https://www.coindesk.com/"},
-        {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
         {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/crypto"},
         {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/cryptocurrency/"},
-        {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
+        {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
+        {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/news"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/investing/cryptocurrency"},
+        {"source": "Investing.com", "icon": "📈", "url": "https://www.investing.com/crypto-news"},
+        {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/commodities/cryptocurrency"},
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/crypto"},
     ],
     "ETHUSD": [
         {"source": "CoinDesk", "icon": "₿", "url": "https://www.coindesk.com/"},
         {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
+        {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/crypto"},
+        {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/cryptocurrency/"},
+        {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
         {"source": "Decrypt", "icon": "📰", "url": "https://decrypt.co/"},
         {"source": "The Block", "icon": "🧱", "url": "https://www.theblock.co/"},
-        {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
+        {"source": "Investing.com", "icon": "📈", "url": "https://www.investing.com/crypto-news"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/investing/cryptocurrency"},
+        {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/commodities/cryptocurrency"},
     ],
     "EURUSD": [
-        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
-        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
-        {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/forex"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/news"},
         {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
         {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/fx"},
+        {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/forex/"},
+        {"source": "DailyFX", "icon": "📊", "url": "https://www.dailyfx.com/latest-news"},
+        {"source": "Investing.com", "icon": "📈", "url": "https://www.investing.com/currencies-news"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/investing/currencies"},
+        {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/currencies/"},
+        {"source": "Trading Economics", "icon": "🌐", "url": "https://tradingeconomics.com/eurusd"},
     ],
     "GBPUSD": [
-        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
-        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
-        {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/forex"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/news"},
         {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
-        {"source": "BoE", "icon": "🏛️", "url": "https://www.bankofengland.co.uk/"},
+        {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/fx"},
+        {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/forex/"},
+        {"source": "DailyFX", "icon": "📊", "url": "https://www.dailyfx.com/latest-news"},
+        {"source": "Bank of England", "icon": "🏛️", "url": "https://www.bankofengland.co.uk/news"},
+        {"source": "Investing.com", "icon": "📈", "url": "https://www.investing.com/currencies-news"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/investing/currencies"},
+        {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/currencies/"},
     ],
     "USDJPY": [
-        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
-        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
-        {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/forex"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/news"},
         {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
-        {"source": "BoJ", "icon": "🏛️", "url": "https://www.boj.or.jp/en/"},
+        {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/fx"},
+        {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/forex/"},
+        {"source": "DailyFX", "icon": "📊", "url": "https://www.dailyfx.com/latest-news"},
+        {"source": "Bank of Japan", "icon": "🏛️", "url": "https://www.boj.or.jp/en/"},
+        {"source": "Investing.com", "icon": "📈", "url": "https://www.investing.com/currencies-news"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/investing/currencies"},
+        {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/currencies/"},
     ],
     "SPX500": [
         {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/"},
         {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/equities"},
-        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/"},
-        {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/markets/"},
+        {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/indices/"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/investing/index/spx"},
+        {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/markets/"},
+        {"source": "Investing.com", "icon": "📈", "url": "https://www.investing.com/indices/us-spx-500"},
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/indices"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/news"},
+        {"source": "Trading Economics", "icon": "🌐", "url": "https://tradingeconomics.com/spx500"},
         {"source": "WSJ", "icon": "📰", "url": "https://www.wsj.com/market-data/stocks"},
     ],
     "NAS100": [
         {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/technology/"},
         {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/equities"},
+        {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/indices/"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/investing/index/ndx"},
+        {"source": "Yahoo Finance", "icon": "🟣", "url": "https://finance.yahoo.com/tech/"},
         {"source": "TechCrunch", "icon": "📱", "url": "https://techcrunch.com/"},
-        {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/tech/"},
-        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/"},
+        {"source": "Investing.com", "icon": "📈", "url": "https://www.investing.com/indices/us-ndx-100"},
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/indices"},
+        {"source": "Trading Economics", "icon": "🌐", "url": "https://tradingeconomics.com/ndx"},
+        {"source": "WSJ", "icon": "📰", "url": "https://www.wsj.com/market-data/stocks"},
     ],
 }
 
@@ -2709,74 +2750,58 @@ def _analyze_sentiment(headline):
     return 0.0
 
 
+def _analyze_impact(headline):
+    """Analyze the impact level of a news headline."""
+    if not headline:
+        return "MEDIUM"
+    
+    headline_lower = headline.lower()
+    
+    high_impact_keywords = [
+        'breaking', 'breaking news', 'urgent', 'emergency', 'alert',
+        'crash', 'plunge', 'surges', 'surging', 'spike', 'spiking',
+        'fomc', 'federal reserve', 'rate decision', 'rate cut', 'rate hike',
+        'nfp', 'non-farm', 'cpi', 'inflation data', 'jobs report',
+        'bankruptcy', 'bankrupt', 'lawsuit', 'scandal', 'fraud',
+        'fed chair', 'powell', 'yellen', 'major', 'historic',
+        'shock', 'surprise', 'unexpected', 'flash', 'volatile',
+        'recession', 'crisis', 'pandemic', 'war', 'conflict',
+    ]
+    
+    low_impact_keywords = [
+        'analysis', 'outlook', 'forecast', 'preview', 'review',
+        'weekly', 'monthly', 'quarterly', 'annual',
+        'technical', 'chart', 'pattern', 'indicator',
+        'commentary', 'opinion', 'perspective', 'view',
+    ]
+    
+    if any(keyword in headline_lower for keyword in high_impact_keywords):
+        return "HIGH"
+    elif any(keyword in headline_lower for keyword in low_impact_keywords):
+        return "LOW"
+    else:
+        return "MEDIUM"
+
+
 def _fetch_news_from_sources(symbol):
-    """Fetch real news headlines from multiple sources (raw fetcher for background thread)."""
-    import random
-    import requests
-    from bs4 import BeautifulSoup
+    """
+    Fetch intelligent news using AI-powered service.
+    Uses Marketaux API (free) with built-in sentiment, 
+    falls back to NewsAPI + local sentiment, 
+    then DuckDuckGo news search.
+    """
+    print(f"[News] Fetching intelligent news for {symbol}...")
     
-    random.seed(hash(symbol) % 2**32)
+    # Use the new intelligent news service
+    news_items = get_intelligent_news(symbol)
     
-    news_items = []
-    sources = NEWS_SOURCE_CONFIGS.get(symbol, NEWS_SOURCE_CONFIGS["BTCUSD"])
-    random.shuffle(sources)
+    if news_items:
+        print(f"[News] Got {len(news_items)} intelligent news items for {symbol}")
+        return news_items[:10]
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-    
-    for src in sources:
-        if len(news_items) >= 5:
-            break
-        try:
-            response = requests.get(src["url"], headers=headers, timeout=6)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                headlines = soup.select('h3 a, h2 a, [class*=title] a, article a')
-                
-                for h in headlines[:10]:
-                    title = h.get_text(strip=True)
-                    url = h.get('href', '')
-                    
-                    if url and len(title) > 40 and len(title) < 250:
-                        if not url.startswith('http'):
-                            if url.startswith('/'):
-                                from urllib.parse import urlparse
-                                parsed = urlparse(src["url"])
-                                url = f"{parsed.scheme}://{parsed.netloc}{url}"
-                            else:
-                                url = src["url"] + url
-                        
-                        sentiment_score = _analyze_sentiment(title)
-                        news_items.append({
-                            "headline": title,
-                            "sentiment": sentiment_score,
-                            "impact": "MEDIUM",
-                            "time_ago": "Live",
-                            "source": src["source"],
-                            "source_icon": src["icon"],
-                            "url": url,
-                            "impact_timing": "Market hours",
-                        })
-                        break
-        except Exception as e:
-            continue
-    
-    if len(news_items) < 3:
-        for i in range(min(3, len(sources))):
-            fallback_headline = f"Visit {sources[i]['source']} for latest {symbol} market news"
-            news_items.append({
-                "headline": fallback_headline,
-                "sentiment": _analyze_sentiment(fallback_headline),
-                "impact": "MEDIUM",
-                "time_ago": "Live",
-                "source": sources[i]["source"],
-                "source_icon": sources[i]["icon"],
-                "url": sources[i]["url"],
-                "impact_timing": "Market hours",
-            })
-    
-    return news_items[:6]
+    # No news found - return empty list (no fake "Visit..." articles)
+    print(f"[News] No intelligent news found for {symbol}")
+    return []
 
 
 def _fetch_news_for_symbol(symbol):

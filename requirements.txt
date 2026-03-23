@@ -24,6 +24,9 @@ requests>=2.31.0
 httpx>=0.25.0
 aiohttp>=3.9.0
 
+# Environment Variables
+python-dotenv>=1.0.0
+
 # News Scraping
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
