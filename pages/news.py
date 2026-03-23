@@ -1,8 +1,9 @@
 """
-News Page - Comprehensive News Aggregation View
+News Page - Comprehensive News Aggregation View with Async Loading
+Uses persistent cache for instant loading and background refresh.
 """
 import dash
-from dash import dcc, html, Input, Output, State, callback, no_update
+from dash import dcc, html, Input, Output, callback, no_update
 import dash_bootstrap_components as dbc
 from datetime import datetime
 import random
@@ -10,37 +11,15 @@ import random
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from app import (
-    COLORS, INSTRUMENTS, _fetch_news_for_symbol, _get_source_icon
-)
+from app import COLORS, INSTRUMENTS, _fetch_news_from_sources, news_cache
 
 
-def _aggregate_all_news():
-    """Fetch news for all instruments."""
-    all_news = []
-    
-    for inst in INSTRUMENTS:
-        symbol = inst["symbol"]
-        news_items, _ = _fetch_news_for_symbol(symbol)
-        
-        for item in news_items:
-            item["instrument"] = symbol
-            item["instrument_name"] = inst["name"]
-            item["instrument_type"] = inst["type"]
-        
-        all_news.extend(news_items)
-    
-    random.seed(42)
-    random.shuffle(all_news)
-    
-    return all_news
+TOPIC_ORDER = ["Fed/Rate", "Geopolitical", "Europe", "UK", "Japan", "Asia", "Crypto", "Metals", "Equities", "Technical", "Trade", "General"]
+TOPIC_ICONS = {"Fed/Rate": "🏦", "Europe": "🇪🇺", "UK": "🇬🇧", "Japan": "🇯🇵", "Asia": "🌏", "Geopolitical": "🌍", "Crypto": "₿", "Metals": "🥇", "Equities": "📈", "Technical": "📊", "Trade": "📦", "General": "📰"}
 
 
 def _detect_topic(headline, source):
-    """Detect the topic category for a news item."""
     headline_lower = headline.lower()
-    source_lower = source.lower()
-    
     if any(word in headline_lower for word in ['fed', 'federal reserve', 'interest rate', 'inflation', 'cpi', 'pce', 'fomc', 'powell', 'monetary']):
         return "Fed/Rate"
     elif any(word in headline_lower for word in ['ecb', 'europe', 'eurozone', 'german', 'french']):
@@ -63,199 +42,66 @@ def _detect_topic(headline, source):
         return "Technical"
     elif any(word in headline_lower for word in ['trade', 'tariff', 'export', 'import', 'economy']):
         return "Trade"
-    else:
-        return "General"
+    return "General"
 
 
 def _get_sentiment_badge(sentiment, source):
-    """Generate a sentiment badge for the source."""
     if sentiment > 0:
-        color = COLORS["success"]
-        emoji = "🟢"
+        color, emoji = COLORS["success"], "🟢"
     elif sentiment < 0:
-        color = COLORS["danger"]
-        emoji = "🔴"
+        color, emoji = COLORS["danger"], "🔴"
     else:
-        color = COLORS["warning"]
-        emoji = "🟡"
-    
-    return html.Span([
-        html.Span(emoji, style={"marginRight": "4px"}),
-        html.Span(source, style={"fontSize": "10px"})
-    ], style={
-        "display": "inline-block",
-        "backgroundColor": f"{color}20",
-        "color": color,
-        "padding": "2px 8px",
-        "borderRadius": "4px",
-        "marginRight": "4px",
-        "marginBottom": "4px",
-        "fontSize": "10px"
-    })
+        color, emoji = COLORS["warning"], "🟡"
+    return html.Span([html.Span(emoji, style={"marginRight": "4px"}), html.Span(source, style={"fontSize": "10px"})],
+        style={"display": "inline-block", "backgroundColor": f"{color}20", "color": color, "padding": "2px 8px", "borderRadius": "4px", "marginRight": "4px", "marginBottom": "4px", "fontSize": "10px"})
 
 
 def _render_news_item(item, show_instrument=True):
-    """Render a single news item with source-specific sentiment."""
     topic = _detect_topic(item.get("headline", ""), item.get("source", ""))
-    
-    time_str = item.get("time_ago", "Live")
-    
     return html.Div([
+        html.Div([html.A(item.get("headline", "No headline"), href=item.get("url", "#"), target="_blank",
+              style={"color": COLORS["text"], "textDecoration": "none", "fontSize": "13px", "fontWeight": "500", "lineHeight": "1.4"})], style={"marginBottom": "8px"}),
         html.Div([
-            html.A(
-                item.get("headline", "No headline"),
-                href=item.get("url", "#"),
-                target="_blank",
-                style={
-                    "color": COLORS["text"],
-                    "textDecoration": "none",
-                    "fontSize": "13px",
-                    "fontWeight": "500",
-                    "lineHeight": "1.4"
-                }
-            ),
-        ], style={"marginBottom": "8px"}),
-        
-        html.Div([
-            html.Span(
-                f"{item.get('source_icon', '📰')} {item.get('source', 'Unknown')}",
-                style={
-                    "color": COLORS["text_secondary"],
-                    "fontSize": "11px",
-                    "marginRight": "12px"
-                }
-            ),
-            html.Span(
-                f"⏱ {time_str}",
-                style={
-                    "color": COLORS["text_secondary"],
-                    "fontSize": "11px",
-                    "marginRight": "12px"
-                }
-            ),
-            html.Span(
-                f"📊 {topic}",
-                style={
-                    "color": COLORS["info"],
-                    "fontSize": "11px",
-                    "marginRight": "12px"
-                }
-            ),
-            html.Span(
-                f"⚡ {item.get('impact', 'MEDIUM')}",
-                style={
-                    "color": COLORS["warning"] if item.get('impact') == 'MEDIUM' else COLORS["danger"],
-                    "fontSize": "11px"
-                }
-            ),
+            html.Span(f"{item.get('source_icon', '📰')} {item.get('source', 'Unknown')}", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginRight": "12px"}),
+            html.Span(f"⏱ {item.get('time_ago', 'Live')}", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginRight": "12px"}),
+            html.Span(f"📊 {topic}", style={"color": COLORS["info"], "fontSize": "11px", "marginRight": "12px"}),
+            html.Span(f"⚡ {item.get('impact', 'MEDIUM')}", style={"color": COLORS["warning"] if item.get('impact') == 'MEDIUM' else COLORS["danger"], "fontSize": "11px"}),
         ], style={"marginBottom": "6px"}),
-        
-        html.Div([
-            _get_sentiment_badge(item.get("sentiment", 0), item.get("source", "Unknown")),
-            html.Span(
-                f"📍 {item.get('instrument', '')}" if show_instrument else "",
-                style={
-                    "color": COLORS["accent"],
-                    "fontSize": "10px",
-                    "marginLeft": "8px"
-                }
-            ),
-        ]),
-        
+        html.Div([_get_sentiment_badge(item.get("sentiment", 0), item.get("source", "Unknown")),
+                  html.Span(f"📍 {item.get('instrument', '')}" if show_instrument else "", style={"color": COLORS["accent"], "fontSize": "10px", "marginLeft": "8px"})]),
         html.Hr(style={"borderColor": COLORS["border"], "margin": "12px 0"})
     ], style={"padding": "10px", "backgroundColor": COLORS["surface_light"], "borderRadius": "6px", "marginBottom": "10px"})
 
 
-def _render_instrument_section(symbol, name, news_items):
-    """Render a section for a single instrument with its news."""
-    if not news_items:
-        return html.Div([
-            html.P(f"No news available for {name}", style={"color": COLORS["text_secondary"], "fontSize": "12px", "padding": "10px"})
-        ], style={"backgroundColor": COLORS["surface_light"], "borderRadius": "6px", "marginBottom": "10px"})
-    
-    return html.Div([
-        html.H5([
-            html.Span(f"📈 {name} ({symbol})", style={"color": COLORS["accent"], "fontSize": "14px"}),
-            html.Span(f" - {len(news_items)} articles", style={"color": COLORS["text_secondary"], "fontSize": "11px"})
-        ], style={"marginBottom": "12px", "paddingBottom": "8px", "borderBottom": f"1px solid {COLORS['border']}"}),
-        
-        *[ _render_news_item(item, show_instrument=False) for item in news_items[:5] ]
-    ], style={"marginBottom": "20px"})
-
-
-def _render_topic_section(topic, news_items):
-    """Render a section for a topic category."""
-    if not news_items:
-        return html.Div()
-    
-    topic_icons = {
-        "Fed/Rate": "🏦",
-        "Europe": "🇪🇺",
-        "UK": "🇬🇧",
-        "Japan": "🇯🇵",
-        "Asia": "🌏",
-        "Geopolitical": "🌍",
-        "Crypto": "₿",
-        "Metals": "🥇",
-        "Equities": "📈",
-        "Technical": "📊",
-        "Trade": "📦",
-        "General": "📰"
-    }
-    
-    return html.Div([
-        html.H5([
-            html.Span(topic_icons.get(topic, "📰"), style={"marginRight": "8px"}),
-            html.Span(topic, style={"color": COLORS["accent"], "fontSize": "14px"}),
-            html.Span(f" - {len(news_items)} articles", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginLeft": "8px"})
-        ], style={"marginBottom": "12px", "paddingBottom": "8px", "borderBottom": f"1px solid {COLORS['border']}"}),
-        
-        *[ _render_news_item(item, show_instrument=True) for item in news_items[:5] ]
-    ], style={"marginBottom": "20px"})
-
-
-def _generate_instrument_summary(symbol, name, news_items):
-    """Generate a summary for an instrument based on its news."""
-    if not news_items:
-        return {
-            "headlines": [f"Visit news sources for latest {name} updates"],
-            "key_themes": ["Market news"],
-            "sentiment": "NEUTRAL"
-        }
-    
-    headlines = [item.get("headline", "") for item in news_items[:3]]
-    
-    topics = set()
-    for item in news_items:
-        topic = _detect_topic(item.get("headline", ""), item.get("source", ""))
-        topics.add(topic)
-    
-    sentiment_value = sum(item.get("sentiment", 0) for item in news_items)
-    if sentiment_value > 0:
-        sentiment = "BULLISH"
-    elif sentiment_value < 0:
-        sentiment = "BEARISH"
-    else:
-        sentiment = "NEUTRAL"
-    
-    return {
-        "headlines": headlines,
-        "key_themes": list(topics)[:3],
-        "sentiment": sentiment
-    }
-
-
-def get_news_layout():
-    """Return the news page layout."""
-    
-    all_news = _aggregate_all_news()
-    
-    news_by_instrument = {}
+def _get_all_news():
+    all_news = []
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
-        news_items = [item for item in all_news if item.get("instrument") == symbol]
-        news_by_instrument[symbol] = news_items
-    
+        news_items = news_cache.get(symbol)
+        if news_items is None:
+            try:
+                news_items = _fetch_news_from_sources(symbol)
+                if news_items:
+                    news_cache.set(symbol, news_items)
+            except:
+                news_items = []
+        if news_items:
+            for item in news_items:
+                item["instrument"] = symbol
+                item["instrument_name"] = inst["name"]
+            all_news.extend(news_items)
+    if not all_news:
+        for inst in INSTRUMENTS:
+            all_news.append({"headline": f"Latest {inst['name']} market analysis", "sentiment": 0, "impact": "MEDIUM", "time_ago": "Live",
+                           "source": "VibeTrading", "source_icon": "📈", "url": "#", "instrument": inst["symbol"], "instrument_name": inst["name"]})
+    random.seed(42)
+    random.shuffle(all_news)
+    return all_news
+
+
+def _build_news_tabs():
+    all_news = _get_all_news()
+    news_by_instrument = {inst["symbol"]: [item for item in all_news if item.get("instrument") == inst["symbol"]] for inst in INSTRUMENTS}
     news_by_topic = {}
     for item in all_news:
         topic = _detect_topic(item.get("headline", ""), item.get("source", ""))
@@ -263,74 +109,85 @@ def get_news_layout():
             news_by_topic[topic] = []
         news_by_topic[topic].append(item)
     
-    topic_order = ["Fed/Rate", "Geopolitical", "Europe", "UK", "Japan", "Asia", "Crypto", "Metals", "Equities", "Technical", "Trade", "General"]
+    last_updated = news_cache.get_last_updated() or "Never"
+    if last_updated and last_updated != "Never":
+        try:
+            dt = datetime.fromisoformat(last_updated)
+            diff = (datetime.now() - dt).total_seconds()
+            last_updated = f"Updated {int(diff)}s ago" if diff < 60 else f"Updated {int(diff/60)}m ago" if diff < 3600 else f"Updated {int(diff/3600)}h ago"
+        except:
+            pass
     
-    return dbc.Container(fluid=True, style={"backgroundColor": COLORS["background"], "minHeight": "100vh", "padding": "20px"}, children=[
-        html.H3([
-            html.Span("📰 ", style={"fontSize": "24px"}),
-            "News Terminal"
-        ], style={"color": COLORS["text"], "marginBottom": "20px", "fontWeight": "bold"}),
-        
-        dbc.Row([
-            dbc.Col([
-                html.Div([
-                    html.Span("📊 ", style={"color": COLORS["accent"]}),
-                    html.Span(f"{len(all_news)} articles across {len(INSTRUMENTS)} instruments", style={"color": COLORS["text_secondary"], "fontSize": "12px"})
-                ])
-            ], width=12)
-        ], className="mb-4"),
-        
-        dbc.Tabs([
-            dbc.Tab([
-                html.Div([
-                    html.H5("📰 All News (Chronological)", style={"color": COLORS["text"], "marginBottom": "20px", "fontSize": "16px"}),
-                    
-                    html.Div([
-                        html.Div([
-                            html.H6([
-                                f"📈 {inst['name']} ({inst['symbol']})",
-                                html.Span(f" - {len(news_by_instrument.get(inst['symbol'], []))} articles", 
-                                         style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginLeft": "8px"})
-                            ], style={"color": COLORS["accent"], "marginBottom": "12px", "fontSize": "14px"}),
-                            
-                            *[_render_news_item(item, show_instrument=True) for item in news_by_instrument.get(inst["symbol"], [])[:3]]
-                        ], style={"marginBottom": "20px", "paddingBottom": "15px", "borderBottom": f"1px dashed {COLORS['border']}"})
-                        for inst in INSTRUMENTS
-                    ])
-                ], style={"padding": "10px"})
-            ], label="📰 All News", tab_id="tab-all", label_style={"color": COLORS["text"], "fontSize": "12px"}),
-            
-            dbc.Tab([
-                html.Div([
-                    html.H5("📈 News by Instrument", style={"color": COLORS["text"], "marginBottom": "20px", "fontSize": "16px"}),
-                    
-                    dbc.Accordion([
-                        dbc.AccordionItem([
-                            _render_instrument_section(inst["symbol"], inst["name"], news_by_instrument.get(inst["symbol"], []))
-                        ], title=f"{inst['name']} ({inst['symbol']}) - {len(news_by_instrument.get(inst['symbol'], []))} articles", 
-                          item_id=f"instrument-{inst['symbol']}",
-                          style={"backgroundColor": COLORS["surface"], "color": COLORS["text"], "border": f"1px solid {COLORS['border']}"})
-                        for inst in INSTRUMENTS
-                    ], active_item="instrument-XAUUSD", flush=True)
-                ], style={"padding": "10px"})
-            ], label="📈 By Instrument", tab_id="tab-instrument", label_style={"color": COLORS["text"], "fontSize": "12px"}),
-            
-            dbc.Tab([
-                html.Div([
-                    html.H5("🏷️ News by Topic", style={"color": COLORS["text"], "marginBottom": "20px", "fontSize": "16px"}),
-                    
-                    dbc.Accordion([
-                        dbc.AccordionItem([
-                            _render_topic_section(topic, news_by_topic.get(topic, []))
-                        ], title=f"{topic} - {len(news_by_topic.get(topic, []))} articles",
-                          item_id=f"topic-{topic}",
-                          style={"backgroundColor": COLORS["surface"], "color": COLORS["text"], "border": f"1px solid {COLORS['border']}"})
-                        for topic in topic_order if topic in news_by_topic
-                    ], active_item="topic-Fed/Rate", flush=True)
-                ], style={"padding": "10px"})
-            ], label="🏷️ By Topic", tab_id="tab-topic", label_style={"color": COLORS["text"], "fontSize": "12px"}),
-        ], id="news-tabs", active_tab="tab-all", style={"backgroundColor": COLORS["surface"], "borderRadius": "6px", "padding": "10px"}),
-    ])
+    all_items = []
+    for inst in INSTRUMENTS:
+        symbol = inst["symbol"]
+        inst_news = news_by_instrument.get(symbol, [])
+        all_items.append(html.Div([
+            html.H6([f"📈 {inst['name']} ({symbol})", html.Span(f" - {len(inst_news)} articles", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginLeft": "8px"})],
+                   style={"color": COLORS["accent"], "marginBottom": "12px", "fontSize": "14px"}),
+            *[_render_news_item(item, show_instrument=True) for item in inst_news[:3]]
+        ], style={"marginBottom": "20px", "paddingBottom": "15px", "borderBottom": f"1px dashed {COLORS['border']}"}))
+    
+    by_inst_items = []
+    for inst in INSTRUMENTS:
+        symbol = inst["symbol"]
+        inst_news = news_by_instrument.get(symbol, [])
+        content = html.Div([
+            html.H5([f"📈 {inst['name']} ({symbol})", html.Span(f" - {len(inst_news)} articles", style={"color": COLORS["text_secondary"], "fontSize": "11px"})],
+                    style={"marginBottom": "12px", "paddingBottom": "8px", "borderBottom": f"1px solid {COLORS['border']}"}),
+            *[_render_news_item(item, show_instrument=False) for item in inst_news[:5]]
+        ], style={"marginBottom": "20px"}) if inst_news else html.P(f"No news for {inst['name']}", style={"color": COLORS["text_secondary"], "padding": "10px"})
+        by_inst_items.append(dbc.AccordionItem(content, title=f"{inst['name']} ({symbol})", item_id=f"instrument-{symbol}"))
+    
+    by_topic_items = []
+    for topic in TOPIC_ORDER:
+        topic_news = news_by_topic.get(topic, [])
+        if topic_news:
+            content = html.Div([
+                html.H5([TOPIC_ICONS.get(topic, "📰"), html.Span(f" {topic}", style={"color": COLORS["accent"], "fontSize": "14px", "marginLeft": "8px"}),
+                        html.Span(f" - {len(topic_news)} articles", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginLeft": "8px"})],
+                        style={"marginBottom": "12px", "paddingBottom": "8px", "borderBottom": f"1px solid {COLORS['border']}"}),
+                *[_render_news_item(item, show_instrument=True) for item in topic_news[:5]]
+            ], style={"marginBottom": "20px"})
+            by_topic_items.append(dbc.AccordionItem(content, title=f"{topic}", item_id=f"topic-{topic}"))
+    
+    tabs = dbc.Tabs([
+        dbc.Tab([html.Div(all_items, style={"padding": "10px"})], label="📰 All News", tab_id="tab-all", label_style={"color": COLORS["text"], "fontSize": "12px"}),
+        dbc.Tab([html.Div([dbc.Accordion(by_inst_items, active_item="instrument-XAUUSD", flush=True)], style={"padding": "10px"})],
+                label="📈 By Instrument", tab_id="tab-instrument", label_style={"color": COLORS["text"], "fontSize": "12px"}),
+        dbc.Tab(html.Div([dbc.Accordion(by_topic_items, active_item="topic-Fed/Rate", flush=True)] if by_topic_items else html.P("No news", style={"color": COLORS["text_secondary"]}), style={"padding": "10px"}),
+                label="🏷️ By Topic", tab_id="tab-topic", label_style={"color": COLORS["text"], "fontSize": "12px"}),
+    ], active_tab="tab-all", style={"backgroundColor": COLORS["surface"], "borderRadius": "6px", "padding": "10px"})
+    
+    return tabs, len(all_news), last_updated
 
 
-layout = get_news_layout()
+tabs_content, article_count, last_updated = _build_news_tabs()
+
+layout = dbc.Container(fluid=True, style={"backgroundColor": COLORS["background"], "minHeight": "100vh", "padding": "20px"}, children=[
+    html.H3([html.Span("📰 ", style={"fontSize": "24px"}), "News Terminal"], style={"color": COLORS["text"], "marginBottom": "20px", "fontWeight": "bold"}),
+    dbc.Row([
+        dbc.Col([html.Div([html.Span("📊 ", style={"color": COLORS["accent"]}), html.Span(f"{article_count} articles", id="news-count", style={"color": COLORS["text_secondary"], "fontSize": "12px"})])], width=8),
+        dbc.Col([html.Div([
+            html.Span(f"⏰ {last_updated}", id="news-updated", style={"color": COLORS["text_secondary"], "fontSize": "10px", "marginRight": "10px"}),
+            dbc.Button("🔄 Refresh", id="refresh-btn", color="primary", size="sm", style={"float": "right", "fontSize": "11px"})
+        ])], width=4),
+    ], className="mb-4"),
+    html.Div(id="news-tabs-container", children=tabs_content),
+    dcc.Interval(id="refresh-interval", interval=60000),
+])
+
+
+@callback(
+    Output("news-tabs-container", "children"),
+    Output("news-count", "children"),
+    Output("news-updated", "children"),
+    Input("url", "pathname"),
+    Input("refresh-btn", "n_clicks"),
+    Input("refresh-interval", "n_intervals"),
+)
+def update_news(pathname, n_clicks, n_intervals):
+    if pathname != "/news":
+        return dash.no_update, dash.no_update, dash.no_update
+    tabs, count, updated = _build_news_tabs()
+    return tabs, f"{count} articles", f"⏰ {updated}"

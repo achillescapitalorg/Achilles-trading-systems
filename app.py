@@ -29,6 +29,8 @@ from services.rl_agent import (
     Action, QLearningAgent, TradingEnvironment, TradingState
 )
 from services.news_scraper import NewsArticle, NewsSource
+from services.news_cache import NewsCache, start_background_refresh_thread
+import threading
 
 # Initialize the Dash app
 app = dash.Dash(
@@ -109,6 +111,9 @@ models_state = {
 # News articles will be fetched dynamically from news scraper
 # Keeping placeholder for type checking
 NEWS_ARTICLES = []
+
+# Initialize News Cache (persistent, thread-safe)
+news_cache = NewsCache()
 
 # Economic calendar events
 CALENDAR_EVENTS = [
@@ -1657,9 +1662,25 @@ app.layout = dbc.Container(fluid=True, children=[
     
     # Global state components
     dcc.Interval(id="interval-component", interval=5000, n_intervals=0),
+    dcc.Interval(id="news-refresh-interval", interval=60000, n_intervals=0),  # 60s news refresh
     dcc.Store(id="selected-symbol", data="XAUUSD"),
     dcc.Store(id="current-price", data=0),
+    dcc.Store(id="news-refresh-trigger", data=None),  # Triggers news refresh
 ])
+
+
+def _init_background_news():
+    """Initialize background news loading on app startup."""
+    print("[App] Starting background news cache initialization...")
+    try:
+        start_background_refresh_thread(
+            news_cache,
+            [inst["symbol"] for inst in INSTRUMENTS],
+            _fetch_news_from_sources
+        )
+        print("[App] Background news loading started")
+    except Exception as e:
+        print(f"[App] Error starting background news loading: {e}")
 
 
 def get_dashboard_layout():
@@ -2565,8 +2586,69 @@ def _get_source_icon(source):
         return "📰"
 
 
-def _fetch_news_for_symbol(symbol):
-    """Fetch real news headlines from multiple sources."""
+# Source configurations for news fetching
+NEWS_SOURCE_CONFIGS = {
+    "XAUUSD": [
+        {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/commodities/precious-metals/"},
+        {"source": "Kitco", "icon": "🥇", "url": "https://www.kitco.com/news/category/commodities/gold"},
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/commodities/metals/gold"},
+        {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/commodities"},
+        {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/commodities/"},
+    ],
+    "BTCUSD": [
+        {"source": "CoinDesk", "icon": "₿", "url": "https://www.coindesk.com/"},
+        {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
+        {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/crypto"},
+        {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/cryptocurrency/"},
+        {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
+    ],
+    "ETHUSD": [
+        {"source": "CoinDesk", "icon": "₿", "url": "https://www.coindesk.com/"},
+        {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
+        {"source": "Decrypt", "icon": "📰", "url": "https://decrypt.co/"},
+        {"source": "The Block", "icon": "🧱", "url": "https://www.theblock.co/"},
+        {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
+    ],
+    "EURUSD": [
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
+        {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+        {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
+        {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/fx"},
+    ],
+    "GBPUSD": [
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
+        {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+        {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
+        {"source": "BoE", "icon": "🏛️", "url": "https://www.bankofengland.co.uk/"},
+    ],
+    "USDJPY": [
+        {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
+        {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
+        {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
+        {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
+        {"source": "BoJ", "icon": "🏛️", "url": "https://www.boj.or.jp/en/"},
+    ],
+    "SPX500": [
+        {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/"},
+        {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/equities"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/"},
+        {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/markets/"},
+        {"source": "WSJ", "icon": "📰", "url": "https://www.wsj.com/market-data/stocks"},
+    ],
+    "NAS100": [
+        {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/technology/"},
+        {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/equities"},
+        {"source": "TechCrunch", "icon": "📱", "url": "https://techcrunch.com/"},
+        {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/tech/"},
+        {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/"},
+    ],
+}
+
+
+def _fetch_news_from_sources(symbol):
+    """Fetch real news headlines from multiple sources (raw fetcher for background thread)."""
     import random
     import requests
     from bs4 import BeautifulSoup
@@ -2574,72 +2656,12 @@ def _fetch_news_for_symbol(symbol):
     random.seed(hash(symbol) % 2**32)
     
     news_items = []
-    
-    source_configs = {
-        "XAUUSD": [
-            {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/commodities/precious-metals/"},
-            {"source": "Kitco", "icon": "🥇", "url": "https://www.kitco.com/news/category/commodities/gold"},
-            {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/markets/commodities/metals/gold"},
-            {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/commodities"},
-            {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/commodities/"},
-        ],
-        "BTCUSD": [
-            {"source": "CoinDesk", "icon": "₿", "url": "https://www.coindesk.com/"},
-            {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
-            {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/crypto"},
-            {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/cryptocurrency/"},
-            {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
-        ],
-        "ETHUSD": [
-            {"source": "CoinDesk", "icon": "₿", "url": "https://www.coindesk.com/"},
-            {"source": "CoinTelegraph", "icon": "📱", "url": "https://cointelegraph.com/"},
-            {"source": "Decrypt", "icon": "📰", "url": "https://decrypt.co/"},
-            {"source": "The Block", "icon": "🧱", "url": "https://www.theblock.co/"},
-            {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/crypto/"},
-        ],
-        "EURUSD": [
-            {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
-            {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
-            {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
-            {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
-            {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/currencies/fx"},
-        ],
-        "GBPUSD": [
-            {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
-            {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
-            {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
-            {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
-            {"source": "BoE", "icon": "🏛️", "url": "https://www.bankofengland.co.uk/"},
-        ],
-        "USDJPY": [
-            {"source": "FX Street", "icon": "💱", "url": "https://www.fxstreet.com/news"},
-            {"source": "Forex Factory", "icon": "🏭", "url": "https://www.forexfactory.com/"},
-            {"source": "Daily FX", "icon": "📊", "url": "https://www.dailyfx.com/"},
-            {"source": "Reuters", "icon": "📰", "url": "https://www.reuters.com/markets/currencies/"},
-            {"source": "BoJ", "icon": "🏛️", "url": "https://www.boj.or.jp/en/"},
-        ],
-        "SPX500": [
-            {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/markets/"},
-            {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/equities"},
-            {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/"},
-            {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/markets/"},
-            {"source": "WSJ", "icon": "📰", "url": "https://www.wsj.com/market-data/stocks"},
-        ],
-        "NAS100": [
-            {"source": "CNBC", "icon": "📺", "url": "https://www.cnbc.com/technology/"},
-            {"source": "Bloomberg", "icon": "💼", "url": "https://www.bloomberg.com/markets/equities"},
-            {"source": "TechCrunch", "icon": "📱", "url": "https://techcrunch.com/"},
-            {"source": "Yahoo", "icon": "🟣", "url": "https://finance.yahoo.com/tech/"},
-            {"source": "MarketWatch", "icon": "⌚", "url": "https://www.marketwatch.com/"},
-        ],
-    }
+    sources = NEWS_SOURCE_CONFIGS.get(symbol, NEWS_SOURCE_CONFIGS["BTCUSD"])
+    random.shuffle(sources)
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
-    
-    sources = source_configs.get(symbol, source_configs["BTCUSD"])
-    random.shuffle(sources)
     
     for src in sources:
         if len(news_items) >= 5:
@@ -2678,7 +2700,7 @@ def _fetch_news_for_symbol(symbol):
             continue
     
     if len(news_items) < 3:
-        for i in range(3):
+        for i in range(min(3, len(sources))):
             news_items.append({
                 "headline": f"Visit {sources[i]['source']} for latest {symbol} market news",
                 "sentiment": 0,
@@ -2690,7 +2712,21 @@ def _fetch_news_for_symbol(symbol):
                 "impact_timing": "Market hours",
             })
     
-    return news_items[:6], True
+    return news_items[:6]
+
+
+def _fetch_news_for_symbol(symbol):
+    """Fetch news for a symbol with cache-first strategy."""
+    # Check cache first
+    cached = news_cache.get(symbol)
+    if cached:
+        return cached, True
+    
+    # Cache miss - fetch fresh and cache
+    news_items = _fetch_news_from_sources(symbol)
+    if news_items:
+        news_cache.set(symbol, news_items)
+    return news_items, True
 
 
 def _generate_instrument_news(symbol, symbol_info):
@@ -4079,10 +4115,14 @@ def update_regime_detection(symbol, n):
 @callback(
     Output("unified-recommendation", "children"),
     [Input("selected-symbol", "data"),
-     Input("interval-component", "n_intervals")]
+     Input("interval-component", "n_intervals")],
+    [State("url", "pathname")]
 )
-def update_unified_recommendation(symbol, n):
+def update_unified_recommendation(symbol, n, pathname):
     """Generate unified trading recommendation combining all signals."""
+    if pathname and pathname != "/" and pathname != "":
+        return dash.no_update
+    
     if symbol is None:
         symbol = "XAUUSD"
     
@@ -4186,6 +4226,10 @@ def update_unified_recommendation(symbol, n):
     ], style={"backgroundColor": COLORS["surface"], "border": f"2px solid {action_color}", "borderRadius": "8px", "marginBottom": "15px"})
     
     return recommendation_card
+
+
+# Start background news loading when app starts
+_init_background_news()
 
 
 # Run the app
