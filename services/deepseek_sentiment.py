@@ -65,7 +65,10 @@ Be precise and consistent in your classifications."""
             }
             return result
         except Exception as e:
-            print(f"[DeepSeek] Error analyzing headline: {e}")
+            error_str = str(e)
+            if "402" in error_str or "Payment Required" in error_str:
+                print(f"[DeepSeek] API requires payment - using keyword fallback")
+                self.api_key = ""
             return self._fallback.analyze(headline)
     
     def analyze_batch(self, headlines: List[str]) -> List[Dict]:
@@ -79,7 +82,10 @@ Be precise and consistent in your classifications."""
         try:
             return self._call_deepseek_batch(headlines)
         except Exception as e:
-            print(f"[DeepSeek] Batch analysis failed: {e}")
+            error_str = str(e)
+            if "402" in error_str or "Payment Required" in error_str:
+                print(f"[DeepSeek] Batch API requires payment - using keyword fallback")
+                self.api_key = ""
             return [self._fallback.analyze(h) for h in headlines]
     
     def _call_deepseek_single(self, headline: str) -> Dict:
@@ -104,7 +110,7 @@ Be precise and consistent in your classifications."""
             DEEPSEEK_API_URL,
             headers=headers,
             json=payload,
-            timeout=15
+            timeout=3
         )
         
         if response.status_code != 200:
@@ -140,7 +146,7 @@ Be precise and consistent in your classifications."""
             DEEPSEEK_API_URL,
             headers=headers,
             json=payload,
-            timeout=30
+            timeout=5
         )
         
         if response.status_code != 200:

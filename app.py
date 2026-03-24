@@ -22,6 +22,7 @@ from scipy.stats import norm
 # Import services
 from services.advanced_models import (
     BlackScholes, HestonModel, HestonParams,
+    SABRModel, SABRParams,
     RegimeSwitchingModel, calculate_expected_shortfall,
     calculate_sharpe_ratio, calculate_sortino_ratio, calculate_max_drawdown
 )
@@ -1208,6 +1209,85 @@ def get_unified_trading_recommendation(symbol):
             print(f"Supertrend error: {e}")
             factors.append(("Supertrend", "ERROR", "HOLD"))
         
+        # Stochastic Oscillator
+        try:
+            stoch = calculate_stochastic_safe(df)
+            if stoch is not None:
+                k, d = stoch['k'], stoch['d']
+                if k < 20 and k > d:
+                    signal_scores['BUY'] += 0.8
+                    confidence_scores.append(0.7)
+                    factors.append(("Stochastic", f"OVERSOLD ({k:.0f})", "BUY"))
+                elif k > 80 and k < d:
+                    signal_scores['SELL'] += 0.8
+                    confidence_scores.append(0.7)
+                    factors.append(("Stochastic", f"OVERBOUGHT ({k:.0f})", "SELL"))
+                else:
+                    signal_scores['HOLD'] += 0.3
+                    factors.append(("Stochastic", f"NEUTRAL ({k:.0f})", "HOLD"))
+        except Exception as e:
+            print(f"Stochastic error: {e}")
+            factors.append(("Stochastic", "ERROR", "HOLD"))
+        
+        # CCI (Commodity Channel Index)
+        try:
+            cci = calculate_cci_safe(df)
+            if cci is not None:
+                if cci < -100:
+                    signal_scores['BUY'] += 0.7
+                    confidence_scores.append(0.65)
+                    factors.append(("CCI", f"OVERSOLD ({cci:.0f})", "BUY"))
+                elif cci > 100:
+                    signal_scores['SELL'] += 0.7
+                    confidence_scores.append(0.65)
+                    factors.append(("CCI", f"OVERBOUGHT ({cci:.0f})", "SELL"))
+                else:
+                    signal_scores['HOLD'] += 0.3
+                    factors.append(("CCI", f"NEUTRAL ({cci:.0f})", "HOLD"))
+        except Exception as e:
+            print(f"CCI error: {e}")
+            factors.append(("CCI", "ERROR", "HOLD"))
+        
+        # Williams %R
+        try:
+            williams = calculate_williams_r_safe(df)
+            if williams is not None:
+                if williams < -80:
+                    signal_scores['BUY'] += 0.7
+                    confidence_scores.append(0.65)
+                    factors.append(("Williams %R", f"OVERSOLD ({williams:.0f})", "BUY"))
+                elif williams > -20:
+                    signal_scores['SELL'] += 0.7
+                    confidence_scores.append(0.65)
+                    factors.append(("Williams %R", f"OVERBOUGHT ({williams:.0f})", "SELL"))
+                else:
+                    signal_scores['HOLD'] += 0.3
+                    factors.append(("Williams %R", f"NEUTRAL ({williams:.0f})", "HOLD"))
+        except Exception as e:
+            print(f"Williams %R error: {e}")
+            factors.append(("Williams %R", "ERROR", "HOLD"))
+        
+        # ADX (Average Directional Index)
+        try:
+            adx = calculate_adx_safe(df)
+            if adx is not None:
+                adx_val, plus_di, minus_di = adx['adx'], adx['plus_di'], adx['minus_di']
+                if adx_val > 25:
+                    if plus_di > minus_di:
+                        signal_scores['BUY'] += 0.8
+                        confidence_scores.append(0.7)
+                        factors.append(("ADX", f"STRONG UP ({adx_val:.0f})", "BUY"))
+                    else:
+                        signal_scores['SELL'] += 0.8
+                        confidence_scores.append(0.7)
+                        factors.append(("ADX", f"STRONG DOWN ({adx_val:.0f})", "SELL"))
+                else:
+                    signal_scores['HOLD'] += 0.5
+                    factors.append(("ADX", f"WEAK TREND ({adx_val:.0f})", "HOLD"))
+        except Exception as e:
+            print(f"ADX error: {e}")
+            factors.append(("ADX", "ERROR", "HOLD"))
+        
         # Step 3: Regime Detection (HMM)
         try:
             returns_for_hmm = returns[-min(180, len(returns)):]
@@ -1531,6 +1611,75 @@ def calculate_supertrend_safe(df, period=10, multiplier=3):
         elif close.iloc[-1] < float(hl2.iloc[-2] - multiplier * atr.iloc[-2]):
             supertrend = -1
         return supertrend
+    except:
+        return None
+
+
+def calculate_stochastic_safe(df, k_period=14, d_period=3):
+    """Calculate Stochastic Oscillator with error handling."""
+    try:
+        if len(df) < k_period or 'high' not in df.columns or 'low' not in df.columns or 'close' not in df.columns:
+            return None
+        high = df['high'].rolling(window=k_period).max()
+        low = df['low'].rolling(window=k_period).min()
+        close = df['close']
+        k = 100 * (close - low) / (high - low)
+        d = k.rolling(window=d_period).mean()
+        return {'k': float(k.iloc[-1]), 'd': float(d.iloc[-1])}
+    except:
+        return None
+
+
+def calculate_cci_safe(df, period=20):
+    """Calculate Commodity Channel Index with error handling."""
+    try:
+        if len(df) < period + 1 or 'high' not in df.columns or 'low' not in df.columns or 'close' not in df.columns:
+            return None
+        tp = (df['high'] + df['low'] + df['close']) / 3
+        sma_tp = tp.rolling(window=period).mean()
+        mad = tp.rolling(window=period).apply(lambda x: np.abs(x - x.mean()).mean())
+        cci = (tp - sma_tp) / (0.015 * mad + 1e-10)
+        return float(cci.iloc[-1])
+    except:
+        return None
+
+
+def calculate_williams_r_safe(df, period=14):
+    """Calculate Williams %R with error handling."""
+    try:
+        if len(df) < period or 'high' not in df.columns or 'low' not in df.columns or 'close' not in df.columns:
+            return None
+        high = df['high'].rolling(window=period).max()
+        low = df['low'].rolling(window=period).min()
+        close = df['close']
+        williams_r = -100 * (high - close) / (high - low + 1e-10)
+        return float(williams_r.iloc[-1])
+    except:
+        return None
+
+
+def calculate_adx_safe(df, period=14):
+    """Calculate Average Directional Index with error handling."""
+    try:
+        if len(df) < period * 2 or 'high' not in df.columns or 'low' not in df.columns or 'close' not in df.columns:
+            return None
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm < 0] = 0
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = dx.rolling(window=period).mean()
+        return {'adx': float(adx.iloc[-1]), 'plus_di': float(plus_di.iloc[-1]), 'minus_di': float(minus_di.iloc[-1])}
     except:
         return None
 
@@ -1863,6 +2012,7 @@ def get_dashboard_layout():
                 dbc.Tabs([
                     dbc.Tab([
                         html.Div([
+                            html.Div(id="heston-model-info", className="mb-2"),
                             html.Div(id="heston-model-cards", className="mb-2"),
                             dcc.Graph(id="heston-surface-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "350px"}),
                         ], style={"padding": "8px"})
@@ -1921,6 +2071,13 @@ def get_dashboard_layout():
                             dcc.Graph(id="prediction-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "320px"}),
                         ], style={"padding": "8px"})
                     ], label="🤖 AI Prediction", tab_id="prediction", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                    dbc.Tab([
+                        html.Div([
+                            html.Div(id="sabr-model-cards", className="mb-2"),
+                            dcc.Graph(id="sabr-smile-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "320px"}),
+                            html.Div(id="sabr-calibration-cards", className="mt-2"),
+                        ], style={"padding": "8px"})
+                    ], label="📐 SABR Model", tab_id="sabr", label_style={"color": COLORS["text"], "fontSize": "11px"}),
                 ], active_tab="heston", id="volatility-tabs", style={"backgroundColor": COLORS["background"]})
             ], style={"padding": "0"})
         ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
@@ -3627,7 +3784,8 @@ def update_black_scholes(spot, strike, time, vol, rate, option_type):
 
 
 @callback(
-    [Output("heston-model-cards", "children"),
+    [Output("heston-model-info", "children"),
+     Output("heston-model-cards", "children"),
      Output("heston-surface-chart", "figure")],
     [Input("selected-symbol", "data")]
 )
@@ -3638,112 +3796,166 @@ def update_heston_model(symbol):
 
     # Calculate REAL Heston parameters from market data
     heston_params = calculate_real_heston_params(symbol)
-
     heston = HestonModel(heston_params)
-
-    # Get current price for display
     current_price = get_current_price(symbol)
+    r = 0.05
 
-    # Create Heston status cards
+    # Get model interpretation
+    model_info = heston.get_model_info()
+    
+    # Model explanation info
+    model_explanation = html.Div([
+        html.Div([
+            html.Span("ℹ️ ", style={"fontSize": "12px", "color": COLORS["info"]}),
+            html.Span(f"Heston Model: {model_info['volatility_interpretation']}", 
+                     style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            html.Span(" • ", style={"color": COLORS["text_secondary"]}),
+            html.Span(f"Speed: {model_info['mean_reversion_speed']}", 
+                     style={"color": COLORS["info"], "fontSize": "10px"}),
+            html.Span(" • ", style={"color": COLORS["text_secondary"]}),
+            html.Span(f"Leverage: {model_info['leverage_effect'][:15]}", 
+                     style={"color": COLORS["warning"], "fontSize": "10px"}),
+        ], style={"padding": "6px 12px", "backgroundColor": f"{COLORS['surface']}", 
+                  "borderRadius": "4px", "marginBottom": "8px", "border": f"1px solid {COLORS['border']}"})
+    ], className="mb-2")
+
+    # Create Heston status cards with interpretation
     cards = dbc.Row([
         dbc.Col([
             dbc.Card([
                 dbc.CardBody([
-                    html.H6("κ (Mean Reversion)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
-                    html.H3(f"{heston_params.kappa:.2f}", style={"color": COLORS["accent"], "fontSize": "24px", "fontWeight": "bold"}),
-                    html.Small("Speed of vol mean reversion", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
-                ], style={"padding": "15px"})
-            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
-        ], width=2),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H6("θ (Long-run Var)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
-                    html.H3(f"{heston_params.theta:.2%}", style={"color": COLORS["info"], "fontSize": "24px", "fontWeight": "bold"}),
-                    html.Small("Equilibrium variance level", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
-                ], style={"padding": "15px"})
-            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
-        ], width=2),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H6("ξ (Vol of Vol)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
-                    html.H3(f"{heston_params.xi:.2f}", style={"color": COLORS["warning"], "fontSize": "24px", "fontWeight": "bold"}),
-                    html.Small("Volatility clustering", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
-                ], style={"padding": "15px"})
-            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
-        ], width=2),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H6("ρ (Correlation)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
-                    html.H3(f"{heston_params.rho:.2f}", style={"color": COLORS["danger"], "fontSize": "24px", "fontWeight": "bold"}),
-                    html.Small("Price-vol correlation", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
-                ], style={"padding": "15px"})
-            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
-        ], width=2),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H6("v₀ (Initial Var)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
-                    html.H3(f"{heston_params.v0:.2%}", style={"color": COLORS["success"], "fontSize": "24px", "fontWeight": "bold"}),
-                    html.Small("Current variance level", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
-                ], style={"padding": "15px"})
-            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
-        ], width=2),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
                     html.H6("Implied Vol", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
-                    html.H3(f"{np.sqrt(heston_params.v0):.2%}", style={"color": COLORS["text"], "fontSize": "24px", "fontWeight": "bold"}),
-                    html.Small(f"{symbol} @ ${current_price:.2f}", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
-                ], style={"padding": "15px"})
+                    html.H3(f"{np.sqrt(heston_params.v0):.2%}", style={"color": COLORS["accent"], "fontSize": "28px", "fontWeight": "bold"}),
+                    html.Small(f"{model_info['vol_level']} Volatility", style={"color": COLORS["success"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
             ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
         ], width=2),
-    ], className="g-3 mb-3")
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Mean Reversion (κ)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{heston_params.kappa:.2f}", style={"color": COLORS["info"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small(f"{model_info['mean_reversion_speed']} reversion", style={"color": COLORS["info"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Leverage Effect (ρ)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{heston_params.rho:.2f}", style={"color": COLORS["danger"] if heston_params.rho < 0 else COLORS["success"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small(model_info['leverage_effect'][:20], style={"color": COLORS["warning"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Vol of Vol (ξ)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{heston_params.xi:.2f}", style={"color": COLORS["warning"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small("Vol clustering", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Long-run Vol (θ)", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"{np.sqrt(heston_params.theta):.2%}", style={"color": COLORS["success"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small("Equilibrium level", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6(f"{symbol}", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                    html.H3(f"${current_price:.2f}", style={"color": COLORS["accent"], "fontSize": "24px", "fontWeight": "bold"}),
+                    html.Small("Current Price", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+    ], className="g-3 mb-2")
+
+    # Generate volatility surface using Heston model
+    strikes_relative = np.array([0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15])
+    strikes = current_price * strikes_relative
+    expiries = np.array([7, 14, 30, 60, 90, 180])
     
-    # Create 3D volatility surface using Heston
-    strikes = np.array([0.9, 0.95, 1.0, 1.05, 1.1])
-    expiries = np.array([30, 60, 90, 180, 365])
-    volatilities = np.zeros((len(expiries), len(strikes)))
+    # Use the Heston model to generate real volatility surface
+    try:
+        volatilities = heston.generate_volatility_surface(current_price, r, strikes, expiries)
+    except Exception as e:
+        print(f"Heston surface error: {e}")
+        volatilities = np.zeros((len(expiries), len(strikes)))
+        for i in range(len(expiries)):
+            for j in range(len(strikes)):
+                base_vol = np.sqrt(heston_params.v0)
+                moneyness = np.log(strikes[j] / current_price)
+                vol = base_vol * (1 + 0.3 * moneyness)
+                volatilities[i, j] = max(0.05, min(vol, 0.80))
     
-    for i, expiry in enumerate(expiries):
-        for j, strike in enumerate(strikes):
-            T = expiry / 365
-            moneyness = strike - 1.0
-            base_vol = np.sqrt(heston_params.v0)
-            vol = base_vol + 0.05 * moneyness**2 + np.random.uniform(-0.01, 0.01)
-            vol *= np.sqrt(expiry / 30)
-            volatilities[i, j] = max(0.05, min(vol, 0.8))
-    
+    # Create 3D volatility surface
     fig = go.Figure(data=[
         go.Surface(
-            z=volatilities,
-            x=strikes,
+            z=volatilities * 100,
+            x=strikes_relative,
             y=expiries,
-            colorscale=[[0, COLORS["background"]], [0.3, "#1a1a2e"], [0.6, COLORS["accent"]], [1, COLORS["info"]]],
-            colorbar=dict(title=dict(text="Vol", font=dict(color=COLORS["text"], size=10)), tickfont=dict(color=COLORS["text_secondary"])),
-            showscale=True,
+            colorscale=[[0, '#0a0a0a'], [0.3, '#1a1a2e'], [0.6, '#00ff88'], [1, '#00d4ff']],
+            colorbar=dict(
+                title=dict(text="Vol %", font=dict(color='#ffffff', size=11)),
+                tickfont=dict(color='#888888', size=10),
+                len=0.7,
+                x=1.02
+            ),
+            hovertemplate='Strike: %{x:.0%}<br>Expiry: %{y} days<br>Vol: %{z:.1f}%<extra></extra>',
         )
     ])
     
     fig.update_layout(
-        height=450,
-        margin=dict(l=0, r=0, t=30, b=0),
-        plot_bgcolor=COLORS["background"],
-        paper_bgcolor=COLORS["background"],
-        font=dict(color=COLORS["text"], size=10),
+        height=400,
+        margin=dict(l=10, r=50, t=30, b=10),
+        plot_bgcolor='#000000',
+        paper_bgcolor='#000000',
+        font=dict(color='#ffffff', size=10),
         scene=dict(
-            xaxis=dict(title=dict(text="Strike", font=dict(color=COLORS["text"], size=10)), tickfont=dict(color=COLORS["text_secondary"]), gridcolor=COLORS["grid"], backgroundcolor=COLORS["background"]),
-            yaxis=dict(title=dict(text="Days", font=dict(color=COLORS["text"], size=10)), tickfont=dict(color=COLORS["text_secondary"]), gridcolor=COLORS["grid"], backgroundcolor=COLORS["background"]),
-            zaxis=dict(title=dict(text="Vol", font=dict(color=COLORS["text"], size=10)), tickfont=dict(color=COLORS["text_secondary"]), gridcolor=COLORS["grid"], backgroundcolor=COLORS["background"]),
-            bgcolor=COLORS["background"],
+            xaxis=dict(
+                title=dict(text="Moneyness (Strike/Spot)", font=dict(color='#ffffff', size=10)),
+                tickfont=dict(color='#888888', size=9),
+                gridcolor='#1a1a1a',
+                backgroundcolor='#0a0a0a',
+                tickformat='.0%',
+            ),
+            yaxis=dict(
+                title=dict(text="Days to Expiry", font=dict(color='#ffffff', size=10)),
+                tickfont=dict(color='#888888', size=9),
+                gridcolor='#1a1a1a',
+                backgroundcolor='#0a0a0a',
+            ),
+            zaxis=dict(
+                title=dict(text="Vol %", font=dict(color='#ffffff', size=10)),
+                tickfont=dict(color='#888888', size=9),
+                gridcolor='#1a1a1a',
+                backgroundcolor='#0a0a0a',
+                tickformat='.0f',
+            ),
+            bgcolor='#0a0a0a',
             camera=dict(eye=dict(x=1.5, y=1.5, z=0.8)),
         ),
         showlegend=False,
     )
     
-    return cards, fig
+    # Add annotation explaining the model
+    fig.add_annotation(
+        text="Heston Stochastic Volatility Model - Implied Volatility Surface",
+        xref="paper", yref="paper",
+        x=0.5, y=1.08,
+        showarrow=False,
+        font=dict(size=12, color='#00ff88'),
+        align='center'
+    )
+    
+    return model_explanation, cards, fig
 
 
 @callback(
@@ -3892,6 +4104,199 @@ def update_price_prediction(symbol):
     fig.update_yaxes(gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"]))
     
     return cards, fig
+
+
+@callback(
+    [Output("sabr-model-cards", "children"),
+     Output("sabr-smile-chart", "figure"),
+     Output("sabr-calibration-cards", "children")],
+    [Input("selected-symbol", "data")]
+)
+def update_sabr_model(symbol):
+    """Update SABR model visualization with volatility smile."""
+    if symbol is None:
+        symbol = "XAUUSD"
+
+    current_price = get_current_price(symbol)
+    
+    # Get market volatility for calibration
+    heston_params = calculate_real_heston_params(symbol)
+    atm_vol = float(np.sqrt(heston_params.v0))
+    
+    # Calibrate SABR from market data
+    market_data = {
+        'skew': heston_params.rho,
+        'smile_curvature': heston_params.xi
+    }
+    sabr = SABRModel.calibrate_from_market(atm_vol, market_data, beta=0.5)
+    
+    # Generate volatility smile
+    smile_data = sabr.generate_volatility_smile(current_price, expiry=30, n_strikes=11)
+    model_info = sabr.get_model_info()
+    
+    # Create SABR parameter cards
+    cards = dbc.Row([
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Alpha (α)", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                    html.H3(f"{sabr.params.alpha:.4f}", style={"color": COLORS["accent"], "fontSize": "22px", "fontWeight": "bold"}),
+                    html.Small("Initial vol level", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Beta (β)", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                    html.H3(f"{sabr.params.beta:.2f}", style={"color": COLORS["info"], "fontSize": "22px", "fontWeight": "bold"}),
+                    html.Small(model_info['vol_type'], style={"color": COLORS["info"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Rho (ρ)", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                    html.H3(f"{sabr.params.rho:.2f}", style={"color": COLORS["danger"] if sabr.params.rho < 0 else COLORS["success"], "fontSize": "22px", "fontWeight": "bold"}),
+                    html.Small(model_info['skew_type'][:18], style={"color": COLORS["warning"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Nu (ν)", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                    html.H3(f"{sabr.params.nu:.2f}", style={"color": COLORS["warning"], "fontSize": "22px", "fontWeight": "bold"}),
+                    html.Small("Vol of vol", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("ATM Vol", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                    html.H3(f"{smile_data['atm_vol']:.2%}", style={"color": COLORS["success"], "fontSize": "22px", "fontWeight": "bold"}),
+                    html.Small(f"30-day expiry", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardBody([
+                    html.H6("Skew", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                    html.H3(f"{smile_data['skew']:+.4f}", style={"color": COLORS["info"], "fontSize": "22px", "fontWeight": "bold"}),
+                    html.Small("Vol curve tilt", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                ], style={"padding": "12px"})
+            ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+        ], width=2),
+    ], className="g-3 mb-2")
+    
+    # Create volatility smile chart
+    strikes = smile_data['strikes']
+    vols = smile_data['vols'] * 100
+    moneyness = smile_data['moneyness']
+    atm_idx = np.argmin(np.abs(moneyness - 1.0))
+    
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('Volatility Smile (30 Days)', 'Term Structure'),
+        horizontal_spacing=0.15
+    )
+    
+    # Smile curve
+    colors = [COLORS["danger"] if i < atm_idx else COLORS["success"] if i > atm_idx else COLORS["accent"] 
+              for i in range(len(vols))]
+    
+    fig.add_trace(go.Scatter(
+        x=moneyness,
+        y=vols,
+        mode='lines+markers',
+        marker=dict(size=10, color=colors),
+        line=dict(color=COLORS["accent"], width=2),
+        name='SABR Smile',
+        hovertemplate='Moneyness: %{x:.0%}<br>Vol: %{y:.2f}%<extra></extra>'
+    ), row=1, col=1)
+    
+    # ATM marker
+    fig.add_vline(x=1.0, line_dash="dash", line_color=COLORS["text_secondary"], 
+                  annotation_text="ATM", annotation_position="top", row=1, col=1)
+    
+    # Term structure for different expiries
+    expiries = [7, 14, 30, 60, 90]
+    for expiry in expiries:
+        smile_t = sabr.generate_volatility_smile(current_price, expiry=expiry, n_strikes=11)
+        fig.add_trace(go.Scatter(
+            x=smile_t['moneyness'],
+            y=smile_t['vols'] * 100,
+            mode='lines',
+            name=f'{expiry}d',
+            line=dict(width=1.5),
+            hovertemplate=f'{expiry} days<br>Moneyness: %{{x:.0%}}<br>Vol: %{{y:.2f}}%<extra></extra>'
+        ), row=1, col=2)
+    
+    fig.update_layout(
+        height=320,
+        margin=dict(l=40, r=20, t=50, b=40),
+        plot_bgcolor=COLORS["background"],
+        paper_bgcolor=COLORS["background"],
+        font=dict(color=COLORS["text"], size=10),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(color=COLORS["text_secondary"], size=9)
+        ),
+    )
+    
+    fig.update_xaxes(
+        title=dict(text="Moneyness (K/F)", font=dict(color=COLORS["text"], size=10)),
+        tickformat='.0%',
+        gridcolor=COLORS["grid"],
+        showgrid=True,
+        tickfont=dict(color=COLORS["text_secondary"]),
+        row=1, col=1
+    )
+    fig.update_yaxes(
+        title=dict(text="Implied Vol %", font=dict(color=COLORS["text"], size=10)),
+        tickformat='.1f',
+        gridcolor=COLORS["grid"],
+        showgrid=True,
+        tickfont=dict(color=COLORS["text_secondary"]),
+        row=1, col=1
+    )
+    fig.update_xaxes(
+        title=dict(text="Moneyness (K/F)", font=dict(color=COLORS["text"], size=10)),
+        tickformat='.0%',
+        gridcolor=COLORS["grid"],
+        showgrid=True,
+        tickfont=dict(color=COLORS["text_secondary"]),
+        row=1, col=2
+    )
+    fig.update_yaxes(
+        title=dict(text="Implied Vol %", font=dict(color=COLORS["text"], size=10)),
+        tickformat='.1f',
+        gridcolor=COLORS["grid"],
+        showgrid=True,
+        tickfont=dict(color=COLORS["text_secondary"]),
+        row=1, col=2
+    )
+    
+    # Calibration explanation cards
+    calibration_cards = dbc.Row([
+        dbc.Col([
+            html.Div([
+                html.Span("📐 SABR Calibration: ", style={"color": COLORS["accent"], "fontWeight": "bold", "fontSize": "11px"}),
+                html.Span(f"α={sabr.params.alpha:.3f}, β={sabr.params.beta:.1f}, ρ={sabr.params.rho:.2f}, ν={sabr.params.nu:.2f}", 
+                         style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            ], style={"padding": "8px 12px", "backgroundColor": COLORS["surface"], "borderRadius": "6px", "border": f"1px solid {COLORS['border']}"})
+        ], width=12),
+    ], className="g-3")
+    
+    return cards, fig, calibration_cards
 
 
 def run_monte_carlo_simulation(symbol, days, n_paths):

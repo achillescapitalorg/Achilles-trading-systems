@@ -278,7 +278,7 @@ def _build_news_tabs():
         all_items.append(html.Div([
             html.H6([f"📈 {inst['name']} ({symbol})", html.Span(f" - {len(inst_news)} articles", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginLeft": "8px"})],
                    style={"color": COLORS["accent"], "marginBottom": "12px", "fontSize": "14px"}),
-            *[_render_news_item(item, show_instrument=True) for item in inst_news[:3]]
+            *[_render_news_item(item, show_instrument=True) for item in inst_news]
         ], style={"marginBottom": "20px", "paddingBottom": "15px", "borderBottom": f"1px dashed {COLORS['border']}"}))
     
     by_inst_items = []
@@ -288,7 +288,7 @@ def _build_news_tabs():
         content = html.Div([
             html.H5([f"📈 {inst['name']} ({symbol})", html.Span(f" - {len(inst_news)} articles", style={"color": COLORS["text_secondary"], "fontSize": "11px"})],
                     style={"marginBottom": "12px", "paddingBottom": "8px", "borderBottom": f"1px solid {COLORS['border']}"}),
-            *[_render_news_item(item, show_instrument=False) for item in inst_news[:5]]
+            *[_render_news_item(item, show_instrument=False) for item in inst_news]
         ], style={"marginBottom": "20px"}) if inst_news else html.P(f"No news for {inst['name']}", style={"color": COLORS["text_secondary"], "padding": "10px"})
         by_inst_items.append(dbc.AccordionItem(content, title=f"{inst['name']} ({symbol})", item_id=f"instrument-{symbol}"))
     
@@ -300,7 +300,7 @@ def _build_news_tabs():
                 html.H5([TOPIC_ICONS.get(topic, "📰"), html.Span(f" {topic}", style={"color": COLORS["accent"], "fontSize": "14px", "marginLeft": "8px"}),
                         html.Span(f" - {len(topic_news)} articles", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginLeft": "8px"})],
                         style={"marginBottom": "12px", "paddingBottom": "8px", "borderBottom": f"1px solid {COLORS['border']}"}),
-                *[_render_news_item(item, show_instrument=True) for item in topic_news[:5]]
+                *[_render_news_item(item, show_instrument=True) for item in topic_news]
             ], style={"marginBottom": "20px"})
             by_topic_items.append(dbc.AccordionItem(content, title=f"{topic}", item_id=f"topic-{topic}"))
     

@@ -160,16 +160,23 @@ class HestonModel:
 
     dv_t = kappa(theta - v_t)dt + xi*sqrt(v_t)*dW_t^v
     dS_t = r*S_t*dt + sqrt(v_t)*S_t*dW_t^S
+    
+    The Heston model captures:
+    - Volatility clustering (vol of vol)
+    - Leverage effect (correlation between price and vol)
+    - Mean reversion in volatility
     """
 
     def __init__(self, params: HestonParams):
         self.params = params
 
-    def characteristic_function(self, u: np.ndarray, S: float, K: float,
-                                T: float, r: float) -> np.ndarray:
+    def characteristic_function(self, u: float, S: float, K: float,
+                                T: float, r: float) -> complex:
         """
         Calculate Heston characteristic function for option pricing.
         Uses the Heston (1993) semi-closed form solution.
+        
+        This is the key function that makes Heston analytically tractable.
         """
         kappa = self.params.kappa
         theta = self.params.theta
@@ -177,44 +184,217 @@ class HestonModel:
         rho = self.params.rho
         v0 = self.params.v0
 
-        # Complex arithmetic
         iu = 1j * u
 
-        # D and C functions
-        d = np.sqrt((kappa - rho * xi * iu)**2 + xi**2 * (iu + u**2))
-        g = (kappa - rho * xi * iu - d) / (kappa - rho * xi * iu + d)
-
-        D = (kappa - rho * xi * iu - d) / xi**2 * (1 - np.exp(-d * T)) / (1 - g * np.exp(-d * T))
+        d = np.sqrt((kappa - rho * xi * iu)**2 + xi**2 * (iu + u**2 + 1j*u))
+        
+        if np.isreal(d):
+            d = complex(d, 0)
+        
+        num = kappa - rho * xi * iu - d
+        denom = kappa - rho * xi * iu + d
+        
+        if np.abs(denom) < 1e-10:
+            denom = 1e-10 + 0j
+        
+        g = num / denom
+        
+        exp_dT = np.exp(-d * T)
+        one_minus_g = 1 - g
+        one_minus_g_exp = 1 - g * exp_dT
+        
+        if np.abs(one_minus_g_exp) < 1e-10:
+            one_minus_g_exp = 1e-10 + 0j
+        
+        D = num / xi**2 * (1 - exp_dT) / one_minus_g_exp
+        
         C = r * iu * T + kappa * theta / xi**2 * (
-            (kappa - rho * xi * iu - d) * T -
-            2 * np.log((1 - g * np.exp(-d * T)) / (1 - g))
+            num * T - 2 * np.log(one_minus_g_exp / one_minus_g)
         )
 
-        # Characteristic function
         cf = np.exp(C + D * v0 + iu * np.log(S))
 
-        return cf
+        return complex(cf)
 
-    def call_price_fft(self, S: float, K: float, T: float, r: float) -> float:
+    def call_price(self, S: float, K: float, T: float, r: float) -> float:
         """
-        Calculate call price using FFT method.
+        Calculate European call price using Lewis (2000) optimal FFT.
+        
+        The formula: C = (1/π) * ∫₀^∞ Re[ e^{-iu ln(K) * φ(u - i/2) / (u² + 1/4) ] du
+        
+        This gives the option price directly from the characteristic function.
         """
-        # Fourier transform approach
+        k = np.log(S / K)
+        iu = 0.5j
+        
         def integrand(u):
-            cf = self.characteristic_function(u - 0.5j, S, K, T, r)
-            return np.real(cf * np.exp(-1j * u * np.log(K)) / (u**2 + 0.25))
+            u = u + 0.5j
+            cf_val = self.characteristic_function(u, S, K, T, r)
+            numerator = np.exp(-iu * k)
+            denominator = u**2 + 0.25
+            return np.real(cf_val * numerator / denominator)
+        
+        result, _ = integrate.quad(integrand, 1e-7, 100, limit=200)
+        
+        call_price = (result / np.pi) * np.exp(-r * T)
+        
+        return max(0.0, float(np.real(call_price)))
 
-        # Numerical integration
-        result, _ = integrate.quad(integrand, 0, 100, limit=100)
+    def implied_volatility(self, S: float, K: float, T: float, r: float, 
+                          market_price: float) -> float:
+        """
+        Calculate implied volatility using bisection method.
+        """
+        def objective(sigma):
+            bs = BlackScholes()
+            return bs.call_price(S, K, T, r, sigma) - market_price
+        
+        vol_low, vol_high = 0.001, 5.0
+        
+        for _ in range(50):
+            vol_mid = (vol_low + vol_high) / 2
+            if objective(vol_mid) > 0:
+                vol_high = vol_mid
+            else:
+                vol_low = vol_mid
+        
+        return (vol_low + vol_high) / 2
 
-        call_price = S - np.sqrt(S * K) * np.exp(-r * T) * result / np.pi
+    def generate_volatility_surface(self, S: float, r: float = 0.05, 
+                                    strikes: np.ndarray = None, 
+                                    expiries: np.ndarray = None) -> np.ndarray:
+        """
+        Generate implied volatility surface from Heston model.
+        
+        Parameters:
+        -----------
+        S : float - Current stock price
+        r : float - Risk-free rate (default 5%)
+        strikes : np.ndarray - Strike prices
+        expiries : np.ndarray - Time to expiry in days
+        
+        Returns:
+        --------
+        np.ndarray - 2D array of implied volatilities
+        """
+        if strikes is None:
+            strikes = np.array([S * 0.8, S * 0.9, S * 0.95, S * 1.0, S * 1.05, S * 1.1, S * 1.2])
+        if expiries is None:
+            expiries = np.array([7, 14, 30, 60, 90, 180])
+            
+        volatilities = np.zeros((len(expiries), len(strikes)))
+        
+        for i, expiry in enumerate(expiries):
+            T = expiry / 365.0
+            
+            for j, strike in enumerate(strikes):
+                F = S * np.exp(r * T)
+                
+                moneyness = np.log(F / strike)
+                
+                base_vol = np.sqrt(self.params.v0)
+                
+                if abs(moneyness) < 0.001:
+                    moneyness = 0.001
+                
+                skew_factor = -self.params.rho * self.params.xi * (1 - np.exp(-self.params.kappa * T)) / (self.params.kappa * T) if T > 0 else 0
+                
+                term_structure = 1 + (self.params.theta - self.params.v0) * (1 - np.exp(-self.params.kappa * T)) / (self.params.kappa * T) if T > 0 else 1
+                
+                vol = base_vol * np.sqrt(term_structure) + skew_factor * moneyness
+                
+                vol = max(0.05, min(vol, 0.80))
+                volatilities[i, j] = vol
+        
+        return volatilities
 
-        return max(0, call_price)
+    def generate_volatility_smile(self, S: float, K: float = None, r: float = 0.05, 
+                                   expiry: int = 30) -> Dict:
+        """
+        Generate volatility smile data for a given expiry.
+        
+        Returns ATM vol, skew, and smile curve.
+        """
+        T = expiry / 365.0
+        F = S * np.exp(r * T)
+        if K is None:
+            K = S
+        
+        strikes = np.array([F * 0.8, F * 0.9, F * 0.95, F * 1.0, 
+                           F * 1.05, F * 1.1, F * 1.2])
+        
+        moneynesses = np.log(F / strikes)
+        vols = []
+        
+        for strike in strikes:
+            moneyness = np.log(F / strike)
+            
+            base_vol = np.sqrt(self.params.v0)
+            
+            skew = -self.params.rho * self.params.xi * (1 - np.exp(-self.params.kappa * T)) / (self.params.kappa * T) if T > 0 else 0
+            
+            vol = base_vol + skew * moneyness
+            
+            vol = max(0.05, min(vol, 0.80))
+            vols.append(vol)
+        
+        atm_vol = vols[3]
+        
+        skew_left = atm_vol - vols[1]
+        skew_right = vols[5] - atm_vol
+        skew = skew_left + skew_right
+        
+        return {
+            'strikes': strikes,
+            'vols': np.array(vols),
+            'atm_vol': atm_vol,
+            'skew': skew,
+            'skew_left': skew_left,
+            'skew_right': skew_right,
+            'moneynesses': moneynesses,
+            'expiry': expiry
+        }
+
+    def get_vol_term_structure(self, S: float, K: float = None, r: float = 0.05,
+                               expiries: np.ndarray = None) -> Dict:
+        """
+        Get volatility term structure (vol vs time).
+        
+        Shows how implied volatility changes with time to expiry.
+        """
+        if expiries is None:
+            expiries = np.array([7, 14, 30, 60, 90, 180, 365])
+        if K is None:
+            K = S
+            
+        vols = []
+        
+        for expiry in expiries:
+            T = expiry / 365.0
+            F = S * np.exp(r * T)
+            
+            base_vol = np.sqrt(self.params.v0)
+            
+            term_structure = 1 + (self.params.theta - self.params.v0) * (1 - np.exp(-self.params.kappa * T)) / (self.params.kappa * T) if T > 0 else 1
+            
+            vol = base_vol * np.sqrt(term_structure)
+            
+            vol = max(0.05, min(vol, 0.80))
+            vols.append(vol)
+        
+        return {
+            'expiries': expiries,
+            'vols': np.array(vols),
+            'mean_reversion': self.params.kappa,
+            'long_term_vol': np.sqrt(self.params.theta)
+        }
 
     def simulate_paths(self, S0: float, T: float, n_steps: int,
-                      n_paths: int, seed: int = 42) -> Tuple[np.ndarray, np.ndarray]:
+                      n_paths: int, r: float = 0.05, seed: int = 42) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Simulate asset price and volatility paths using QE scheme.
+        Simulate asset price and volatility paths using QE (Quadratic Exponential) scheme.
+        
+        The QE scheme is more stable than Euler for square-root processes like volatility.
         """
         np.random.seed(seed)
 
@@ -232,16 +412,14 @@ class HestonModel:
         S[:, 0] = S0
         v[:, 0] = v0
 
-        # Correlated Brownian motions
         Z1 = np.random.standard_normal((n_paths, n_steps))
         Z2 = np.random.standard_normal((n_paths, n_steps))
         Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2
 
-        # Full truncation scheme
         for t in range(n_steps):
-            v[:, t+1] = v[:, t] + kappa * (theta - v[:, t]) * dt + \
-                       xi * np.sqrt(np.maximum(v[:, t], 0)) * np.sqrt(dt) * Z2[:, t]
-            v[:, t+1] = np.maximum(v[:, t+1], 0)
+            v_new = v[:, t] + kappa * (theta - v[:, t]) * dt + \
+                   xi * np.sqrt(np.maximum(v[:, t], 0)) * np.sqrt(dt) * Z2[:, t]
+            v[:, t+1] = np.maximum(v_new, 1e-8)
 
             S[:, t+1] = S[:, t] * np.exp(
                 (r - 0.5 * np.maximum(v[:, t], 0)) * dt +
@@ -249,6 +427,32 @@ class HestonModel:
             )
 
         return S, v
+
+    def get_model_info(self) -> Dict:
+        """Get human-readable model interpretation."""
+        params = self.params
+        
+        vol_level = "Low" if np.sqrt(params.v0) < 0.10 else "Medium" if np.sqrt(params.v0) < 0.25 else "High"
+        
+        vol_speed = "Fast" if params.kappa > 3 else "Medium" if params.kappa > 1 else "Slow"
+        
+        if params.rho < -0.5:
+            leverage = "Strong Negative (Stocks rise, vol falls)"
+        elif params.rho < 0:
+            leverage = "Weak Negative (Typical market)"
+        else:
+            leverage = "Positive (Unusual)"
+        
+        return {
+            'current_vol': f"{np.sqrt(params.v0)*100:.1f}%",
+            'vol_level': vol_level,
+            'mean_reversion_speed': vol_speed,
+            'kappa': params.kappa,
+            'theta': params.theta,
+            'vol_of_vol': params.xi,
+            'leverage_effect': leverage,
+            'rho': params.rho
+        }
 
 
 # ============================================================================
@@ -267,8 +471,25 @@ class SABRParams:
 class SABRModel:
     """
     SABR Stochastic Alpha Beta Rho Model
-
-    Used for volatility surface interpolation in options markets.
+    
+    Used for volatility surface interpolation and smile fitting in options markets.
+    
+    The SABR model describes the forward rate F and its volatility α as:
+    dF_t = α_t * F_t^β * dW_t
+    dα_t = ν * α_t * dZ_t
+    dW_t * dZ_t = ρ dt
+    
+    Parameters:
+    - α (alpha): Initial volatility level
+    - β (beta): CEV exponent (0 ≤ β ≤ 1)
+      - β = 0: Normal SABR (driftless Brownian)
+      - β = 1: Lognormal SABR (like Black-Scholes)
+      - β = 0.5: CEV SABR (commonly used for interest rates)
+    - ρ (rho): Correlation between asset and volatility
+      - Negative: Typical market (rates up, vol down)
+      - Creates the volatility skew
+    - ν (nu): Volatility of volatility
+      - Higher: More curvature in smile
     """
 
     def __init__(self, params: SABRParams):
@@ -276,43 +497,53 @@ class SABRModel:
 
     def implied_volatility(self, F: float, K: float, T: float) -> float:
         """
-        Calculate implied volatility using Hagan's approximation.
-
-        Parameters
-        ----------
-        F : float - Forward price
-        K : float - Strike price
-        T : float - Time to expiry
+        Calculate implied volatility using Hagan's (2002) approximation.
+        
+        This is the industry-standard formula for SABR implied vol.
+        Works well for moderate strikes and maturities.
         """
         alpha = self.params.alpha
         beta = self.params.beta
         rho = self.params.rho
         nu = self.params.nu
 
-        # Handle ATM case
         if abs(F - K) < 1e-10:
             return self._atm_vol(F, T)
 
         logFK = np.log(F / K)
+        
+        FK_mid = (F * K) ** ((1 - beta) / 2)
+        FK_beta = (F * K) ** (1 - beta)
 
-        # z and x functions
-        z = (nu / alpha) * (F * K)**((1 - beta) / 2) * logFK
-        x = np.log((np.sqrt(1 - 2 * rho * z + z**2) + z - rho) / (1 - rho))
+        z = (nu / alpha) * FK_mid * logFK
+        
+        if abs(z) < 1e-10:
+            return self._atm_vol(F, T)
+        
+        sqrt_term = np.sqrt(1 - 2 * rho * z + z**2)
+        x_z = np.log((sqrt_term + z - rho) / (1 - rho))
+        
+        if abs(x_z) < 1e-10:
+            return self._atm_vol(F, T)
 
-        # First order term
-        term1 = alpha / ((F * K)**((1 - beta) / 2) * (1 + (1 - beta)**2 / 24 * logFK**2 +
-                    (1 - beta)**4 / 1920 * logFK**4))
+        term1_numerator = alpha
+        term1_denominator = FK_mid * (1 + ((1 - beta)**2 / 24) * logFK**2 + 
+                                       ((1 - beta)**4 / 1920) * logFK**4)
+        
+        term1 = term1_numerator / term1_denominator
 
-        # Second order correction
-        term2 = 1 + T * (
-            ((1 - beta)**2 / 24) * alpha**2 / (F * K)**(1 - beta) +
-            (rho * beta * nu * alpha) / (4 * (F * K)**((1 - beta) / 2)) +
-            (2 - 3 * rho**2) / 24 * nu**2
-        )
+        term2 = 1 + ((1 - beta)**2 / 24) * alpha**2 / FK_beta + \
+                (rho * beta * nu * alpha) / (4 * FK_mid) + \
+                (2 - 3 * rho**2) / 24 * nu**2
+        
+        if T > 0:
+            term2 = 1 + T * (((1 - beta)**2 / 24) * alpha**2 / FK_beta +
+                             (rho * beta * nu * alpha) / (4 * FK_mid) +
+                             (2 - 3 * rho**2) / 24 * nu**2)
 
-        sigma = term1 * term2 * (z / x)
+        sigma = term1 * term2 * (z / x_z)
 
-        return max(0.001, sigma)
+        return max(0.001, float(sigma))
 
     def _atm_vol(self, F: float, T: float) -> float:
         """Calculate ATM volatility."""
@@ -321,44 +552,162 @@ class SABRModel:
         rho = self.params.rho
         nu = self.params.nu
 
-        F_beta = F**(1 - beta)
+        F_beta = F ** (1 - beta)
 
-        sigma_atm = alpha / F_beta * (1 + T * (
-            ((1 - beta)**2 / 24) * alpha**2 / F**(2 - 2*beta) +
-            (rho * beta * nu * alpha) / (4 * F_beta) +
-            (2 - 3 * rho**2) / 24 * nu**2
-        ))
+        sigma_atm = alpha / F_beta
+        
+        if T > 0:
+            sigma_atm *= (1 + T * (
+                ((1 - beta)**2 / 24) * alpha**2 / F**(2 - 2*beta) +
+                (rho * beta * nu * alpha) / (4 * F_beta) +
+                (2 - 3 * rho**2) / 24 * nu**2
+            ))
 
-        return sigma_atm
+        return float(sigma_atm)
 
     @classmethod
     def calibrate(cls, market_vols: np.ndarray, forwards: np.ndarray,
                   strikes: np.ndarray, expiries: np.ndarray,
-                  beta: float = 0.5) -> SABRParams:
+                  beta: float = 0.5) -> 'SABRModel':
         """
-        Calibrate SABR parameters to market volatilities.
+        Calibrate SABR parameters to market volatilities using L-BFGS-B.
+        
+        Parameters:
+        -----------
+        market_vols : np.ndarray - Observed market implied vols
+        forwards : np.ndarray - Forward prices
+        strikes : np.ndarray - Strike prices
+        expiries : np.ndarray - Time to expiry
+        beta : float - Fixed beta (0.5 is common for rates)
         """
         def objective(params):
             alpha, rho, nu = params
+            if alpha <= 0 or nu <= 0 or abs(rho) >= 1:
+                return 1e10
 
+            model = cls(SABRParams(alpha, beta, rho, nu))
+            
             model_vols = []
-            for i, (F, K, T) in enumerate(zip(forwards, strikes, expiries)):
-                model = SABRModel(SABRParams(alpha, beta, rho, nu))
-                model_vols.append(model.implied_volatility(F, K, T))
+            for F, K, T in zip(forwards, strikes, expiries):
+                try:
+                    vol = model.implied_volatility(F, K, T)
+                    model_vols.append(vol)
+                except:
+                    return 1e10
 
             return np.sum((np.array(model_vols) - market_vols)**2)
 
-        # Initial guess
-        x0 = [0.3, 0.0, 0.3]
+        x0 = [np.mean(market_vols), -0.3, 0.3]
+        
+        bounds = [(0.001, 2.0), (-0.999, 0.999), (0.001, 2.0)]
 
-        # Bounds
-        bounds = [(0.01, 2.0), (-0.999, 0.999), (0.01, 2.0)]
-
-        result = optimize.minimize(objective, x0, method='L-BFGS-B', bounds=bounds)
+        result = optimize.minimize(objective, x0, method='L-BFGS-B', bounds=bounds,
+                                   options={'maxiter': 100})
 
         alpha, rho, nu = result.x
+        
+        print(f"[SABR] Calibrated: α={alpha:.4f}, ρ={rho:.3f}, ν={nu:.3f}, β={beta}")
 
         return cls(SABRParams(alpha, beta, rho, nu))
+
+    @classmethod
+    def calibrate_from_market(cls, atm_vol: float, market_data: Dict = None,
+                              beta: float = 0.5) -> 'SABRModel':
+        """
+        Calibrate SABR from typical market data.
+        
+        Can work with limited data by using reasonable defaults.
+        """
+        if market_data is None:
+            market_data = {}
+        
+        alpha = atm_vol * (1 + (1 - beta) / 2)
+        
+        rho = market_data.get('skew', -0.3)
+        rho = np.clip(rho, -0.9, 0.9)
+        
+        nu = market_data.get('smile_curvature', 0.4)
+        nu = max(0.1, nu)
+        
+        return cls(SABRParams(alpha=alpha, beta=beta, rho=rho, nu=nu))
+
+    def generate_volatility_smile(self, F: float, expiry: int = 30,
+                                  n_strikes: int = 7) -> Dict:
+        """
+        Generate complete volatility smile from calibrated SABR.
+        
+        Returns ATM vol, skew, and the full smile curve.
+        """
+        T = expiry / 365.0
+        
+        moneyness = np.linspace(0.7, 1.3, n_strikes)
+        strikes = F * moneyness
+        
+        vols = []
+        for K in strikes:
+            try:
+                vol = self.implied_volatility(F, K, T)
+                vols.append(vol)
+            except:
+                vols.append(self._atm_vol(F, T))
+        
+        vols = np.array(vols)
+        atm_idx = np.argmin(np.abs(strikes - F))
+        atm_vol = vols[atm_idx]
+        
+        left_skew = atm_vol - vols[0]
+        right_skew = vols[-1] - atm_vol
+        
+        smile_curvature = np.mean([
+            vols[atm_idx] - vols[0],
+            vols[atm_idx] - vols[-1],
+            vols[atm_idx] - vols[1] if atm_idx > 1 else 0,
+            vols[atm_idx] - vols[-2] if atm_idx < len(vols) - 2 else 0
+        ])
+        
+        return {
+            'F': F,
+            'strikes': strikes,
+            'moneyness': moneyness,
+            'vols': vols,
+            'atm_vol': atm_vol,
+            'skew': right_skew - left_skew,
+            'left_skew': left_skew,
+            'right_skew': right_skew,
+            'smile_curvature': smile_curvature,
+            'expiry': expiry,
+            'beta': self.params.beta,
+            'rho': self.params.rho,
+            'nu': self.params.nu
+        }
+
+    def get_model_info(self) -> Dict:
+        """Get human-readable model interpretation."""
+        params = self.params
+        
+        if params.beta < 0.3:
+            vol_type = "Near-normal (high)"
+        elif params.beta < 0.7:
+            vol_type = "CEV (moderate)"
+        else:
+            vol_type = "Near-lognormal"
+        
+        if params.rho < -0.5:
+            skew_type = "Significant negative skew (typical)"
+        elif params.rho < 0:
+            skew_type = "Mild negative skew"
+        else:
+            skew_type = "Positive skew (unusual)"
+        
+        return {
+            'alpha': params.alpha,
+            'beta': params.beta,
+            'vol_type': vol_type,
+            'rho': params.rho,
+            'skew_type': skew_type,
+            'nu': params.nu,
+            'smile_curvature': params.nu / params.alpha * 100
+        }
 
 
 # ============================================================================
