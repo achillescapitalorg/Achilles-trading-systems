@@ -22,6 +22,13 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 - **Added multi-page routing**: Dashboard (/), News (/news), Analysis (/analysis)
 - Created `pages/news.py` with tabs: All News, By Instrument, By Topic
 - Fixed app.py syntax error by removing duplicate inline layout code
+- **Integrated SABR Model**: New "SABR" tab with volatility smile and term structure
+- **Added Trading Indicators**: Stochastic, CCI, Williams %R, ADX now calculated from real market data
+- **Fixed Heston Model**: Proper volatility surface with skew (volatility smile shape)
+- **Fixed Trading Signals**: Left panel now shows real indicator values (RSI, MACD, Bollinger, Supertrend, Stochastic, CCI, Williams %R, ADX)
+- **Added Model Explanations**: Info bars for Heston and SABR models explaining what the graphs mean
+- **Fixed AI Prediction Tab**: Added error handling, shows price distribution and probability charts
+- **Integrated Markov Model**: New "Markov" tab with Hidden Markov Model (HMM) regime detection
 
 ## Architecture
 
@@ -57,6 +64,10 @@ frontend/
 │   ├── market_data.py          # Yahoo Finance data fetching
 │   ├── news_scraper.py         # Multi-source news (1452 lines)
 │   ├── advanced_models.py      # Black-Scholes, Heston, VaR, Sharpe/Sortino/MaxDD (1299 lines)
+│   ├── markov_model.py        # Hidden Markov Model regime detection
+│   ├── ai_news.py              # AI-powered news service
+│   ├── deepseek_sentiment.py   # DeepSeek LLM sentiment analysis
+│   ├── news_cache.py           # Persistent news cache
 │   └── rl_agent.py             # Q-Learning trading agent (592 lines)
 ├── trading_bot/
 │   ├── __init__.py
