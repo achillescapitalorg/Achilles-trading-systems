@@ -229,7 +229,7 @@ def get_current_price(symbol):
 
 
 def create_candlestick_chart(df, symbol):
-    """Create a candlestick chart with volume - Black Theme."""
+    """Create a candlestick chart with volume - Black Theme with TradingView-like controls."""
     current_price = df['close'].iloc[-1] if not df.empty else 0
     price_change = df['close'].iloc[-1] - df['open'].iloc[0] if len(df) > 1 else 0
     price_change_pct = (price_change / df['open'].iloc[0] * 100) if df['open'].iloc[0] != 0 else 0
@@ -275,7 +275,7 @@ def create_candlestick_chart(df, symbol):
         row=2, col=1
     )
 
-    # Update layout with black theme
+    # Update layout with black theme and TradingView-like controls
     fig.update_layout(
         height=550,
         margin=dict(l=60, r=60, t=80, b=50),
@@ -298,15 +298,18 @@ def create_candlestick_chart(df, symbol):
             x=0.5,
             xanchor='center'
         ),
+        dragmode="pan",  # Default to pan mode
+        selectdirection="any",
     )
 
-    # Update axes with black theme
+    # Update axes with black theme - optimized for scrolling and zooming
     fig.update_xaxes(
         gridcolor=COLORS["grid"],
         linecolor=COLORS["border"],
         tickfont=dict(color=COLORS["text_secondary"]),
         showgrid=True,
         gridwidth=0.5,
+        rangeslider=dict(visible=False),
     )
 
     fig.update_yaxes(
@@ -315,6 +318,7 @@ def create_candlestick_chart(df, symbol):
         tickfont=dict(color=COLORS["text_secondary"]),
         showgrid=True,
         gridwidth=0.5,
+        side="right",
     )
 
     return fig
@@ -2054,7 +2058,28 @@ def get_dashboard_layout():
                         ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"})
                     ], style={"backgroundColor": COLORS["surface"], "borderBottom": f"1px solid {COLORS['border']}", "padding": "12px"}),
                     dbc.CardBody([
-                        dcc.Graph(id="price-chart", config={"displayModeBar": False, "responsive": True})
+                        dcc.Graph(
+                            id="price-chart",
+                            config={
+                                "displayModeBar": True,
+                                "responsive": True,
+                                "scrollZoom": True,
+                                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                                "modeBarButtonsToAdd": [
+                                    "drawline",
+                                    "drawopenpath",
+                                    "eraseshape"
+                                ],
+                                "toImageButtonOptions": {
+                                    "format": "png",
+                                    "filename": "vibetrading_chart",
+                                    "height": 800,
+                                    "width": 1400,
+                                    "scale": 2
+                                },
+                                "doubleClickDelay": 300
+                            }
+                        )
                     ], style={"padding": "0"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"}),
             ], width=7),
