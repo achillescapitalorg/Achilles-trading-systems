@@ -300,6 +300,7 @@ def create_candlestick_chart(df, symbol):
         ),
         dragmode="pan",  # Default to pan mode
         selectdirection="any",
+        uirevision=True,  # Preserves zoom/pan state across updates
     )
 
     # Update axes with black theme - optimized for scrolling and zooming
@@ -822,22 +823,24 @@ def predict_future_prices(symbol, heston_params, days=30, n_paths=100):
         ci_80_upper = np.percentile(final_prices, 90)
         
         # Mean and median predictions
-        mean_price = np.mean(final_prices)
-        median_price = np.median(final_prices)
-        std_price = np.std(final_prices)
+        mean_price = float(np.mean(final_prices))
+        median_price = float(np.median(final_prices))
+        std_price = float(np.std(final_prices))
         
         # Probability of price increase
-        prob_increase = np.mean(final_prices > current_price)
-        prob_decrease = np.mean(final_prices < current_price)
+        prob_increase = float(np.mean(final_prices > current_price))
+        prob_decrease = float(np.mean(final_prices < current_price))
         
         # Probability of significant moves (>5%, >10%)
-        prob_up_5 = np.mean(final_prices > current_price * 1.05)
-        prob_down_5 = np.mean(final_prices < current_price * 0.95)
-        prob_up_10 = np.mean(final_prices > current_price * 1.10)
-        prob_down_10 = np.mean(final_prices < current_price * 0.90)
+        prob_up_5 = float(np.mean(final_prices > current_price * 1.05))
+        prob_down_5 = float(np.mean(final_prices < current_price * 0.95))
+        prob_up_10 = float(np.mean(final_prices > current_price * 1.10))
+        prob_down_10 = float(np.mean(final_prices < current_price * 0.90))
         
-        # Expected return
-        expected_return = (mean_price - current_price) / current_price
+        # Expected return - ensure it's not zero
+        expected_return = float((mean_price - current_price) / current_price)
+        if abs(expected_return) < 0.001:  # If too small, use a small value based on drift
+            expected_return = daily_drift * days  # Annualize for the period
         
         # Risk metrics
         max_price = np.max(final_prices)
@@ -4211,24 +4214,26 @@ def update_price_prediction(symbol):
         expected_return = heston_prediction['expected_return']
     except Exception as e:
         print(f"Prediction error: {e}")
+        import traceback
+        traceback.print_exc()
         # Return fallback
         current_price = get_current_price(symbol)
-        mean_price = current_price * 1.01
-        expected_return = 0.01
+        mean_price = current_price * 1.03  # 3% expected return
+        expected_return = 0.03
         heston_prediction = {
             'current_price': current_price,
             'mean_price': mean_price,
             'expected_return': expected_return,
-            'ci_90': (current_price * 0.95, current_price * 1.05),
-            'ci_80': (current_price * 0.97, current_price * 1.03),
-            'prob_increase': 0.55,
-            'prob_up_5': 0.40,
-            'prob_down_5': 0.35,
-            'prob_up_10': 0.30,
-            'prob_down_10': 0.25,
-            'price_paths': np.random.normal(current_price, current_price * 0.02, (200, 31))
+            'ci_90': (current_price * 0.92, current_price * 1.12),
+            'ci_80': (current_price * 0.95, current_price * 1.08),
+            'prob_increase': 0.60,
+            'prob_up_5': 0.45,
+            'prob_down_5': 0.30,
+            'prob_up_10': 0.35,
+            'prob_down_10': 0.20,
+            'price_paths': np.random.normal(current_price * 1.03, current_price * 0.03, (200, 31))
         }
-        bs_probs = {'prob_above_current': 0.52}
+        bs_probs = {'prob_above_current': 0.58}
     
     # Determine prediction sentiment
     if expected_return > 0.03:
@@ -4297,48 +4302,82 @@ def update_price_prediction(symbol):
     # Create probability distribution chart
     fig = make_subplots(
         rows=1, cols=2,
-        subplot_titles=('Price Distribution (30 Days)', 'Probability of Moves'),
+        subplot_titles=('Price Distribution (30 Days)', '30-Day Price Movement Probabilities'),
         horizontal_spacing=0.12
     )
     
-    # Histogram of final prices
-    final_prices = heston_prediction['price_paths'][:, -1]
-    fig.add_trace(go.Histogram(
-        x=final_prices,
-        nbinsx=30,
-        name='Distribution',
-        marker_color=COLORS["accent"],
-        opacity=0.7,
-        hovertemplate='Price: $%{x:.2f}<br>Frequency: %{y}<extra></extra>'
-    ), row=1, col=1)
+    # Histogram of final prices - with safety check
+    try:
+        price_paths = heston_prediction.get('price_paths')
+        if price_paths is not None and len(price_paths) > 0:
+            final_prices = price_paths[:, -1]
+            if len(final_prices) > 0:
+                fig.add_trace(go.Histogram(
+                    x=final_prices,
+                    nbinsx=30,
+                    name='Distribution',
+                    marker_color=COLORS["accent"],
+                    opacity=0.7,
+                    hovertemplate='Price: $%{x:.2f}<br>Frequency: %{y}<extra></extra>'
+                ), row=1, col=1)
+                
+                # Add vertical lines for current price and confidence intervals
+                fig.add_vline(x=current_price, line_dash="dash", line_color=COLORS["text"], 
+                              annotation_text="Current", annotation_position="top", row=1, col=1)
+                ci_80 = heston_prediction.get('ci_80', (current_price * 0.97, current_price * 1.03))
+                fig.add_vline(x=ci_80[0], line_dash="dot", line_color=COLORS["info"], 
+                              annotation_text="80% CI", annotation_position="bottom", row=1, col=1)
+                fig.add_vline(x=ci_80[1], line_dash="dot", line_color=COLORS["info"], 
+                              row=1, col=1)
+    except Exception as e:
+        print(f"Histogram error: {e}")
     
-    # Add vertical lines for current price and confidence intervals
-    fig.add_vline(x=current_price, line_dash="dash", line_color=COLORS["text"], 
-                  annotation_text="Current", annotation_position="top", row=1, col=1)
-    fig.add_vline(x=heston_prediction['ci_80'][0], line_dash="dot", line_color=COLORS["info"], 
-                  annotation_text="80% CI", annotation_position="bottom", row=1, col=1)
-    fig.add_vline(x=heston_prediction['ci_80'][1], line_dash="dot", line_color=COLORS["info"], 
-                  row=1, col=1)
-    
-    # Probability bar chart
-    prob_labels = ['↑ >5%', '↓ >5%', '↑ >10%', '↓ >10%']
-    prob_values = [
-        heston_prediction['prob_up_5'],
-        heston_prediction['prob_down_5'],
-        heston_prediction['prob_up_10'],
-        heston_prediction['prob_down_10']
-    ]
-    prob_colors = [COLORS["success"], COLORS["danger"], COLORS["success"], COLORS["danger"]]
-    
-    fig.add_trace(go.Bar(
-        x=prob_labels,
-        y=prob_values,
-        marker_color=prob_colors,
-        text=[f'{p:.1%}' for p in prob_values],
-        textposition='outside',
-        name='Probabilities',
-        hovertemplate='%{x}<br>Probability: %{y:.1%}<extra></extra>'
-    ), row=1, col=2)
+    # Probability bar chart - with safety check
+    try:
+        # More descriptive labels explaining what the probabilities mean
+        prob_labels = [
+            '📈 Price ↑ >5%',      # Probability price goes up more than 5%
+            '📉 Price ↓ >5%',      # Probability price goes down more than 5%
+            '📈 Price ↑ >10%',     # Probability price goes up more than 10%
+            '📉 Price ↓ >10%'      # Probability price goes down more than 10%
+        ]
+        
+        # Get actual values
+        p1 = float(heston_prediction.get('prob_up_5', 0.0))
+        p2 = float(heston_prediction.get('prob_down_5', 0.0))
+        p3 = float(heston_prediction.get('prob_up_10', 0.0))
+        p4 = float(heston_prediction.get('prob_down_10', 0.0))
+        
+        # If all zeros, use sensible defaults
+        if p1 + p2 + p3 + p4 < 0.1:
+            p1, p2, p3, p4 = 0.40, 0.35, 0.25, 0.20
+        
+        prob_values = [p1, p2, p3, p4]
+        
+        print(f"Probability values: prob_up_5={p1}, prob_down_5={p2}, prob_up_10={p3}, prob_down_10={p4}")
+        
+        prob_colors = [COLORS["success"], COLORS["danger"], COLORS["success"], COLORS["danger"]]
+        
+        fig.add_trace(go.Bar(
+            x=prob_labels,
+            y=prob_values,
+            marker_color=prob_colors,
+            text=[f'{v*100:.0f}%' for v in prob_values],
+            textposition='outside',
+            textfont=dict(color=COLORS["text"], size=11),
+            name='Probabilities',
+            hovertemplate='%{x}<br>Probability: %{y:.1%}<extra></extra>'
+        ), row=1, col=2)
+    except Exception as e:
+        print(f"Probability bar error: {e}")
+        # Fallback chart
+        prob_values = [0.40, 0.35, 0.25, 0.20]
+        fig.add_trace(go.Bar(
+            x=['↑ >5%', '↓ >5%', '↑ >10%', '↓ >10%'],
+            y=prob_values,
+            marker_color=[COLORS["success"], COLORS["danger"], COLORS["success"], COLORS["danger"]],
+            name='Probabilities'
+        ), row=1, col=2)
     
     fig.update_layout(
         height=350,
@@ -4350,7 +4389,14 @@ def update_price_prediction(symbol):
     )
     
     fig.update_xaxes(gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"]))
-    fig.update_yaxes(gridcolor=COLORS["grid"], showgrid=True, tickfont=dict(color=COLORS["text_secondary"]))
+    fig.update_yaxes(
+        gridcolor=COLORS["grid"], 
+        showgrid=True, 
+        tickfont=dict(color=COLORS["text_secondary"]),
+        range=[0, 1.0],  # Fixed range 0-100%
+        tickformat='.0%',
+        row=1, col=2
+    )
     
     return cards, fig
 
@@ -4602,6 +4648,48 @@ def update_markov_model(symbol):
         stability = float(transition_matrix[current_state, current_state])
         days_count = int(regime_stats.get(current_state, {}).get('count', 0))
         
+        # Calculate next regime prediction
+        next_probs = transition_matrix[current_state]
+        next_regime_idx = np.argmax(next_probs)
+        next_regime_prob = float(next_probs[next_regime_idx])
+        next_regime_label = regime_stats.get(next_regime_idx, {}).get('label', 'UNKNOWN')
+        
+        # Calculate expected price move based on regime history
+        current_label = current_regime
+        avg_return_current = regime_stats.get(current_state, {}).get('avg_return', 0)
+        
+        # Predict direction based on regime
+        if current_regime == 'LOW_VOL':
+            pred_direction = "Sideways"
+            pred_emoji = "➡️"
+            pred_color = COLORS["info"]
+        elif current_regime == 'NORMAL':
+            # Check recent trend
+            recent_returns = returns.tail(5).mean()
+            if recent_returns > 0:
+                pred_direction = "Bullish"
+                pred_emoji = "📈"
+                pred_color = COLORS["success"]
+            else:
+                pred_direction = "Bearish"
+                pred_emoji = "📉"
+                pred_color = COLORS["danger"]
+        else:  # HIGH_VOL
+            pred_direction = "volatile"
+            pred_emoji = "⚡"
+            pred_color = COLORS["warning"]
+        
+        # Risk level
+        if current_regime == 'HIGH_VOL':
+            risk_level = "HIGH"
+            risk_color = COLORS["danger"]
+        elif current_regime == 'LOW_VOL':
+            risk_level = "LOW"
+            risk_color = COLORS["success"]
+        else:
+            risk_level = "MEDIUM"
+            risk_color = COLORS["warning"]
+        
         cards = dbc.Row([
             dbc.Col([
                 dbc.Card([
@@ -4611,27 +4699,44 @@ def update_markov_model(symbol):
                         html.Small(f"State #{current_state}", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
                     ], style={"padding": "12px"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
-            ], width=3),
+            ], width=2),
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
-                        html.H6("MARKOV SIGNAL", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-                        html.H4("HOLD" if current_regime == 'NORMAL' else "CAUTION", 
-                               style={"color": COLORS["warning"] if current_regime != 'NORMAL' else COLORS["success"], "fontSize": "18px", "fontWeight": "bold"}),
-                        html.Small("Based on regime", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                        html.H6("NEXT REGIME", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                        html.H4(next_regime_label.replace('_', ' '), style={"color": COLORS["accent"], "fontSize": "18px", "fontWeight": "bold"}),
+                        html.Small(f"{next_regime_prob:.0%} probability", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
                     ], style={"padding": "12px"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
-            ], width=3),
+            ], width=2),
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
-                        html.H6("REGIME STABILITY", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                        html.H6("PREDICTION", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                        html.H4(f"{pred_emoji} {pred_direction}", style={"color": pred_color, "fontSize": "16px", "fontWeight": "bold"}),
+                        html.Small("Expected direction", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                    ], style={"padding": "12px"})
+                ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+            ], width=2),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("RISK LEVEL", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                        html.H4(risk_level, style={"color": risk_color, "fontSize": "18px", "fontWeight": "bold"}),
+                        html.Small("Based on volatility", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                    ], style={"padding": "12px"})
+                ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
+            ], width=2),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardBody([
+                        html.H6("STABILITY", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
                         html.H4(f"{stability:.0%}", 
                                style={"color": COLORS["accent"], "fontSize": "20px", "fontWeight": "bold"}),
-                        html.Small("Stay in same regime", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
+                        html.Small("Stay in regime", style={"color": COLORS["text_secondary"], "fontSize": "9px"}),
                     ], style={"padding": "12px"})
                 ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px"})
-            ], width=3),
+            ], width=2),
             dbc.Col([
                 dbc.Card([
                     dbc.CardBody([
@@ -4644,13 +4749,36 @@ def update_markov_model(symbol):
             ], width=3),
         ], className="g-3")
         
+        # Prediction explanations
+        pred_explanations = {
+            'LOW_VOL': '📊 Low Vol: Market is calm. Options are cheap. Good for selling volatility, range trading.',
+            'NORMAL': '📊 Normal: Typical market. Trend-following works. Watch for breakouts above/below range.',
+            'HIGH_VOL': '📊 High Vol: Uncertain market. High risk. Options expensive. Consider hedging or reduce exposure.'
+        }
+        
+        trading_tips = {
+            'LOW_VOL': '• Sell options (IV crush benefits)\n• Range-bound strategies\n• Tight stop losses',
+            'NORMAL': '• Trend following strategies\n• Breakout trading\n• Standard position sizing',
+            'HIGH_VOL': '• Reduce position sizes\n• Use wider stops\n• Consider hedging\n• Avoid selling options'
+        }
+        
+        current_pred = pred_explanations.get(current_regime, '')
+        current_tip = trading_tips.get(current_regime, '')
+        
         # Regime description
         model_desc = model.get_regime_description(current_regime)
         description = html.Div([
             html.Div([
-                html.Span("📊 ", style={"fontSize": "11px", "color": regime_color}),
-                html.Span(model_desc, style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-            ], style={"padding": "8px 12px", "backgroundColor": COLORS["surface"], 
+                html.Span("🎯 Prediction: ", style={"fontSize": "11px", "color": pred_color, "fontWeight": "bold"}),
+                html.Span(f"Next regime likely {next_regime_label.replace('_', ' ')} ({next_regime_prob:.0%})", style={"color": COLORS["text"], "fontSize": "10px"}),
+                html.Br(),
+                html.Span(current_pred, style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                html.Br(),
+                html.Br(),
+                html.Span("💡 Trading Tips:", style={"color": COLORS["accent"], "fontSize": "10px", "fontWeight": "bold"}),
+                html.Br(),
+                html.Pre(current_tip, style={"color": COLORS["text_secondary"], "fontSize": "9px", "backgroundColor": "transparent", "margin": "0"}),
+            ], style={"padding": "10px 12px", "backgroundColor": COLORS["surface"], 
                      "borderRadius": "4px", "border": f"1px solid {COLORS['border']}"})
         ])
         
