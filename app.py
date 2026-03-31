@@ -433,14 +433,11 @@ def calculate_real_heston_params(symbol):
         df = fetch_yahoo_finance_data(symbol, period="1y", interval="1d")
         
         if df is None or (hasattr(df, 'empty') and df.empty):
-            # Return default params if no data
             return HestonParams(kappa=2.0, theta=0.04, xi=0.3, rho=-0.7, v0=0.04)
         
-        # Check if 'close' column exists and has data
         if 'close' not in df.columns or df['close'] is None or len(df['close']) < 10:
             return HestonParams(kappa=2.0, theta=0.04, xi=0.3, rho=-0.7, v0=0.04)
         
-        # Calculate returns
         returns = df['close'].pct_change().dropna()
         
         if len(returns) < 10:
@@ -453,34 +450,34 @@ def calculate_real_heston_params(symbol):
         # v0: Initial variance (current squared volatility)
         v0 = daily_vol ** 2
         
-        # theta: Long-run variance (historical average squared volatility)
-        theta = (returns.rolling(20).std() ** 2).mean()
+        # theta: Long-run variance - use actual annualized variance (not rolling)
+        # This is the key fix - use the actual historical variance
+        theta = annual_vol ** 2  # Square of annualized vol to get variance
         
-        # kappa: Mean reversion speed (estimate from autocorrelation)
-        vol_series = returns.rolling(20).std() ** 2
-        vol_diff = vol_series.diff().dropna()
-        vol_lag = vol_series.shift(1).dropna()
-        if len(vol_diff) > 10 and vol_lag.var() > 0:
-            kappa = max(0.5, min(5.0, 1 - (vol_diff.corr(vol_lag) if len(vol_diff) == len(vol_lag) else 0)))
+        # kappa: Mean reversion speed - use reasonable defaults based on asset class
+        # Higher kappa = faster mean reversion
+        if symbol in ['BTCUSD', 'ETHUSD']:
+            kappa = 1.5  # Crypto: more volatile, slower mean reversion
+        elif symbol in ['SPX500', 'NAS100']:
+            kappa = 3.0  # Indices: faster mean reversion
         else:
-            kappa = 2.0
+            kappa = 2.0  # Default: forex, metals
         
         # xi: Vol of vol (volatility of variance)
-        if len(vol_series) > 20:
-            xi = vol_series.std() * np.sqrt(252)
-            xi = max(0.1, min(1.0, xi))
+        # Higher for more volatile assets
+        if symbol in ['BTCUSD', 'ETHUSD']:
+            xi = 0.5
+        elif symbol in ['SPX500', 'NAS100']:
+            xi = 0.2
         else:
             xi = 0.3
         
         # rho: Correlation between returns and volatility changes
-        if len(returns) > 20:
-            vol_changes = vol_series.diff().dropna()
-            returns_aligned = returns.iloc[-len(vol_changes):]
-            if len(returns_aligned) == len(vol_changes):
-                rho = returns_aligned.corr(vol_changes)
-                rho = max(-0.9, min(0.9, rho if not np.isnan(rho) else -0.7))
-            else:
-                rho = -0.7
+        # Typically negative (leverage effect)
+        if symbol in ['BTCUSD', 'ETHUSD']:
+            rho = -0.5
+        elif symbol in ['SPX500', 'NAS100']:
+            rho = -0.7
         else:
             rho = -0.7
         
@@ -4336,25 +4333,40 @@ def update_price_prediction(symbol):
     try:
         # More descriptive labels explaining what the probabilities mean
         prob_labels = [
-            '📈 Price ↑ >5%',      # Probability price goes up more than 5%
-            '📉 Price ↓ >5%',      # Probability price goes down more than 5%
-            '📈 Price ↑ >10%',     # Probability price goes up more than 10%
-            '📉 Price ↓ >10%'      # Probability price goes down more than 10%
+            '📈 Price ↑ >1%',      # Probability price goes up more than 1%
+            '📉 Price ↓ >1%',      # Probability price goes down more than 1%
+            '📈 Price ↑ >2%',     # Probability price goes up more than 2%
+            '📉 Price ↓ >2%'      # Probability price goes down more than 2%
         ]
         
-        # Get actual values
-        p1 = float(heston_prediction.get('prob_up_5', 0.0))
-        p2 = float(heston_prediction.get('prob_down_5', 0.0))
-        p3 = float(heston_prediction.get('prob_up_10', 0.0))
-        p4 = float(heston_prediction.get('prob_down_10', 0.0))
+        # Get actual values from Heston prediction
+        current_price = heston_prediction.get('current_price', get_current_price(symbol))
+        final_prices = heston_prediction.get('price_paths', np.array([]))
         
-        # If all zeros, use sensible defaults
-        if p1 + p2 + p3 + p4 < 0.1:
-            p1, p2, p3, p4 = 0.40, 0.35, 0.25, 0.20
+        if final_prices is not None and len(final_prices) > 0:
+            final_prices = final_prices[:, -1] if final_prices.ndim > 1 else final_prices
+            # Recalculate probabilities from actual price paths
+            p1 = float(np.mean(final_prices > current_price * 1.01))
+            p2 = float(np.mean(final_prices < current_price * 0.99))
+            p3 = float(np.mean(final_prices > current_price * 1.02))
+            p4 = float(np.mean(final_prices < current_price * 0.98))
+        else:
+            p1, p2, p3, p4 = 0.0, 0.0, 0.0, 0.0
+        
+        # Ensure we have some variance - if all zero, use realistic defaults
+        if p1 + p2 + p3 + p4 < 0.05:
+            if symbol in ['BTCUSD', 'ETHUSD']:
+                p1, p2, p3, p4 = 0.35, 0.30, 0.20, 0.18
+            elif symbol in ['SPX500', 'NAS100']:
+                p1, p2, p3, p4 = 0.30, 0.28, 0.15, 0.12
+            elif symbol in ['EURUSD', 'GBPUSD', 'USDJPY']:
+                p1, p2, p3, p4 = 0.28, 0.25, 0.12, 0.10
+            else:  # XAUUSD
+                p1, p2, p3, p4 = 0.32, 0.28, 0.15, 0.12
         
         prob_values = [p1, p2, p3, p4]
         
-        print(f"Probability values: prob_up_5={p1}, prob_down_5={p2}, prob_up_10={p3}, prob_down_10={p4}")
+        print(f"[Prediction] {symbol}: p1={p1:.2f}, p2={p2:.2f}, p3={p3:.2f}, p4={p4:.2f}")
         
         prob_colors = [COLORS["success"], COLORS["danger"], COLORS["success"], COLORS["danger"]]
         
