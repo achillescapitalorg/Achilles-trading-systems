@@ -21,7 +21,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from services.deepseek_sentiment import analyze_sentiment, get_aggregate_sentiment, sentiment_analyzer
+from services.local_ai_service import analyze_sentiment, get_local_ai_service
 
 
 class UnifiedNewsService:

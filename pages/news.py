@@ -141,10 +141,12 @@ def _get_news_with_aggregate():
 
 
 def _calculate_instrument_sentiment():
-    """Calculate aggregated sentiment for each instrument using DeepSeek analysis."""
-    from services.deepseek_sentiment import get_aggregate_sentiment
+    """Calculate aggregated sentiment for each instrument using local AI (FinBERT)."""
+    from services.local_ai_service import get_local_ai_service
     
+    ai_service = get_local_ai_service()
     sentiment_data = {}
+    
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
         news_items = news_cache.get(symbol)
@@ -153,8 +155,30 @@ def _calculate_instrument_sentiment():
             headlines = [item.get("headline", "") for item in news_items]
             
             try:
-                aggregate = get_aggregate_sentiment(headlines)
-            except:
+                results = ai_service.get_sentiment_batch(headlines)
+                scores = [r.get("score", 0) for r in results]
+                sentiments = [r.get("sentiment", "neutral") for r in results]
+                
+                avg_score = sum(scores) / len(scores) if scores else 0
+                
+                positive = sum(1 for s in sentiments if s == "bullish")
+                negative = sum(1 for s in sentiments if s == "bearish")
+                
+                if positive > negative:
+                    agg_sentiment = "bullish"
+                elif negative > positive:
+                    agg_sentiment = "bearish"
+                else:
+                    agg_sentiment = "neutral"
+                
+                aggregate = {
+                    "sentiment": agg_sentiment,
+                    "score": avg_score,
+                    "confidence": abs(avg_score),
+                    "breakdown": {"bullish": positive, "bearish": negative, "neutral": len(sentiments) - positive - negative}
+                }
+            except Exception as e:
+                print(f"Sentiment error: {e}")
                 aggregate = {"sentiment": "neutral", "score": 0.0, "confidence": 0.0, "breakdown": {}}
             
             sentiments = [item.get("sentiment", 0) for item in news_items]

@@ -6,29 +6,41 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 
 **Note:** This project uses a Dash-based frontend. A React/TypeScript frontend and Flask backend were originally planned but not implemented.
 
-## Current Status (Updated March 2026)
+## Current Status (Updated April 2026)
 
-### Recently Completed
-- Fixed Keltner Channel bug (`middle == lower` → `middle == middle`)
-- Fixed sentiment score return value in trading_bot.py
-- Fixed invalid hex color `#CHOCO` → `#E67E22` in news_scraper.py
-- Added unified trading recommendation card (RSI, MACD, Bollinger, Supertrend, Regime HMM, Black-Scholes, Volatility, Momentum)
-- Integrated `get_financial_news()` for real news with synthetic fallback
-- Cleaned unused imports (SABRModel, train_rl_agent, get_market_data_service, calculate_var)
-- Updated advanced metrics to use real calculations (Sharpe, Sortino, Max Drawdown, Calmar)
-- Added Monte Carlo simulation UI with configurable days/paths
-- Added trade history table with clear functionality
-- Improved regime detection with proper Baum-Welch EM, Viterbi, forward-backward smoothing
-- **Added multi-page routing**: Dashboard (/), News (/news), Analysis (/analysis)
-- Created `pages/news.py` with tabs: All News, By Instrument, By Topic
-- Fixed app.py syntax error by removing duplicate inline layout code
-- **Integrated SABR Model**: New "SABR" tab with volatility smile and term structure
-- **Added Trading Indicators**: Stochastic, CCI, Williams %R, ADX now calculated from real market data
-- **Fixed Heston Model**: Proper volatility surface with skew (volatility smile shape)
-- **Fixed Trading Signals**: Left panel now shows real indicator values (RSI, MACD, Bollinger, Supertrend, Stochastic, CCI, Williams %R, ADX)
-- **Added Model Explanations**: Info bars for Heston and SABR models explaining what the graphs mean
-- **Fixed AI Prediction Tab**: Added error handling, shows price distribution and probability charts
-- **Integrated Markov Model**: New "Markov" tab with Hidden Markov Model (HMM) regime detection
+### Recently Completed in This Session
+
+1. **Replaced DeepSeek with Local AI (FinBERT + Ollama)**
+   - Created `services/local_ai_service.py` - New unified AI service
+   - Uses FinBERT (ProsusAI/finbert) for financial sentiment analysis
+   - Uses Ollama for local LLM-powered market analysis
+   - Added keyword-based fallback when Ollama not available
+
+2. **Fixed AI Prediction Tab**
+   - Fixed Heston parameter calculation (theta was incorrectly calculated using rolling mean)
+   - Changed probability thresholds from 5%/10% to 1%/2% for more realistic 30-day predictions
+   - Now recalculates probabilities directly from price paths
+   - Added asset-specific default probabilities
+
+3. **Added AI Analysis Tab**
+   - New tab in "HESTON VOLATILITY & OPTIONS ANALYTICS" section
+   - Input field for asking market questions
+   - Shows FinBERT and Ollama status
+   - Keyword-based fallback provides trading tips when Ollama not installed
+
+4. **Added Markov Model Predictions**
+   - Added NEXT REGIME prediction with probability
+   - Added PREDICTION direction (Bullish/Bearish/Sideways)
+   - Added RISK LEVEL (HIGH/MEDIUM/LOW)
+   - Added prediction explanations and trading tips for each regime
+
+5. **Updated Requirements**
+   - Added `transformers>=4.30.0` for FinBERT
+   - Added `tokenizers>=0.13.0`
+
+6. **Updated News Service**
+   - Replaced DeepSeek sentiment with FinBERT in `services/ai_news.py`
+   - Updated `pages/news.py` to use local AI service
 
 ## Architecture
 
@@ -39,54 +51,55 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 - **Charts**: Plotly (Candlestick, 3D Surface)
 - **State**: Python in-memory state + Dash callbacks
 
+### AI Services
+- **FinBERT**: Financial sentiment analysis (HuggingFace ProsusAI/finbert)
+- **Ollama**: Local LLM for market analysis (requires separate installation)
+- **Keyword Fallback**: Provides trading tips when Ollama not available
+
 ### Trading Bot (`/trading_bot/`)
 - **Standalone**: Can run independently of the Dash UI
 - **Broker Integration**: Exness MT5 (paper trading by default)
 - **Data**: Yahoo Finance for market data
 
-### Services (`/services/`)
-- **Data Layer**: Yahoo Finance API integration
-- **ML/Quant**: Black-Scholes, Heston, Regime Switching, Q-Learning agent
-- **News**: Multi-source news scraping
-
 ## Project Structure
 
 ```
 frontend/
-├── app.py                      # Main Dash application (~4200 lines)
-├── volatility_models.py         # GARCH, EGARCH, Heston models (1051 lines)
-├── requirements.txt            # Python dependencies
+├── app.py                      # Main Dash application (~5500 lines)
+├── volatility_models.py       # GARCH, EGARCH, Heston models (1051 lines)
+├── requirements.txt           # Python dependencies
 ├── assets/
-│   ├── chart_enhancements.js   # Custom chart JS
+│   ├── chart_enhancements.js  # Custom chart JS
 │   └── style.css               # Pure black theme CSS
 ├── services/
 │   ├── __init__.py
 │   ├── market_data.py          # Yahoo Finance data fetching
 │   ├── news_scraper.py         # Multi-source news (1452 lines)
-│   ├── advanced_models.py      # Black-Scholes, Heston, VaR, Sharpe/Sortino/MaxDD (1299 lines)
-│   ├── markov_model.py        # Hidden Markov Model regime detection
-│   ├── ai_news.py              # AI-powered news service
-│   ├── deepseek_sentiment.py   # DeepSeek LLM sentiment analysis
+│   ├── advanced_models.py      # Black-Scholes, Heston, VaR, Sharpe/Sortino/MaxDD
+│   ├── markov_model.py         # Hidden Markov Model regime detection
+│   ├── ai_news.py              # AI-powered news service (now uses FinBERT)
+│   ├── local_ai_service.py     # NEW: FinBERT + Ollama wrapper
+│   ├── deepseek_sentiment.py   # OLD: DeepSeek (still present, not used)
 │   ├── news_cache.py           # Persistent news cache
-│   └── rl_agent.py             # Q-Learning trading agent (592 lines)
+│   └── rl_agent.py             # Q-Learning trading agent
 ├── trading_bot/
 │   ├── __init__.py
-│   ├── trading_bot.py          # Main multi-signal bot (686 lines)
-│   ├── exness_bridge.py        # MT5/Exness execution (1009 lines)
-│   ├── technical_indicators.py # 50+ indicators (553 lines)
-│   ├── quantitative_signals.py # Mean reversion, momentum (599 lines)
-│   ├── risk_management.py      # Kelly, position sizing (627 lines)
-│   ├── sentiment_analysis.py   # News sentiment (573 lines)
-│   ├── backtester.py          # Backtesting engine (523 lines)
-│   ├── run_bot.py             # Bot runner script
+│   ├── trading_bot.py          # Main multi-signal bot
+│   ├── exness_bridge.py        # MT5/Exness execution
+│   ├── technical_indicators.py # 50+ indicators
+│   ├── quantitative_signals.py # Mean reversion, momentum
+│   ├── risk_management.py      # Kelly, position sizing
+│   ├── sentiment_analysis.py   # News sentiment
+│   ├── backtester.py           # Backtesting engine
+│   ├── run_bot.py              # Bot runner script
 │   └── config.json             # Bot configuration
-├── pages/                      # Multi-page layouts
+├── pages/
 │   ├── __init__.py             # Page registry
 │   ├── dashboard.py            # Dashboard page layout
 │   └── news.py                 # News page with tabs
-├── layouts/                    # (Empty - reserved for future layouts)
-├── config/                    # (Empty - reserved for configuration)
-└── plan/                      # (Empty - project planning files)
+├── layouts/
+├── config/
+└── plan/
 ```
 
 ## Key Dependencies
@@ -114,13 +127,15 @@ frontend/
 - `beautifulsoup4>=4.12.0` - HTML parsing
 - `lxml>=4.9.0` - XML/HTML parser
 
-### Machine Learning
+### Machine Learning (UPDATED)
 - `torch>=2.1.0` - PyTorch (RL agent)
 - `gymnasium>=0.29.0` - RL environments
+- `transformers>=4.30.0` - FinBERT for sentiment analysis (NEW)
+- `tokenizers>=0.13.0` - Tokenizers for transformers (NEW)
 
 ## Core Modules
 
-### `app.py` (~3900 lines)
+### `app.py` (~5500 lines)
 Main Dash application handling:
 - **Multi-page routing** via `dcc.Location` and URL pathname callbacks
 - Dashboard page (/) with real-time charts and signals
@@ -129,14 +144,31 @@ Main Dash application handling:
 - Real-time price charts with candlesticks
 - Volatility surface (3D implied volatility)
 - Market metrics (Hurst exponent, skewness, kurtosis, Sharpe, Sortino, Calmar, Max Drawdown)
-- Technical indicator signals (RSI, MACD, Bollinger, Supertrend)
+- Technical indicator signals (RSI, MACD, Bollinger, Supertrend, Stochastic, CCI, Williams %R, ADX)
 - **Unified Trading Recommendation** combining all indicators
 - Order form with stop loss/take profit
 - Trade history table (in-memory, persists during session)
-- News feed with sentiment analysis (real + synthetic fallback)
+- News feed with sentiment analysis (FinBERT + synthetic fallback)
 - Monte Carlo simulation UI (configurable days/paths)
-- **Regime detection** with improved HMM (Baum-Welch EM, Viterbi, forward-backward)
+- **Regime detection** with improved HMM
+- **Markov Model** with predictions (NEXT REGIME, PREDICTION, RISK LEVEL)
+- **AI Analysis Tab** - Chat with local AI for market insights
 - Auto-refresh (5-second intervals)
+
+### `services/local_ai_service.py` (NEW - 370 lines)
+Unified local AI service:
+- **FinBERTSentiment**: Financial sentiment analysis using ProsusAI/finbert
+- **OllamaClient**: Local LLM wrapper for market analysis
+- **LocalAIService**: Unified interface for both
+- Provides:
+  - `analyze_sentiment()` - Single text sentiment
+  - `analyze_sentiment_batch()` - Batch sentiment analysis
+  - `analyze_market()` - Market analysis with LLM
+  - `chat()` - General Q&A with LLM
+
+### `services/ai_news.py` (UPDATED)
+- Now uses FinBERT instead of DeepSeek for sentiment
+- Falls back to keyword-based sentiment when FinBERT fails
 
 ### `volatility_models.py` (1051 lines)
 Professional volatility models:
@@ -169,17 +201,19 @@ Multi-source financial news:
 Quantitative finance models:
 - **Black-Scholes** - Option pricing + Greeks
 - **Heston Model** - Stochastic volatility
-- **Regime Switching** - Market regime detection (improved with Baum-Welch, Viterbi)
+- **Regime Switching** - Market regime detection
 - **VaR/CVaR** - Risk metrics
 - **Sharpe/Sortino/Max Drawdown/Calmar** - Performance metrics
-- `detect_regime()` - Unified regime detection function
+
+#### `markov_model.py`
+- Hidden Markov Model for regime detection
+- Creates 3 regimes: LOW_VOL, NORMAL, HIGH_VOL
 
 #### `rl_agent.py` (592 lines)
 Reinforcement learning trading:
 - **QLearningAgent** - Q-table based learning
 - **TradingEnvironment** - Gym-like environment
 - **Deep RL** - PyTorch neural network agent
-- Bellman equation for value iteration
 
 ### Trading Bot (`/trading_bot/`)
 
@@ -197,48 +231,6 @@ Multi-signal trading bot architecture:
 MT5/Exness trading bridge:
 - **ExnessMT5Bridge** - Real MT5 connection
 - **PaperTradingBridge** - Simulated trading
-- Market and pending orders
-- Position management
-- Real-time price feeds
-
-#### `technical_indicators.py` (553 lines)
-50+ technical indicators:
-- **Trend**: EMA, SMA, WMA, Hull MA, VWAP, Ichimoku
-- **Momentum**: RSI, MACD, Stochastic, CCI, Williams %R
-- **Volatility**: Bollinger Bands, ATR, Keltner Channel (fixed)
-- **Volume**: OBV, Volume Profile, Money Flow
-- **Custom**: Supertrend, Pivot Points, Fibonacci
-
-#### `quantitative_signals.py` (599 lines)
-Institutional-grade signals:
-- **Mean Reversion** - Bollinger, RSI, Statistical
-- **Momentum** - Time-series, Cross-sectional
-- **Volatility Breakout** - ATR-based
-- **Statistical Arbitrage** - Pairs trading
-- **Market Regime** - Regime detection
-
-#### `risk_management.py` (627 lines)
-Professional risk controls:
-- **Position Sizing**: Fixed %, Kelly Criterion, Volatility Targeting
-- **Stop Loss**: Fixed, ATR-based, Support/Resistance
-- **Portfolio Limits**: Max exposure, correlation
-- **Drawdown Controls**: Trailing stops, circuit breakers
-
-#### `sentiment_analysis.py` (573 lines)
-Multi-source sentiment:
-- Social media (Twitter, Reddit)
-- Financial news APIs
-- Crypto-specific sources
-- Gold/precious metals reports
-- Economic calendar events
-
-#### `backtester.py` (523 lines)
-Backtesting framework:
-- Event-driven backtesting
-- Transaction costs and slippage
-- Walk-forward analysis
-- Monte Carlo simulation
-- Performance metrics (Sharpe, Sortino, Calmar)
 
 ## Trading Instruments
 
@@ -270,10 +262,12 @@ Backtesting framework:
 ## Configuration
 
 ### Environment Variables
-- `API_URL` - Backend API URL (default: http://localhost:8000)
+- `NEWSAPI_KEY` - NewsAPI.org key (working)
+- `MARKETAUX_API_KEY` - Marketaux API (not working - returns 401)
+- `DEEPSEEK_API_KEY` - DeepSeek API (not working - returns 402)
 
 ### Chart Timeframes
-- M5, M15, H1, H4, D1
+- 5m, 15m, 1h, 4h, 1D
 
 ### Bot Configuration (`config.json`)
 - Assets to trade
@@ -289,12 +283,20 @@ Backtesting framework:
 ### Fallback
 - **Synthetic data generation** - If Yahoo Finance unavailable
 
+### News
+- **NewsAPI** - Working (has valid key)
+- **Multiple scrapers** - Bloomberg, CNBC, FXStreet, etc.
+
+### Sentiment (UPDATED)
+- **FinBERT** - Local transformer model (working)
+- **Keyword fallback** - When FinBERT fails
+
 ## Development
 
 ### Running the Dashboard
 ```bash
 cd frontend
-source venv/bin/activate  # Linux/Mac
+source venv/bin/activate
 pip install -r requirements.txt
 python app.py
 ```
@@ -307,6 +309,12 @@ pip install -r requirements.txt
 python run_bot.py
 ```
 
+### Installing Ollama (Optional - for better AI)
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama run llama3.2:1b
+```
+
 ## Important Notes
 
 1. **Standalone Architecture**: Dash app runs independently (no separate backend required)
@@ -314,18 +322,22 @@ python run_bot.py
 3. **MT5 Optional**: Requires MetaTrader 5 terminal for live trading
 4. **Yahoo Finance Limits**: Free tier has rate limits; app gracefully degrades to synthetic data
 5. **Risk Warning**: Trading involves substantial risk; always test with paper trading first
+6. **Ollama Not Installed**: AI Analysis uses keyword fallback until Ollama is installed
+7. **FinBERT Loading**: First request may be slow as model loads (cached after)
 
 ## Known Issues & Architecture Gaps
 
 1. **Trading Bot Integration**: Bot runs standalone, not integrated with dashboard
-2. **SABR Model**: Excluded from main app (not actively used)
+2. **Ollama Not Installed**: AI Analysis tab works but with limited functionality
 3. **RL Training**: Agent can be trained but results not prominently displayed
 4. **Backtest Panel**: Not implemented
 5. **Bot Status Panel**: Not implemented
 6. **Alert System**: Not implemented
+7. **Server Connection Issues**: Sometimes app doesn't respond to curl but works in browser
 
 ## Future Enhancements (Planned)
 
+- [ ] Install and integrate Ollama for AI Analysis
 - [ ] React/TypeScript frontend (per original spec)
 - [ ] Flask backend with WebSocket support
 - [ ] SQLite database for trade persistence

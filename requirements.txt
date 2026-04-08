@@ -31,9 +31,13 @@ python-dotenv>=1.0.0
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 
-# Deep Learning (for RL Agent)
+# Deep Learning (for RL Agent, FinBERT)
 torch>=2.1.0
 gymnasium>=0.29.0
+
+# Transformers (for FinBERT sentiment analysis)
+transformers>=4.30.0
+tokenizers>=0.13.0
 
 # Optional: Advanced Quant Finance
 # QuantLib>=1.30  # Uncomment if you need advanced options pricing

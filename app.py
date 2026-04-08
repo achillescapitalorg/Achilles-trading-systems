@@ -2265,6 +2265,25 @@ def get_dashboard_layout():
                             dcc.Graph(id="markov-chart", config={"displayModeBar": False, "responsive": True}, style={"height": "280px"}),
                         ], style={"padding": "8px"})
                     ], label="🔄 Markov Model", tab_id="markov", label_style={"color": COLORS["text"], "fontSize": "11px"}),
+                    dbc.Tab([
+                        html.Div([
+                            html.Div(id="ai-analysis-status", className="mb-2"),
+                            dbc.Row([
+                                dbc.Col([
+                                    dbc.Input(
+                                        id="ai-chat-input",
+                                        placeholder="Ask about the market...",
+                                        style={"backgroundColor": COLORS["surface_light"], "border": f"1px solid {COLORS['border']}", "color": COLORS["text"]}
+                                    ),
+                                ], width=9),
+                                dbc.Col([
+                                    dbc.Button("Ask AI", id="ai-chat-btn", color="primary", size="sm", 
+                                              style={"backgroundColor": COLORS["accent"], "border": "none"}),
+                                ], width=3),
+                            ], className="mb-2"),
+                            html.Div(id="ai-chat-response", style={"padding": "10px", "backgroundColor": COLORS["surface"], "borderRadius": "4px", "minHeight": "100px"}),
+                        ], style={"padding": "8px"})
+                    ], label="🤖 AI Analysis", tab_id="ai-analysis", label_style={"color": COLORS["text"], "fontSize": "11px"}),
                 ], active_tab="heston", id="volatility-tabs", style={"backgroundColor": COLORS["background"]})
             ], style={"padding": "0"})
         ], style={"backgroundColor": COLORS["surface"], "border": f"1px solid {COLORS['border']}", "borderRadius": "6px", "marginBottom": "16px"}),
@@ -4892,6 +4911,150 @@ def update_markov_model(symbol):
             ], width=12),
         ], className="g-3")
         return cards, html.Div(), go.Figure()
+
+
+def generate_keyword_response(question: str, symbol: str) -> str:
+    """Generate simple keyword-based responses when Ollama is not available."""
+    q = question.lower()
+    
+    # Get current price info
+    current_price = get_current_price(symbol)
+    
+    responses = []
+    
+    # Buy/Sell questions
+    if "buy" in q or "should i" in q or "invest" in q:
+        responses.append("📊 For trading decisions, consider:")
+        responses.append("• Check the unified recommendation at the top")
+        responses.append("• Review RSI, MACD, and Bollinger signals")
+        responses.append("• Look at Markov regime for market direction")
+        responses.append(f"• Current {symbol} price: ${current_price:,.2f}")
+    
+    # Gold questions
+    elif "gold" in q or "xau" in q:
+        responses.append("🥇 Gold factors:")
+        responses.append("• Affected by USD strength and interest rates")
+        responses.append("• Safe-haven demand during uncertainty")
+        responses.append("• Inflation expectations impact prices")
+        responses.append(f"• Current XAUUSD: ${current_price:,.2f}")
+    
+    # Bitcoin questions
+    elif "bitcoin" in q or "btc" in q:
+        responses.append("₿ Bitcoin factors:")
+        responses.append("• Highly volatile, driven by sentiment")
+        responses.append("• Regulatory news affects price significantly")
+        responses.append("• Institutional adoption is key driver")
+        responses.append(f"• Current BTCUSD: ${current_price:,.2f}")
+    
+    # Price prediction
+    elif "predict" in q or "forecast" in q or "target" in q:
+        responses.append("📈 For price predictions:")
+        responses.append("• Check the AI Prediction tab for 30-day forecast")
+        responses.append("• Use Heston model for volatility estimates")
+        try:
+            heston_params = calculate_real_heston_params(symbol)
+            probabilities = predict_future_prices(symbol, heston_params, days=30, n_paths=100)
+            resp_str = f"• Predicted mean: ${probabilities['mean_price']:,.2f}"
+            responses.append(resp_str)
+        except:
+            responses.append(f"• Current price: ${current_price:,.2f}")
+    
+    # Technical analysis
+    elif "rsi" in q or "macd" in q or "indicator" in q:
+        responses.append("📊 Technical Indicators:")
+        responses.append("• Check the Trading Signals panel on the right")
+        responses.append("• Review the unified recommendation at top")
+        responses.append("• Visit Heston Model tab for volatility analysis")
+    
+    # Risk questions
+    elif "risk" in q or "volatility" in q:
+        responses.append("⚠️ Risk Assessment:")
+        responses.append("• Check the Risk tab in Metrics")
+        responses.append("• Use VaR for maximum loss estimate")
+        responses.append("• Consider position sizing based on volatility")
+    
+    # Default response
+    else:
+        responses.append("💡 Tips:")
+        responses.append("• Check the unified recommendation for trading signal")
+        responses.append("• Review Markov regime for market direction")
+        responses.append("• Use Monte Carlo simulation for price paths")
+        responses.append("• Install Ollama for AI-powered analysis")
+    
+    return "\n".join(responses)
+
+
+@callback(
+    [Output("ai-analysis-status", "children"),
+     Output("ai-chat-response", "children")],
+    [Input("ai-chat-btn", "n_clicks"),
+     Input("selected-symbol", "data")],
+    [State("ai-chat-input", "value")],
+    prevent_initial_call=True
+)
+def update_ai_chat(n_clicks, symbol, user_message):
+    """Handle AI chat interactions using Ollama local LLM."""
+    if symbol is None:
+        symbol = "XAUUSD"
+    
+    try:
+        from services.local_ai_service import get_local_ai_service, get_ai_status
+    except ImportError as e:
+        return html.Div("AI service not available", style={"color": COLORS["danger"]}), "Install local_ai_service"
+    
+    ai_service = get_local_ai_service()
+    status = get_ai_status()
+    
+    status_html = dbc.Row([
+        dbc.Col([
+            html.Span("🤖 FinBERT: ", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            html.Span("✅" if status.get("finbert_available") else "❌", style={"fontSize": "10px"}),
+        ], width=3),
+        dbc.Col([
+            html.Span("🦙 Ollama: ", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            html.Span("✅" if status.get("ollama_available") else "❌ (Install Ollama)", style={"fontSize": "10px"}),
+        ], width=6),
+    ], className="mb-2")
+    
+    if not n_clicks or not user_message:
+        return status_html, html.Div([
+            html.Span("💬 Ask me anything about the market!", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+            html.Br(),
+            html.Span("Example: Should I buy gold now? What affects BTC price?", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+        ])
+    
+    try:
+        result = ai_service.chat(user_message)
+        
+        print(f"[AI Chat] Result: success={result.get('success')}, error={result.get('error')}")
+        
+        if result.get("success"):
+            response_text = result.get("response", "No response")
+        else:
+            error = result.get("error", "Unknown error")
+            print(f"[AI Chat] Error: {error}")
+            
+            # Always use keyword-based fallback since Ollama is not installed
+            response_text = generate_keyword_response(user_message, symbol)
+            response_text += "\n\n💡 Install Ollama for smarter AI responses: curl -fsSL https://ollama.com/install.sh"
+        
+        return status_html, html.Div([
+            html.Div([
+                html.Span("You: ", style={"color": COLORS["accent"], "fontWeight": "bold", "fontSize": "11px"}),
+                html.Span(user_message, style={"color": COLORS["text"], "fontSize": "11px"}),
+            ], className="mb-2"),
+            html.Hr(style={"margin": "10px 0", "borderColor": COLORS["border"]}),
+            html.Div([
+                html.Span("AI: ", style={"color": COLORS["success"], "fontWeight": "bold", "fontSize": "11px"}),
+                html.Span(response_text, style={"color": COLORS["text"], "fontSize": "11px"}),
+            ]),
+        ])
+        
+    except Exception as e:
+        import traceback
+        print(f"AI chat error: {e}")
+        traceback.print_exc()
+        return status_html, html.Div(f"Error: {str(e)}", style={"color": COLORS["danger"]})
 
 
 def run_monte_carlo_simulation(symbol, days, n_paths):
