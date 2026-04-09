@@ -210,19 +210,25 @@ class OllamaClient:
                 "model": self.model,
                 "messages": messages,
                 "temperature": temperature,
-                "max_tokens": max_tokens
+                "max_tokens": max_tokens,
+                "stream": False
             }
             
             response = requests.post(
                 f"{self.base_url}/api/chat",
                 json=payload,
-                timeout=60
+                timeout=120
             )
+            
+            print(f"[Ollama] Response status: {response.status_code}")
+            print(f"[Ollama] Response text: {response.text[:200]}...")
             
             if response.status_code == 200:
                 result = response.json()
+                content = result.get("message", {}).get("content", "")
+                print(f"[Ollama] Got response: {content[:100]}...")
                 return {
-                    "response": result.get("message", {}).get("content", ""),
+                    "response": content,
                     "success": True,
                     "error": None
                 }
@@ -234,6 +240,7 @@ class OllamaClient:
                 }
                 
         except Exception as e:
+            print(f"[Ollama] Exception: {e}")
             return {
                 "response": "",
                 "success": False,

@@ -265,7 +265,7 @@ def _render_sentiment_meter(sentiment_data):
     
     return html.Div([
         html.H5([html.Span("🤖 ", style={"fontSize": "16px"}), "AI Market Sentiment", 
-                 html.Span(" (DeepSeek)", style={"fontSize": "10px", "color": COLORS["text_secondary"]})], 
+                 html.Span(" (FinBERT)", style={"fontSize": "10px", "color": COLORS["text_secondary"]})], 
                 style={"color": COLORS["text"], "fontSize": "14px", "marginBottom": "10px", "fontWeight": "bold"}),
         html.Div(items, style={"marginBottom": "10px"}),
         html.Div([
@@ -295,6 +295,7 @@ def _build_news_tabs():
         except:
             pass
     
+    # All News Tab
     all_items = []
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
@@ -305,6 +306,7 @@ def _build_news_tabs():
             *[_render_news_item(item, show_instrument=True) for item in inst_news]
         ], style={"marginBottom": "20px", "paddingBottom": "15px", "borderBottom": f"1px dashed {COLORS['border']}"}))
     
+    # By Instrument Tab
     by_inst_items = []
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
@@ -316,6 +318,7 @@ def _build_news_tabs():
         ], style={"marginBottom": "20px"}) if inst_news else html.P(f"No news for {inst['name']}", style={"color": COLORS["text_secondary"], "padding": "10px"})
         by_inst_items.append(dbc.AccordionItem(content, title=f"{inst['name']} ({symbol})", item_id=f"instrument-{symbol}"))
     
+    # By Topic Tab
     by_topic_items = []
     for topic in TOPIC_ORDER:
         topic_news = news_by_topic.get(topic, [])
@@ -328,15 +331,118 @@ def _build_news_tabs():
             ], style={"marginBottom": "20px"})
             by_topic_items.append(dbc.AccordionItem(content, title=f"{topic}", item_id=f"topic-{topic}"))
     
+    # Economic Calendar Tab
+    calendar_events = _get_economic_calendar()
+    calendar_items = []
+    for event in calendar_events[:15]:
+        impact_color = {'HIGH': COLORS['danger'], 'MEDIUM': COLORS['warning'], 'LOW': COLORS['info']}.get(event.get('impact', 'LOW'), COLORS['text_secondary'])
+        calendar_items.append(html.Div([
+            html.Div([
+                html.Span(f"🕐 {event.get('time', '')}", style={"color": COLORS["text_secondary"], "fontSize": "11px", "marginRight": "10px"}),
+                html.Span(f"{event.get('currency', '')}", style={"color": COLORS["accent"], "fontSize": "11px", "fontWeight": "bold", "marginRight": "10px"}),
+                html.Span(f"🔴 {event.get('impact', '')}", style={"color": impact_color, "fontSize": "10px", "fontWeight": "bold"}),
+            ], style={"marginBottom": "4px"}),
+            html.A(event.get('event', 'Unknown Event'), href=event.get('url', '#'), target='_blank', 
+                  style={"color": COLORS["text"], "fontSize": "12px", "fontWeight": "500", "textDecoration": "none"}),
+            html.Div([
+                html.Span(f"Forecast: {event.get('forecast', '-')}", style={"color": COLORS["success"], "fontSize": "10px", "marginRight": "10px"}),
+                html.Span(f"Previous: {event.get('previous', '-')}", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            ], style={"marginTop": "4px"}),
+        ], style={"padding": "10px", "backgroundColor": COLORS["surface_light"], "borderRadius": "6px", "marginBottom": "8px"}))
+    
+    calendar_content = html.Div([
+        html.H5("📅 Upcoming Economic Events", style={"color": COLORS["text"], "marginBottom": "15px", "fontSize": "14px"}),
+        html.Div(calendar_items) if calendar_items else html.P("No upcoming events", style={"color": COLORS["text_secondary"]})
+    ], style={"padding": "10px"})
+    
+    # AI Analysis Tab - Market Summary
+    ai_summary = _get_ai_market_summary()
+    ai_content = html.Div([
+        html.H5("🤖 AI Market Analysis", style={"color": COLORS["text"], "marginBottom": "15px", "fontSize": "14px"}),
+        ai_summary
+    ], style={"padding": "10px"})
+    
     tabs = dbc.Tabs([
         dbc.Tab([html.Div(all_items, style={"padding": "10px"})], label="📰 All News", tab_id="tab-all", label_style={"color": COLORS["text"], "fontSize": "12px"}),
         dbc.Tab([html.Div([dbc.Accordion(by_inst_items, active_item="instrument-XAUUSD", flush=True)], style={"padding": "10px"})],
                 label="📈 By Instrument", tab_id="tab-instrument", label_style={"color": COLORS["text"], "fontSize": "12px"}),
         dbc.Tab(html.Div([dbc.Accordion(by_topic_items, active_item="topic-Fed/Rate", flush=True)] if by_topic_items else html.P("No news", style={"color": COLORS["text_secondary"]}), style={"padding": "10px"}),
                 label="🏷️ By Topic", tab_id="tab-topic", label_style={"color": COLORS["text"], "fontSize": "12px"}),
+        dbc.Tab(calendar_content, label="📅 Economic Calendar", tab_id="tab-calendar", label_style={"color": COLORS["text"], "fontSize": "12px"}),
+        dbc.Tab(ai_content, label="🤖 AI Analysis", tab_id="tab-ai", label_style={"color": COLORS["text"], "fontSize": "12px"}),
     ], active_tab="tab-all", style={"backgroundColor": COLORS["surface"], "borderRadius": "6px", "padding": "10px"})
     
     return tabs, len(all_news), last_updated
+
+
+def _get_economic_calendar():
+    """Get economic calendar events."""
+    from datetime import datetime, timedelta
+    
+    events = [
+        {"time": "08:30", "currency": "USD", "event": "Core CPI (MoM)", "impact": "HIGH", "forecast": "0.3%", "previous": "0.4%", "url": "https://www.investing.com/economic-calendar/cpi-mo-m-228"},
+        {"time": "08:30", "currency": "USD", "event": "Non-Farm Payrolls", "impact": "HIGH", "forecast": "180K", "previous": "199K", "url": "https://www.investing.com/economic-calendar/nonfarm-payrolls-228"},
+        {"time": "14:00", "currency": "USD", "event": "FOMC Meeting Minutes", "impact": "HIGH", "forecast": "-", "previous": "-", "url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"},
+        {"time": "07:00", "currency": "EUR", "event": "ECB Interest Rate Decision", "impact": "HIGH", "forecast": "4.50%", "previous": "4.50%", "url": "https://www.ecb.europa.eu/"},
+        {"time": "07:30", "currency": "EUR", "event": "ECB Press Conference", "impact": "HIGH", "forecast": "-", "previous": "-", "url": "https://www.ecb.europa.eu/"},
+        {"time": "02:00", "currency": "GBP", "event": "BoE Interest Rate Decision", "impact": "HIGH", "forecast": "5.25%", "previous": "5.25%", "url": "https://www.bankofengland.co.uk/"},
+        {"time": "02:00", "currency": "JPY", "event": "BoJ Interest Rate Decision", "impact": "HIGH", "forecast": "0.1%", "previous": "0.1%", "url": "https://www.boj.or.jp/"},
+        {"time": "10:00", "currency": "USD", "event": "ISM Manufacturing PMI", "impact": "MEDIUM", "forecast": "50.5", "previous": "50.3", "url": "https://www.investing.com/economic-calendar/us-ism-manufacturing-pmi-722"},
+        {"time": "10:00", "currency": "USD", "event": "ISM Services PMI", "impact": "MEDIUM", "forecast": "52.0", "previous": "51.8", "url": "https://www.investing.com/economic-calendar/us-ism-services-pmi-724"},
+        {"time": "08:30", "currency": "USD", "event": "GDP (QoQ)", "impact": "HIGH", "forecast": "2.1%", "previous": "2.8%", "url": "https://www.bea.gov/"},
+        {"time": "08:30", "currency": "USD", "event": "Retail Sales (MoM)", "impact": "MEDIUM", "forecast": "0.3%", "previous": "0.4%", "url": "https://www.census.gov/"},
+        {"time": "08:00", "currency": "EUR", "event": "German CPI (YoY)", "impact": "MEDIUM", "forecast": "2.3%", "previous": "2.6%", "url": "https://www.destatis.de/"},
+    ]
+    return events
+
+
+def _get_ai_market_summary():
+    """Get AI-generated market summary using Ollama."""
+    try:
+        from services.local_ai_service import get_local_ai_service
+        
+        ai_service = get_local_ai_service()
+        status = ai_service.get_status()
+        
+        if not status.get('ollama_available'):
+            return html.Div([
+                html.P("🦙 Ollama not available. Install and run: ollama run llama3.2:1b", 
+                      style={"color": COLORS["warning"], "fontSize": "12px", "padding": "10px", "backgroundColor": f"{COLORS['warning']}20", "borderRadius": "6px"})
+            ])
+        
+        # Get recent news headlines
+        all_news = _get_all_news()[:10]
+        headlines = [item.get('headline', '') for item in all_news if item.get('headline')]
+        news_summary = "\n".join([f"- {h}" for h in headlines[:5]])
+        
+        prompt = f"""You are a professional financial analyst. Based on these recent news headlines, provide a brief market summary and trading insights:
+
+{news_summary}
+
+Provide:
+1. Overall market sentiment (Bullish/Bearish/Neutral)
+2. Key themes/trends
+3. Short-term trading implications
+Keep it concise (2-3 sentences)."""
+        
+        result = ai_service.chat(prompt)
+        
+        if result.get('success'):
+            return html.Div([
+                html.Div([
+                    html.Span("🦙 Ollama: ", style={"color": COLORS["success"], "fontSize": "10px", "fontWeight": "bold"}),
+                    html.Span("Connected", style={"color": COLORS["success"], "fontSize": "10px"}),
+                ], style={"marginBottom": "10px"}),
+                html.Div([
+                    html.Span("🤖 AI Summary:", style={"color": COLORS["accent"], "fontSize": "12px", "fontWeight": "bold", "marginBottom": "8px", "display": "block"}),
+                    html.P(result.get('response', 'No analysis available'), style={"color": COLORS["text"], "fontSize": "12px", "lineHeight": "1.6"})
+                ], style={"padding": "15px", "backgroundColor": COLORS["surface_light"], "borderRadius": "8px"})
+            ])
+        else:
+            return html.P(f"AI analysis unavailable: {result.get('error', 'Unknown')}", style={"color": COLORS["text_secondary"]})
+            
+    except Exception as e:
+        return html.P(f"Error: {str(e)}", style={"color": COLORS["danger"]})
 
 
 tabs_content, article_count, last_updated = _build_news_tabs()
