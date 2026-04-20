@@ -6,6 +6,8 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 
 **Note:** This project uses a Dash-based frontend. A React/TypeScript frontend and Flask backend were originally planned but not implemented.
 
+---
+
 ## Current Status (Updated April 2026)
 
 ### Recently Completed in This Session
@@ -13,20 +15,22 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 1. **Replaced DeepSeek with Local AI (FinBERT + Ollama)**
    - Created `services/local_ai_service.py` - New unified AI service
    - Uses FinBERT (ProsusAI/finbert) for financial sentiment analysis
-   - Uses Ollama for local LLM-powered market analysis
+   - Uses Ollama (llama3.2:1b) for local LLM-powered market analysis
    - Added keyword-based fallback when Ollama not available
+   - Ollama is now installed and working
 
 2. **Fixed AI Prediction Tab**
-   - Fixed Heston parameter calculation (theta was incorrectly calculated using rolling mean)
-   - Changed probability thresholds from 5%/10% to 1%/2% for more realistic 30-day predictions
-   - Now recalculates probabilities directly from price paths
+   - Fixed Heston parameter calculation (theta was incorrectly calculated)
+   - Changed probability thresholds from 5%/10% to 1%/2% for realistic 30-day predictions
+   - Recalculates probabilities directly from price paths
    - Added asset-specific default probabilities
 
 3. **Added AI Analysis Tab**
    - New tab in "HESTON VOLATILITY & OPTIONS ANALYTICS" section
    - Input field for asking market questions
-   - Shows FinBERT and Ollama status
+   - Shows FinBERT and Ollama status indicators
    - Keyword-based fallback provides trading tips when Ollama not installed
+   - Now working with Ollama (llama3.2:1b model installed)
 
 4. **Added Markov Model Predictions**
    - Added NEXT REGIME prediction with probability
@@ -34,13 +38,21 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
    - Added RISK LEVEL (HIGH/MEDIUM/LOW)
    - Added prediction explanations and trading tips for each regime
 
-5. **Updated Requirements**
+5. **Enhanced News Page**
+   - Added Economic Calendar tab with upcoming events
+   - Added AI Analysis tab for market summary using Ollama
+   - Changed sentiment meter label from "DeepSeek" to "FinBERT"
+
+6. **Updated Requirements**
    - Added `transformers>=4.30.0` for FinBERT
    - Added `tokenizers>=0.13.0`
 
-6. **Updated News Service**
+7. **Updated News Service**
    - Replaced DeepSeek sentiment with FinBERT in `services/ai_news.py`
    - Updated `pages/news.py` to use local AI service
+   - Fixed Ollama streaming issue (added `"stream": False` to API call)
+
+---
 
 ## Architecture
 
@@ -52,14 +64,16 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 - **State**: Python in-memory state + Dash callbacks
 
 ### AI Services
-- **FinBERT**: Financial sentiment analysis (HuggingFace ProsusAI/finbert)
-- **Ollama**: Local LLM for market analysis (requires separate installation)
+- **FinBERT**: Financial sentiment analysis (HuggingFace ProsusAI/finbert) - WORKING
+- **Ollama**: Local LLM for market analysis (llama3.2:1b installed and running)
 - **Keyword Fallback**: Provides trading tips when Ollama not available
 
 ### Trading Bot (`/trading_bot/`)
 - **Standalone**: Can run independently of the Dash UI
 - **Broker Integration**: Exness MT5 (paper trading by default)
 - **Data**: Yahoo Finance for market data
+
+---
 
 ## Project Structure
 
@@ -77,9 +91,9 @@ frontend/
 │   ├── news_scraper.py         # Multi-source news (1452 lines)
 │   ├── advanced_models.py      # Black-Scholes, Heston, VaR, Sharpe/Sortino/MaxDD
 │   ├── markov_model.py         # Hidden Markov Model regime detection
-│   ├── ai_news.py              # AI-powered news service (now uses FinBERT)
-│   ├── local_ai_service.py     # NEW: FinBERT + Ollama wrapper
-│   ├── deepseek_sentiment.py   # OLD: DeepSeek (still present, not used)
+│   ├── ai_news.py              # AI-powered news service (uses FinBERT)
+│   ├── local_ai_service.py     # FinBERT + Ollama wrapper
+│   ├── deepseek_sentiment.py   # OLD: DeepSeek (not used)
 │   ├── news_cache.py           # Persistent news cache
 │   └── rl_agent.py             # Q-Learning trading agent
 ├── trading_bot/
@@ -102,6 +116,96 @@ frontend/
 └── plan/
 ```
 
+---
+
+## Key Functions in `app.py`
+
+### Data Fetching
+- `fetch_yahoo_finance_data(symbol, period, interval)` - Fetch OHLCV data from Yahoo Finance
+- `get_current_price(symbol)` - Get current price for a symbol
+- `generate_fallback_data(symbol, periods)` - Generate synthetic data when Yahoo fails
+
+### Technical Indicators (Safe Versions)
+- `calculate_rsi_safe(prices, period=14)` - RSI with error handling
+- `calculate_macd_safe(prices, fast, slow, signal_period)` - MACD with error handling
+- `calculate_bb_safe(prices, period, std_dev)` - Bollinger Bands with error handling
+- `calculate_supertrend_safe(df, period, multiplier)` - Supertrend with error handling
+- `calculate_stochastic_safe(df, k_period, d_period)` - Stochastic Oscillator
+- `calculate_cci_safe(df, period)` - Commodity Channel Index
+- `calculate_williams_r_safe(df, period)` - Williams %R
+- `calculate_adx_safe(df, period)` - Average Directional Index
+
+### Financial Models
+- `calculate_real_heston_params(symbol)` - Calculate Heston parameters from real market data
+- `calculate_real_volatility(symbol)` - Calculate realized volatility
+- `calculate_regime_metrics(symbol)` - Calculate regime detection metrics
+- `calculate_hurst_exponent(returns, min_lag, max_lag)` - Hurst exponent for trend/mean-reversion
+- `calculate_trend_strength(returns, lookback)` - Trend strength indicator
+- `calculate_mean_reversion_strength(returns, lookback)` - Mean reversion strength
+- `predict_future_prices(symbol, heston_params, days, n_paths)` - Monte Carlo price simulation
+- `calculate_bs_probability(symbol, days)` - Black-Scholes probability calculation
+
+### Trading Signals
+- `generate_signals(symbol)` - Generate all technical indicator signals
+- `get_unified_trading_recommendation(symbol)` - Combined BUY/SELL/HOLD recommendation
+
+### Callbacks (Dash UI Updates)
+- `update_price_chart(symbol, n, timeframe)` - Update main candlestick chart
+- `update_metrics(symbol)` - Update market metrics cards
+- `update_signals(symbol)` - Update trading signals panel
+- `update_news(symbol, n)` - Update news feed
+- `update_economic_calendar(n)` - Update economic calendar events
+- `handle_trade_actions(...)` - Handle buy/sell/clear trade actions
+- `update_heston_model(symbol)` - Update Heston volatility surface
+- `update_price_prediction(symbol)` - Update AI price prediction
+- `update_sabr_model(symbol)` - Update SABR volatility smile
+- `update_markov_model(symbol)` - Update Markov regime detection
+- `update_ai_chat(n_clicks, symbol, user_message)` - Handle AI chat interactions
+- `update_monte_carlo(n_clicks, symbol, days, n_paths)` - Run Monte Carlo simulation
+- `update_regime_detection(symbol, n)` - Update regime detection display
+- `update_unified_recommendation(symbol, n, pathname)` - Update unified recommendation
+
+---
+
+## Key Classes and Functions in `services/`
+
+### `services/ai_news.py` - UnifiedNewsService
+- `get_news(symbol, max_items)` - Main method to fetch news from all sources
+- `_fetch_all_sources_parallel(symbol, keywords)` - Parallel fetching from multiple sources
+- `_fetch_newsapi(keywords)` - Fetch from NewsAPI (your key works)
+- `_fetch_google_news(keywords, symbol)` - Fetch from Google News RSS
+- `_fetch_forexcom_news(keywords)` - Fetch from Forex.com
+- `_fetch_marketaux(symbol)` - Fetch from Marketaux API (broken - returns 401)
+- `_deduplicate_and_rank(items)` - Deduplicate and rank by source priority
+
+**News Sources Currently Used:**
+- NewsAPI (working)
+- Google News RSS (5-day filter)
+- Forex.com
+- Marketaux (broken)
+
+### `services/local_ai_service.py` - LocalAIService
+- `get_sentiment(text)` - Analyze single text sentiment
+- `get_sentiment_batch(texts)` - Batch sentiment analysis
+- `analyze_market(symbol, news, price_data)` - Market analysis with LLM
+- `chat(message, context)` - Chat with Ollama LLM
+
+### `services/news_scraper.py` - NewsAggregator
+- `fetch_symbol_news(symbol, limit)` - Fetch news for specific symbol
+- `fetch_all_news(limit_per_source)` - Fetch general news
+- `get_news_sources()` - Get list of available sources
+
+### `services/markov_model.py` - MarkovRegimeModel
+- `fit(prices, returns)` - Fit HMM to price data
+- `predict_next_regime()` - Predict next regime
+- `get_regime_description(regime)` - Get regime explanation
+
+### `services/market_data.py`
+- `get_market_data(symbol)` - Get comprehensive market data
+- `get_instrument_info(symbol)` - Get instrument details
+
+---
+
 ## Key Dependencies
 
 ### Core
@@ -118,7 +222,6 @@ frontend/
 
 ### Market Data
 - `yfinance>=0.2.31` - Yahoo Finance API
-- `ccxt>=4.0.0` - Crypto exchange API
 
 ### HTTP & Scraping
 - `requests>=2.31.0` - HTTP requests
@@ -127,110 +230,13 @@ frontend/
 - `beautifulsoup4>=4.12.0` - HTML parsing
 - `lxml>=4.9.0` - XML/HTML parser
 
-### Machine Learning (UPDATED)
+### Machine Learning
 - `torch>=2.1.0` - PyTorch (RL agent)
 - `gymnasium>=0.29.0` - RL environments
-- `transformers>=4.30.0` - FinBERT for sentiment analysis (NEW)
-- `tokenizers>=0.13.0` - Tokenizers for transformers (NEW)
+- `transformers>=4.30.0` - FinBERT for sentiment analysis
+- `tokenizers>=0.13.0` - Tokenizers for transformers
 
-## Core Modules
-
-### `app.py` (~5500 lines)
-Main Dash application handling:
-- **Multi-page routing** via `dcc.Location` and URL pathname callbacks
-- Dashboard page (/) with real-time charts and signals
-- News page (/news) with comprehensive news aggregation
-- Analysis page (/analysis) placeholder
-- Real-time price charts with candlesticks
-- Volatility surface (3D implied volatility)
-- Market metrics (Hurst exponent, skewness, kurtosis, Sharpe, Sortino, Calmar, Max Drawdown)
-- Technical indicator signals (RSI, MACD, Bollinger, Supertrend, Stochastic, CCI, Williams %R, ADX)
-- **Unified Trading Recommendation** combining all indicators
-- Order form with stop loss/take profit
-- Trade history table (in-memory, persists during session)
-- News feed with sentiment analysis (FinBERT + synthetic fallback)
-- Monte Carlo simulation UI (configurable days/paths)
-- **Regime detection** with improved HMM
-- **Markov Model** with predictions (NEXT REGIME, PREDICTION, RISK LEVEL)
-- **AI Analysis Tab** - Chat with local AI for market insights
-- Auto-refresh (5-second intervals)
-
-### `services/local_ai_service.py` (NEW - 370 lines)
-Unified local AI service:
-- **FinBERTSentiment**: Financial sentiment analysis using ProsusAI/finbert
-- **OllamaClient**: Local LLM wrapper for market analysis
-- **LocalAIService**: Unified interface for both
-- Provides:
-  - `analyze_sentiment()` - Single text sentiment
-  - `analyze_sentiment_batch()` - Batch sentiment analysis
-  - `analyze_market()` - Market analysis with LLM
-  - `chat()` - General Q&A with LLM
-
-### `services/ai_news.py` (UPDATED)
-- Now uses FinBERT instead of DeepSeek for sentiment
-- Falls back to keyword-based sentiment when FinBERT fails
-
-### `volatility_models.py` (1051 lines)
-Professional volatility models:
-- **GARCH(p, q)** - Generalized ARCH
-- **EGARCH** - Exponential GARCH
-- **GJR-GARCH** - Asymmetric GARCH
-- **Heston** - Stochastic Volatility Model
-- **Realized Volatility** - High-frequency estimators
-- **Parkinson** - Range-based estimator
-- **Garman-Klass** - OHLC estimator
-- **Yang-Zhang** - Drift-independent estimator
-
-### Services
-
-#### `market_data.py`
-- Yahoo Finance symbol mapping
-- Real-time price fetching
-- Historical OHLCV data
-- Fallback mock data generation
-
-#### `news_scraper.py` (1452 lines)
-Multi-source financial news:
-- Bloomberg, CNBC, Reuters
-- FXStreet, Forex Factory, DailyFX
-- Investing.com, Yahoo Finance
-- CoinDesk, Crypto Panic
-- MarketWatch, Kitco
-
-#### `advanced_models.py` (1299 lines)
-Quantitative finance models:
-- **Black-Scholes** - Option pricing + Greeks
-- **Heston Model** - Stochastic volatility
-- **Regime Switching** - Market regime detection
-- **VaR/CVaR** - Risk metrics
-- **Sharpe/Sortino/Max Drawdown/Calmar** - Performance metrics
-
-#### `markov_model.py`
-- Hidden Markov Model for regime detection
-- Creates 3 regimes: LOW_VOL, NORMAL, HIGH_VOL
-
-#### `rl_agent.py` (592 lines)
-Reinforcement learning trading:
-- **QLearningAgent** - Q-table based learning
-- **TradingEnvironment** - Gym-like environment
-- **Deep RL** - PyTorch neural network agent
-
-### Trading Bot (`/trading_bot/`)
-
-#### `trading_bot.py` (686 lines)
-Multi-signal trading bot architecture:
-1. Data Collection - Fetch OHLCV from MT5
-2. Technical Analysis - Calculate indicators
-3. Quantitative Signals - Mean reversion, momentum
-4. Sentiment Analysis - News sentiment
-5. Signal Aggregation - Weighted combination
-6. Risk Management - Position sizing, stops
-7. Execution - Place orders via MT5
-
-#### `exness_bridge.py` (1009 lines)
-MT5/Exness trading bridge:
-- **ExnessMT5Bridge** - Real MT5 connection
-- **PaperTradingBridge** - Simulated trading
+---
 
 ## Trading Instruments
 
@@ -244,6 +250,8 @@ MT5/Exness trading bridge:
 | USDJPY | USD/JPY | Forex | USDJPY=X |
 | SPX500 | S&P 500 | Index | ^GSPC |
 | NAS100 | Nasdaq 100 | Index | ^NDX |
+
+---
 
 ## UI Theme
 
@@ -259,6 +267,8 @@ MT5/Exness trading bridge:
 - Text: `#ffffff`
 - Text Secondary: `#888888`
 
+---
+
 ## Configuration
 
 ### Environment Variables
@@ -269,11 +279,7 @@ MT5/Exness trading bridge:
 ### Chart Timeframes
 - 5m, 15m, 1h, 4h, 1D
 
-### Bot Configuration (`config.json`)
-- Assets to trade
-- Risk parameters
-- Signal thresholds
-- MT5 credentials (for live trading)
+---
 
 ## Data Sources
 
@@ -283,13 +289,17 @@ MT5/Exness trading bridge:
 ### Fallback
 - **Synthetic data generation** - If Yahoo Finance unavailable
 
-### News
+### News (Current)
 - **NewsAPI** - Working (has valid key)
-- **Multiple scrapers** - Bloomberg, CNBC, FXStreet, etc.
+- **Google News RSS** - Filtered by 5 days
+- **Forex.com** - Web scraping
 
-### Sentiment (UPDATED)
+### Sentiment (Updated)
 - **FinBERT** - Local transformer model (working)
-- **Keyword fallback** - When FinBERT fails
+- **Ollama** - Local LLM (llama3.2:1b installed and running)
+- **Keyword fallback** - When Ollama not available
+
+---
 
 ## Development
 
@@ -309,11 +319,14 @@ pip install -r requirements.txt
 python run_bot.py
 ```
 
-### Installing Ollama (Optional - for better AI)
+### Ollama Status
+Ollama is now installed with llama3.2:1b model. To ensure it's running:
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama run llama3.2:1b
+ollama serve  # Start Ollama server in background
+ollama list   # Check installed models
 ```
+
+---
 
 ## Important Notes
 
@@ -322,29 +335,36 @@ ollama run llama3.2:1b
 3. **MT5 Optional**: Requires MetaTrader 5 terminal for live trading
 4. **Yahoo Finance Limits**: Free tier has rate limits; app gracefully degrades to synthetic data
 5. **Risk Warning**: Trading involves substantial risk; always test with paper trading first
-6. **Ollama Not Installed**: AI Analysis uses keyword fallback until Ollama is installed
-7. **FinBERT Loading**: First request may be slow as model loads (cached after)
+6. **Ollama Now Working**: AI Analysis tab uses Ollama for intelligent responses
+7. **FinBERT Loaded**: First request may be slow as model loads (cached after)
+
+---
 
 ## Known Issues & Architecture Gaps
 
 1. **Trading Bot Integration**: Bot runs standalone, not integrated with dashboard
-2. **Ollama Not Installed**: AI Analysis tab works but with limited functionality
-3. **RL Training**: Agent can be trained but results not prominently displayed
-4. **Backtest Panel**: Not implemented
-5. **Bot Status Panel**: Not implemented
-6. **Alert System**: Not implemented
-7. **Server Connection Issues**: Sometimes app doesn't respond to curl but works in browser
+2. **News Database**: No SQLite database for historical news storage (planned)
+3. **No Time Filter**: News doesn't have time filtering (1min, 1hour, Today, etc.)
+4. **Refresh Button**: Doesn't fetch fresh news, just rebuilds from cache
+5. **RL Training**: Agent can be trained but results not prominently displayed
+6. **Backtest Panel**: Not implemented in UI
+7. **Alert System**: Not implemented
+
+---
 
 ## Future Enhancements (Planned)
 
-- [ ] Install and integrate Ollama for AI Analysis
-- [ ] React/TypeScript frontend (per original spec)
+- [ ] Add News database (SQLite) with 90-day retention
+- [ ] Fix refresh button to actually fetch fresh news
+- [ ] Add time filter to news (1min, 1hour, Today, Week, Month, All)
+- [ ] Add more web scraping sources (no APIs)
+- [ ] View old news via database with calendar picker
+- [ ] Enhanced AI context with all platform data for better advice
+- [ ] Add sentiment trends chart over time
+- [ ] React/TypeScript frontend
 - [ ] Flask backend with WebSocket support
 - [ ] SQLite database for trade persistence
 - [ ] Real-time MT5/Exness trading execution
-- [ ] User authentication and portfolios
-- [ ] Mobile-responsive design
 - [ ] Integrate trading bot with dashboard UI
-- [ ] Add persistent trade history (database)
 - [ ] Implement backtest panel
 - [ ] Implement alert system

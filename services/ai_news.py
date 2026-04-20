@@ -51,6 +51,9 @@ class UnifiedNewsService:
         "Marketaux": "🤖",
         "Google News": "🔍",
         "Web": "🌐",
+        "MyFXBook": "📒",
+        "ForexFactory": "🏭",
+        "Myfxbook": "📒",
     }
     
     SOURCE_PRIORITY = {
@@ -70,6 +73,76 @@ class UnifiedNewsService:
         "DailyFX": 6,
         "Google News": 4,
         "Web": 3,
+        "MyFXBook": 7,
+        "Myfxbook": 7,
+        "ForexFactory": 7,
+    }
+
+    # Direct RSS feed configuration
+    # url: primary feed URL; icon, priority match SOURCE_ICONS/PRIORITY above
+    RSS_FEEDS: Dict[str, Dict] = {
+        "Reuters": {
+            "url": "https://feeds.reuters.com/reuters/businessNews",
+            "icon": "📰",
+            "priority": 10,
+        },
+        "Financial Times": {
+            "url": "https://www.ft.com/rss/home/uk",
+            "icon": "📊",
+            "priority": 8,
+        },
+        "FXStreet": {
+            "url": "https://www.fxstreet.com/rss/news",
+            "icon": "💱",
+            "priority": 8,
+        },
+        "CoinDesk": {
+            "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "icon": "₿",
+            "priority": 7,
+        },
+        "Investing.com Commodities": {
+            "url": "https://www.investing.com/rss/news_301.rss",
+            "icon": "📈",
+            "priority": 7,
+        },
+        "Investing.com Forex": {
+            "url": "https://www.investing.com/rss/news_1.rss",
+            "icon": "📈",
+            "priority": 7,
+        },
+        "Investing.com Crypto": {
+            "url": "https://www.investing.com/rss/news_25.rss",
+            "icon": "📈",
+            "priority": 7,
+        },
+        "MarketWatch": {
+            "url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines",
+            "icon": "⌚",
+            "priority": 6,
+        },
+        "MyFXBook": {
+            "url": "https://www.myfxbook.com/rss/forex-news-rss",
+            "icon": "📒",
+            "priority": 7,
+        },
+        "ForexFactory": {
+            "url": "https://www.forexfactory.com/ff_calendar.php?week=this&ctype=impact&timezone=NY&format=xml",
+            "icon": "🏭",
+            "priority": 7,
+        },
+    }
+
+    # Which RSS sources are relevant for each symbol
+    SYMBOL_RSS_MAP: Dict[str, List[str]] = {
+        "XAUUSD": ["Reuters", "FXStreet", "Investing.com Commodities", "MyFXBook", "ForexFactory"],
+        "BTCUSD": ["CoinDesk", "Investing.com Crypto", "Reuters"],
+        "ETHUSD": ["CoinDesk", "Investing.com Crypto", "Reuters"],
+        "EURUSD": ["FXStreet", "Reuters", "Investing.com Forex", "MyFXBook", "ForexFactory"],
+        "GBPUSD": ["FXStreet", "Reuters", "Investing.com Forex", "MyFXBook"],
+        "USDJPY": ["FXStreet", "Reuters", "Investing.com Forex", "MyFXBook"],
+        "SPX500": ["MarketWatch", "Reuters", "Financial Times", "Investing.com Commodities"],
+        "NAS100": ["MarketWatch", "Reuters", "Financial Times"],
     }
     
     def __init__(self):
@@ -115,33 +188,152 @@ class UnifiedNewsService:
     def _fetch_all_sources_parallel(self, symbol: str, keywords: List[str]) -> List[Dict]:
         """
         Fetch from all sources in parallel using ThreadPoolExecutor.
+        Uses as_completed() so fast sources are not blocked by slow ones.
+        Includes direct RSS feeds in addition to existing sources.
         """
         all_results = []
-        
-        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+        relevant_rss = self.SYMBOL_RSS_MAP.get(symbol, list(self.RSS_FEEDS.keys())[:4])
+
+        max_workers = self._max_workers + len(relevant_rss)
+
+        # Sources that use Google News RSS are unreliable (often blocked).
+        # Only include them if the direct RSS sources are insufficient.
+        _google_news_sources = {"forexcom", "google"}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
-            
+
             if self.newsapi_key:
                 futures[executor.submit(self._fetch_newsapi, keywords)] = "newsapi"
-            
+
+            # Google News RSS — skip silently if key-less scraping is blocked
             futures[executor.submit(self._fetch_forexcom_news, keywords)] = "forexcom"
             futures[executor.submit(self._fetch_google_news, keywords, symbol)] = "google"
-            
+
             if self.marketaux_api_key:
                 futures[executor.submit(self._fetch_marketaux, symbol)] = "marketaux"
-            
-            for future in futures:
-                source = futures[future]
-                try:
-                    items = future.result(timeout=8)
-                    if items:
-                        for item in items:
-                            item["_source"] = source
-                        all_results.extend(items)
-                except Exception as e:
-                    print(f"[UnifiedNews] {source} failed: {e}")
-        
+
+            # Direct RSS feeds for this symbol
+            for src_name in relevant_rss:
+                feed_cfg = self.RSS_FEEDS.get(src_name, {})
+                feed_url = feed_cfg.get("url", "")
+                if feed_url:
+                    futures[executor.submit(
+                        self._fetch_rss_direct, src_name, feed_url, keywords
+                    )] = f"rss_{src_name}"
+
+            # Use as_completed so fast sources return immediately; 20s total budget
+            try:
+                for future in as_completed(futures, timeout=20):
+                    source = futures[future]
+                    try:
+                        items = future.result()   # already done — no extra wait
+                        if items:
+                            for item in items:
+                                item["_source"] = source
+                            all_results.extend(items)
+                    except Exception as e:
+                        exc_type = type(e).__name__
+                        # Silently skip unreliable Google-News scraping failures
+                        if source in _google_news_sources:
+                            pass
+                        else:
+                            msg = str(e) or exc_type
+                            print(f"[UnifiedNews] {source} failed ({exc_type}): {msg}")
+            except TimeoutError:
+                # Some futures exceeded the 20s wall-clock budget — return what we have
+                print(f"[UnifiedNews] Partial timeout — returning {len(all_results)} items collected so far")
+
         return all_results
+
+    def _fetch_rss_direct(
+        self, source_name: str, url: str, keywords: List[str]
+    ) -> List[Dict]:
+        """
+        Fetch and parse an RSS/Atom feed directly using feedparser.
+
+        Requires `feedparser>=6.0.0` (added to requirements.txt).
+        Returns [] gracefully if feedparser is not installed or the feed is unreachable.
+
+        Args:
+            source_name: Human-readable label shown in the UI
+            url:         RSS/Atom feed URL
+            keywords:    Filter articles to those containing at least one keyword
+                         in title or summary
+
+        Returns:
+            List of news item dicts in the standard UnifiedNewsService format.
+        """
+        try:
+            import feedparser
+        except ImportError:
+            print("[UnifiedNews] feedparser not installed — skipping direct RSS")
+            return []
+
+        try:
+            from datetime import datetime, timedelta
+
+            feed = feedparser.parse(url)
+            if not feed.entries:
+                return []
+
+            cutoff = datetime.now() - timedelta(days=3)
+            kw_lower = [k.lower() for k in keywords]
+            icon = self.RSS_FEEDS.get(source_name, {}).get("icon", "📰")
+            news_items = []
+
+            for entry in feed.entries[:20]:
+                title = getattr(entry, "title", "") or ""
+                if not title or len(title) < 20:
+                    continue
+
+                # Keyword filter — match in title or summary
+                summary = getattr(entry, "summary", "") or ""
+                combined = (title + " " + summary).lower()
+                if kw_lower and not any(kw in combined for kw in kw_lower):
+                    continue
+
+                # Recency filter
+                published = getattr(entry, "published_parsed", None)
+                if published:
+                    try:
+                        import time as _time
+                        pub_dt = datetime.fromtimestamp(_time.mktime(published))
+                        if pub_dt < cutoff:
+                            continue
+                        time_ago_str = self._parse_pubdate(
+                            entry.get("published", "")
+                        )
+                    except Exception:
+                        time_ago_str = "Live"
+                else:
+                    time_ago_str = "Live"
+
+                link = getattr(entry, "link", "") or ""
+                pubdate_raw = getattr(entry, "published", "") or ""
+
+                sentiment_result = self._analyze_with_cache(title)
+                impact = self._analyze_impact(title)
+
+                news_items.append({
+                    "headline": title[:250],
+                    "sentiment": sentiment_result["score"],
+                    "sentiment_label": sentiment_result["sentiment"],
+                    "confidence": sentiment_result["confidence"],
+                    "impact": impact,
+                    "time_ago": time_ago_str,
+                    "source": source_name,
+                    "source_icon": icon,
+                    "url": link,
+                    "impact_timing": "Market hours",
+                    "pubdate": pubdate_raw,
+                })
+
+            return news_items
+
+        except Exception as exc:
+            print(f"[UnifiedNews] RSS {source_name} error: {exc}")
+            return []
     
     def _deduplicate_and_rank(self, items: List[Dict]) -> List[Dict]:
         """
@@ -233,8 +425,10 @@ class UnifiedNewsService:
             
             response = requests.get(url, params=params, timeout=10)
             if response.status_code != 200:
+                err = response.json().get("message", response.text[:100]) if response.content else ""
+                print(f"[UnifiedNews] NewsAPI HTTP {response.status_code}: {err}")
                 return []
-            
+
             data = response.json()
             articles = data.get("articles", [])
             
@@ -277,8 +471,8 @@ class UnifiedNewsService:
             
             # Google News doesn't support date filtering directly, but we filter after
             url = f"https://news.google.com/rss/search?q=site:forex.com+{query}&hl=en-US&gl=US&ceid=US:en"
-            
-            response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+
+            response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=6)
             if response.status_code != 200:
                 return []
             
@@ -348,7 +542,7 @@ class UnifiedNewsService:
             for source_domain in sources[:3]:
                 try:
                     url = f"https://news.google.com/rss/search?q=site:{source_domain}+{query}&hl=en-US&gl=US&ceid=US:en"
-                    response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
+                    response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
                     
                     if response.status_code != 200:
                         continue
@@ -402,18 +596,27 @@ class UnifiedNewsService:
             return []
     
     def _fetch_marketaux(self, symbol: str) -> List[Dict]:
-        """Fetch from Marketaux API."""
+        """Fetch from Marketaux API (tries both api_token and api_key auth styles)."""
         try:
             url = "https://api.marketaux.com/v1/news/all"
-            params = {
-                "api_key": self.marketaux_api_key,
+            base_params = {
                 "symbols": symbol,
                 "limit": 10,
-                "sort": "published_at:desc"
+                "sort": "published_at:desc",
+                "language": "en",
             }
-            
+
+            # Try newer 'api_token' style first (current plans)
+            params = {**base_params, "api_token": self.marketaux_api_key}
             response = requests.get(url, params=params, timeout=10)
+
+            if response.status_code == 401:
+                # Fall back to legacy 'api_key' style
+                params = {**base_params, "api_key": self.marketaux_api_key}
+                response = requests.get(url, params=params, timeout=10)
+
             if response.status_code != 200:
+                print(f"[UnifiedNews] Marketaux returned {response.status_code} — skipping")
                 return []
             
             data = response.json()

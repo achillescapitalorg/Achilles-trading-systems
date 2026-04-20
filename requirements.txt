@@ -42,3 +42,9 @@ tokenizers>=0.13.0
 # Optional: Advanced Quant Finance
 # QuantLib>=1.30  # Uncomment if you need advanced options pricing
 
+# Claude AI (Anthropic) - primary AI backend
+anthropic>=0.40.0
+
+# RSS feed parsing - for new news sources
+feedparser>=6.0.0
+

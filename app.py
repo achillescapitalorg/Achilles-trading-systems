@@ -150,13 +150,26 @@ def fetch_yahoo_finance_data(symbol, period="5d", interval="15m"):
             return generate_fallback_data(symbol)
 
         df = df.reset_index()
-        
+
         # Handle column renaming safely
+        # yfinance ≥0.2.40 may return MultiIndex columns like ('Close', 'BTC-USD')
+        # Flatten them to single-level lowercase strings first.
         try:
-            df.columns = df.columns.str.lower()
-        except:
-            # If column renaming fails, create new dataframe
-            df = pd.DataFrame(df.values, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'][:len(df.columns)])
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [
+                    str(col[0]).lower() if isinstance(col, tuple) else str(col).lower()
+                    for col in df.columns
+                ]
+            else:
+                df.columns = [str(c).lower() for c in df.columns]
+        except Exception:
+            try:
+                df.columns = df.columns.str.lower()
+            except Exception:
+                df = pd.DataFrame(
+                    df.values,
+                    columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'][:len(df.columns)]
+                )
 
         # Handle datetime column
         if 'date' in df.columns:
@@ -1720,6 +1733,390 @@ def calculate_rsi_safe(prices, period=14):
         return None
 
 
+def calculate_smma(prices, period):
+    """
+    Calculate Smoothed Moving Average (SMMA / RMA).
+
+    SMMA(t) = (SMMA(t-1) * (period - 1) + price(t)) / period
+    This is identical to Wilder's smoothing (alpha = 1/period),
+    the same smoothing used in RSI.  Unlike EMA (alpha=2/(n+1)),
+    SMMA reacts more slowly, making it ideal for trend filtering.
+
+    Returns a pandas Series aligned with the input index, or None on error.
+    """
+    try:
+        prices = prices.dropna()
+        if len(prices) < period:
+            return None
+        smma = prices.ewm(alpha=1.0 / period, adjust=False).mean()
+        return smma
+    except Exception:
+        return None
+
+
+def calculate_smma_signals(df, timeframe="1m"):
+    """
+    Core XAUUSD SMMA strategy engine.
+
+    Periods: 3 (fast), 9 (medium), 40 (slow), 75 (trend anchor).
+
+    Buy trigger:  price touches / bounces off SMMA-3, 9 or 40 AND trend is UP
+    Sell trigger: price touches / bounces off SMMA-3, 9 or 40 AND trend is DOWN
+
+    Trend verification uses three independent mechanisms:
+      1. Hurst exponent  (H > 0.55 → persistent trend)
+      2. SMMA alignment  (3 > 9 > 40 > 75 → uptrend;  3 < 9 < 40 < 75 → downtrend)
+      3. Price vs SMMA-75 (price above → bullish bias; below → bearish)
+
+    Returns dict with keys: signal, strength, smma3, smma9, smma40, smma75,
+                            trend, hurst, hurst_conf, touch_level, details
+    """
+    result = {
+        "signal": "HOLD",
+        "strength": "WEAK",
+        "smma3": None,
+        "smma9": None,
+        "smma40": None,
+        "smma75": None,
+        "trend": "SIDEWAYS",
+        "hurst": 0.5,
+        "hurst_conf": 0.0,
+        "touch_level": None,
+        "details": [],
+    }
+
+    try:
+        if df is None or len(df) < 80:
+            result["details"].append("Insufficient data (need 80+ bars)")
+            return result
+
+        closes = df["close"].dropna()
+        if len(closes) < 80:
+            result["details"].append("Insufficient close data")
+            return result
+
+        # ── Calculate all four SMMAs ──────────────────────────────────────
+        s3  = calculate_smma(closes, 3)
+        s9  = calculate_smma(closes, 9)
+        s40 = calculate_smma(closes, 40)
+        s75 = calculate_smma(closes, 75)
+
+        if any(x is None for x in [s3, s9, s40, s75]):
+            result["details"].append("SMMA calculation failed")
+            return result
+
+        v3  = float(s3.iloc[-1])
+        v9  = float(s9.iloc[-1])
+        v40 = float(s40.iloc[-1])
+        v75 = float(s75.iloc[-1])
+        price = float(closes.iloc[-1])
+
+        result["smma3"]  = v3
+        result["smma9"]  = v9
+        result["smma40"] = v40
+        result["smma75"] = v75
+
+        # ── Trend verification 1: SMMA stack alignment ───────────────────
+        aligned_up   = v3 > v9 > v40 > v75
+        aligned_down = v3 < v9 < v40 < v75
+        stack_trend  = "UP" if aligned_up else ("DOWN" if aligned_down else "MIXED")
+
+        # ── Trend verification 2: Price vs SMMA-75 ───────────────────────
+        price_vs_75 = "ABOVE" if price > v75 else "BELOW"
+
+        # ── Trend verification 3: Hurst exponent ─────────────────────────
+        returns = closes.pct_change().dropna().values
+        hurst, hurst_conf = calculate_hurst_exponent(returns, min_lag=5, max_lag=min(40, len(returns) // 3))
+        result["hurst"]      = round(hurst, 3)
+        result["hurst_conf"] = round(hurst_conf, 3)
+
+        hurst_trending = hurst > 0.55      # persistent / trending
+        hurst_reverting = hurst < 0.45     # mean-reverting
+
+        # ── Composite trend verdict ───────────────────────────────────────
+        up_votes = sum([
+            stack_trend == "UP",
+            price_vs_75 == "ABOVE",
+            hurst_trending,
+        ])
+        down_votes = sum([
+            stack_trend == "DOWN",
+            price_vs_75 == "BELOW",
+            hurst_trending,          # trending but downward
+        ])
+
+        if aligned_up and price_vs_75 == "ABOVE":
+            trend = "UP"
+        elif aligned_down and price_vs_75 == "BELOW":
+            trend = "DOWN"
+        else:
+            trend = "SIDEWAYS"
+
+        result["trend"] = trend
+        result["details"].append(f"SMMA stack: {stack_trend}")
+        result["details"].append(f"Price vs SMMA-75: {price_vs_75}")
+        result["details"].append(f"Hurst H={hurst:.3f} ({'trending' if hurst_trending else 'mean-rev' if hurst_reverting else 'random'})")
+
+        # ── Price-touch detection ─────────────────────────────────────────
+        # A "touch" = price within 0.15% of the SMMA level (adjustable)
+        tol_pct = 0.0015   # 0.15% tolerance
+        touches = {}
+        for label, val in [("SMMA-3", v3), ("SMMA-9", v9), ("SMMA-40", v40), ("SMMA-75", v75)]:
+            if abs(price - val) / val <= tol_pct:
+                touches[label] = val
+
+        # Also detect recent crossover (price crossed SMMA in last 2 bars)
+        if len(closes) >= 3:
+            prev_price = float(closes.iloc[-2])
+            for label, smma_series, val in [
+                ("SMMA-3", s3, v3), ("SMMA-9", s9, v9),
+                ("SMMA-40", s40, v40), ("SMMA-75", s75, v75)
+            ]:
+                prev_smma = float(smma_series.iloc[-2])
+                if (prev_price < prev_smma and price >= val) or (prev_price > prev_smma and price <= val):
+                    touches[f"{label}(cross)"] = val
+
+        # ── Signal generation ─────────────────────────────────────────────
+        # Only generate directional signal when trend is clear and there's a touch
+        if touches and trend == "UP":
+            touch_label = list(touches.keys())[0]
+            # Stronger signal if touching a slower SMMA in uptrend (deeper support)
+            if any("SMMA-40" in k or "SMMA-75" in k for k in touches):
+                strength = "STRONG"
+            elif any("SMMA-9" in k for k in touches):
+                strength = "MODERATE"
+            else:
+                strength = "WEAK"
+            result["signal"]      = "BUY"
+            result["strength"]    = strength
+            result["touch_level"] = touch_label
+            result["details"].append(f"Price touched {touch_label} in UP trend → BUY")
+
+        elif touches and trend == "DOWN":
+            touch_label = list(touches.keys())[0]
+            if any("SMMA-40" in k or "SMMA-75" in k for k in touches):
+                strength = "STRONG"
+            elif any("SMMA-9" in k for k in touches):
+                strength = "MODERATE"
+            else:
+                strength = "WEAK"
+            result["signal"]      = "SELL"
+            result["strength"]    = strength
+            result["touch_level"] = touch_label
+            result["details"].append(f"Price touched {touch_label} in DOWN trend → SELL")
+
+        elif not touches and trend in ("UP", "DOWN"):
+            # Trend is clear but price not at a level — wait
+            result["signal"]   = "HOLD"
+            result["strength"] = "MODERATE"
+            result["details"].append(f"Trend={trend}, no SMMA touch yet — wait for pullback")
+
+        else:
+            result["details"].append("Mixed signals — stand aside")
+
+    except Exception as exc:
+        result["details"].append(f"Error: {exc}")
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Order-book / momentum / volatility helpers (used by SMMA Strategy page)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def calculate_atr_wilder(df, period=14):
+    """
+    Wilder's Average True Range (exponential smoothing, alpha=1/period).
+    Returns a pandas Series aligned with df.index, or None on error.
+    """
+    try:
+        if len(df) < period + 1:
+            return None
+        high  = df["high"]
+        low   = df["low"]
+        close = df["close"]
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low  - close.shift()).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1.0 / period, adjust=False).mean()
+        return atr
+    except Exception:
+        return None
+
+
+def calculate_vwap(df):
+    """
+    Session VWAP reset at the start of each calendar day.
+    Returns a pandas Series aligned with df.index, or None on error.
+    """
+    try:
+        if "volume" not in df.columns or len(df) < 2:
+            return None
+        typical = (df["high"] + df["low"] + df["close"]) / 3
+        # Tag each row with its date so we can reset per session
+        dates = pd.to_datetime(df["timestamp"]).dt.date
+        cumtp_vol = (typical * df["volume"]).groupby(dates).cumsum()
+        cumvol    = df["volume"].groupby(dates).cumsum()
+        vwap = cumtp_vol / cumvol.replace(0, np.nan)
+        vwap.index = df.index
+        return vwap
+    except Exception:
+        return None
+
+
+def calculate_mfi(df, period=14):
+    """
+    Money Flow Index — volume-weighted RSI.
+    Returns latest scalar value or None.
+    """
+    try:
+        if len(df) < period + 1:
+            return None
+        tp  = (df["high"] + df["low"] + df["close"]) / 3
+        rmf = tp * df["volume"]          # raw money flow
+        pos = rmf.where(tp > tp.shift(), 0.0)
+        neg = rmf.where(tp < tp.shift(), 0.0)
+        pos_roll = pos.rolling(period).sum()
+        neg_roll = neg.rolling(period).sum()
+        mfr = pos_roll / neg_roll.replace(0, np.nan)
+        mfi = 100 - (100 / (1 + mfr))
+        return float(mfi.iloc[-1])
+    except Exception:
+        return None
+
+
+def calculate_volume_delta(df):
+    """
+    Estimate buy/sell pressure per bar using the Close-Location Value:
+        buy_vol  = volume × (close − low) / (high − low)
+        sell_vol = volume × (high − close) / (high − low)
+        delta    = buy_vol − sell_vol
+
+    Returns a DataFrame with columns: buy_vol, sell_vol, delta, cum_delta
+    or None on error.
+    """
+    try:
+        hl = (df["high"] - df["low"]).replace(0, np.nan)
+        buy_vol  = df["volume"] * (df["close"] - df["low"])  / hl
+        sell_vol = df["volume"] * (df["high"]  - df["close"]) / hl
+        buy_vol  = buy_vol.fillna(df["volume"] / 2)
+        sell_vol = sell_vol.fillna(df["volume"] / 2)
+        delta    = buy_vol - sell_vol
+        return pd.DataFrame({
+            "buy_vol":   buy_vol,
+            "sell_vol":  sell_vol,
+            "delta":     delta,
+            "cum_delta": delta.cumsum(),
+        }, index=df.index)
+    except Exception:
+        return None
+
+
+def calculate_volume_profile(df, n_levels=30):
+    """
+    Build a Volume Profile (Price-At-Volume histogram) from OHLCV bars.
+
+    Each bar's volume is distributed linearly across the price range
+    [low, high] into n_levels price buckets.  This approximates where
+    orders were executed and is the standard synthetic substitute for
+    real Level-2 order book data when only OHLCV is available.
+
+    Returns a dict with:
+        price_levels  : np.ndarray  — centre price of each bucket
+        volumes       : np.ndarray  — total volume at that price bucket
+        poc_price     : float       — Point of Control (highest-volume level)
+        poc_volume    : float
+        vah           : float       — Value Area High  (top of 70% volume band)
+        val           : float       — Value Area Low
+        value_area_pct: float       — fraction of volume inside value area
+    or None on error.
+    """
+    try:
+        if df is None or len(df) < 10:
+            return None
+
+        price_min = float(df["low"].min())
+        price_max = float(df["high"].max())
+        if price_max <= price_min:
+            return None
+
+        bucket_size = (price_max - price_min) / n_levels
+        levels = np.linspace(price_min + bucket_size / 2,
+                             price_max - bucket_size / 2, n_levels)
+        volumes = np.zeros(n_levels)
+
+        for _, row in df.iterrows():
+            lo, hi, vol = row["low"], row["high"], row["volume"]
+            if hi == lo:
+                # All volume at close
+                idx = min(int((row["close"] - price_min) / bucket_size), n_levels - 1)
+                volumes[idx] += vol
+            else:
+                # Distribute uniformly across price range touched by this bar
+                lo_idx = max(0, int((lo - price_min) / bucket_size))
+                hi_idx = min(n_levels - 1, int((hi - price_min) / bucket_size))
+                span = hi_idx - lo_idx + 1
+                for i in range(lo_idx, hi_idx + 1):
+                    volumes[i] += vol / span
+
+        poc_idx = int(np.argmax(volumes))
+        poc_price  = float(levels[poc_idx])
+        poc_volume = float(volumes[poc_idx])
+
+        # Value Area: accumulate from POC outward until 70% of total volume
+        total_vol = volumes.sum()
+        target    = total_vol * 0.70
+        accumulated = volumes[poc_idx]
+        lo_idx = hi_idx = poc_idx
+        while accumulated < target and (lo_idx > 0 or hi_idx < n_levels - 1):
+            add_lo = volumes[lo_idx - 1] if lo_idx > 0 else 0
+            add_hi = volumes[hi_idx + 1] if hi_idx < n_levels - 1 else 0
+            if add_lo >= add_hi and lo_idx > 0:
+                lo_idx -= 1
+                accumulated += add_lo
+            elif hi_idx < n_levels - 1:
+                hi_idx += 1
+                accumulated += add_hi
+            else:
+                lo_idx -= 1
+                accumulated += add_lo
+
+        return {
+            "price_levels":   levels,
+            "volumes":        volumes,
+            "poc_price":      poc_price,
+            "poc_volume":     poc_volume,
+            "vah":            float(levels[hi_idx]),
+            "val":            float(levels[lo_idx]),
+            "value_area_pct": float(accumulated / total_vol),
+        }
+    except Exception:
+        return None
+
+
+def calculate_keltner_channel(df, ema_period=20, atr_period=10, multiplier=2.0):
+    """
+    Keltner Channel: EMA ± multiplier × ATR(Wilder).
+    Returns dict with upper, middle, lower (latest values), or None.
+    """
+    try:
+        if len(df) < max(ema_period, atr_period) + 5:
+            return None
+        ema = df["close"].ewm(span=ema_period, adjust=False).mean()
+        atr = calculate_atr_wilder(df, atr_period)
+        if atr is None:
+            return None
+        return {
+            "upper":  float(ema.iloc[-1] + multiplier * atr.iloc[-1]),
+            "middle": float(ema.iloc[-1]),
+            "lower":  float(ema.iloc[-1] - multiplier * atr.iloc[-1]),
+        }
+    except Exception:
+        return None
+
+
 def calculate_macd_safe(prices, fast=12, slow=26, signal_period=9):
     """Calculate MACD with error handling."""
     try:
@@ -1959,6 +2356,12 @@ app.layout = dbc.Container(fluid=True, children=[
             dbc.Nav([
                 dbc.NavLink("Dashboard", href="/", active="exact", style={"color": COLORS["text"], "fontSize": "12px"}),
                 dbc.NavLink("News", href="/news", active="exact", style={"color": COLORS["text"], "fontSize": "12px"}),
+                dbc.NavLink(
+                    [html.Span("⚡", style={"marginRight": "4px"}), "SMMA Strategy"],
+                    href="/strategy",
+                    active="exact",
+                    style={"color": COLORS["accent"], "fontSize": "12px", "fontWeight": "bold"},
+                ),
             ], style={"marginLeft": "auto"}),
         ]),
         color=COLORS["surface"],
@@ -1975,6 +2378,7 @@ app.layout = dbc.Container(fluid=True, children=[
     dcc.Store(id="selected-symbol", data="XAUUSD"),
     dcc.Store(id="current-price", data=0),
     dcc.Store(id="news-refresh-trigger", data=None),  # Triggers news refresh
+    dcc.Store(id="market-context-cache", data=None),  # Cached market context for AI
 ])
 
 
@@ -2045,6 +2449,7 @@ def get_dashboard_layout():
                             dcc.Dropdown(
                                 id="timeframe-selector",
                                 options=[
+                                    {"label": "1m", "value": "1m"},
                                     {"label": "5m", "value": "5m"},
                                     {"label": "15m", "value": "15m"},
                                     {"label": "1h", "value": "1h"},
@@ -2371,6 +2776,9 @@ def render_page(pathname):
     if pathname == "/news":
         from pages.news import layout as news_layout
         return news_layout
+    if pathname == "/strategy":
+        from pages.smma_strategy import layout as strategy_layout
+        return strategy_layout
     return get_dashboard_layout()
 
 
@@ -4993,68 +5401,156 @@ def generate_keyword_response(question: str, symbol: str) -> str:
     prevent_initial_call=True
 )
 def update_ai_chat(n_clicks, symbol, user_message):
-    """Handle AI chat interactions using Ollama local LLM."""
+    """
+    Handle AI chat with full market context pipeline.
+
+    Fallback chain: Claude API → Ollama (with full context) → keyword engine
+    All platform data (indicators, Heston, Markov, GARCH, risk, MC, FinBERT news)
+    is assembled in parallel and fed to the AI before answering.
+    """
     if symbol is None:
         symbol = "XAUUSD"
-    
+
+    # --- Lazy imports (keeps startup fast) ---
     try:
         from services.local_ai_service import get_local_ai_service, get_ai_status
-    except ImportError as e:
-        return html.Div("AI service not available", style={"color": COLORS["danger"]}), "Install local_ai_service"
-    
+    except ImportError:
+        return html.Div("AI service not available", style={"color": COLORS["danger"]}), ""
+
+    from services.claude_service import get_claude_service
+
     ai_service = get_local_ai_service()
+    claude_service = get_claude_service()
     status = get_ai_status()
-    
+    claude_status = claude_service.get_status()
+
+    # --- Status bar ---
+    def _dot(ok):
+        return html.Span("✅" if ok else "❌", style={"fontSize": "10px"})
+
     status_html = dbc.Row([
         dbc.Col([
-            html.Span("🤖 FinBERT: ", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-            html.Span("✅" if status.get("finbert_available") else "❌", style={"fontSize": "10px"}),
+            html.Span("Claude: ", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            _dot(claude_status.get("claude_available")),
         ], width=3),
         dbc.Col([
-            html.Span("🦙 Ollama: ", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
-            html.Span("✅" if status.get("ollama_available") else "❌ (Install Ollama)", style={"fontSize": "10px"}),
-        ], width=6),
+            html.Span("FinBERT: ", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            _dot(status.get("finbert_available")),
+        ], width=3),
+        dbc.Col([
+            html.Span("Ollama: ", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            _dot(status.get("ollama_available")),
+        ], width=4),
     ], className="mb-2")
-    
+
     if not n_clicks or not user_message:
         return status_html, html.Div([
-            html.Span("💬 Ask me anything about the market!", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+            html.Span("Ask me anything about the market!", style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
             html.Br(),
-            html.Span("Example: Should I buy gold now? What affects BTC price?", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+            html.Span("Example: Should I buy gold now? What does the Heston model say?", style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
         ])
-    
+
     try:
-        result = ai_service.chat(user_message)
-        
-        print(f"[AI Chat] Result: success={result.get('success')}, error={result.get('error')}")
-        
-        if result.get("success"):
-            response_text = result.get("response", "No response")
-        else:
-            error = result.get("error", "Unknown error")
-            print(f"[AI Chat] Error: {error}")
-            
-            # Always use keyword-based fallback since Ollama is not installed
+        # --- Build full market context in parallel (8s deadline) ---
+        from services.market_context_builder import build_market_context, format_for_prompt
+        import concurrent.futures
+
+        context = None
+        formatted_prompt = ""
+        context_summary = "Minimal context (build timed out)"
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(build_market_context, symbol)
+            try:
+                context = fut.result(timeout=35)   # outer safety net (inner is 25s)
+                formatted_prompt = format_for_prompt(context)
+                sig_count = len(context.signals)
+                regime = context.markov.current_regime if context.markov else "N/A"
+                fb_sent = context.finbert_aggregation.dominant_sentiment if context.finbert_aggregation else "N/A"
+                context_summary = (
+                    f"Context built: {sig_count} signals, "
+                    f"regime={regime}, FinBERT={fb_sent}, "
+                    f"news={len(context.news_items)} articles"
+                )
+            except concurrent.futures.TimeoutError:
+                print(f"[AI Chat] Context build timed out for {symbol}")
+                formatted_prompt = f"Symbol: {symbol}\nCurrent price: {get_current_price(symbol):,.4f}"
+                context_summary = "Minimal context (timeout)"
+
+        # --- Fallback chain ---
+        result = None
+        used_source = "keyword"
+
+        # 1. Claude (primary — only if API key is configured)
+        if claude_service.is_available() and context is not None:
+            result = claude_service.chat_with_context(user_message, context, formatted_prompt)
+            if result.get("success"):
+                used_source = "claude"
+            else:
+                print(f"[AI Chat] Claude failed: {result.get('error')}")
+                result = None
+
+        # 2. Ollama with full context (fallback)
+        if result is None and status.get("ollama_available"):
+            if context is not None:
+                result = ai_service.ollama.analyze_market_with_context(
+                    symbol, context, formatted_prompt
+                )
+            else:
+                result = ai_service.chat(user_message)
+            if result.get("success"):
+                used_source = "ollama"
+            else:
+                result = None
+
+        # 3. Keyword engine (last resort)
+        if result is None or not result.get("success"):
             response_text = generate_keyword_response(user_message, symbol)
-            response_text += "\n\n💡 Install Ollama for smarter AI responses: curl -fsSL https://ollama.com/install.sh"
-        
+            response_text += (
+                "\n\nTo enable AI analysis: set ANTHROPIC_API_KEY in .env "
+                "or run Ollama locally."
+            )
+            used_source = "keyword"
+        else:
+            response_text = result.get("response", "No response")
+
+        # --- Render ---
+        source_color = {
+            "claude": COLORS["accent"],
+            "ollama": COLORS.get("info", "#00d4ff"),
+            "keyword": COLORS.get("warning", "#ffa502"),
+        }.get(used_source, COLORS["text"])
+        source_label = {
+            "claude": "Claude AI",
+            "ollama": "Ollama LLM",
+            "keyword": "Keyword Engine",
+        }.get(used_source, "AI")
+
         return status_html, html.Div([
             html.Div([
                 html.Span("You: ", style={"color": COLORS["accent"], "fontWeight": "bold", "fontSize": "11px"}),
                 html.Span(user_message, style={"color": COLORS["text"], "fontSize": "11px"}),
             ], className="mb-2"),
-            html.Hr(style={"margin": "10px 0", "borderColor": COLORS["border"]}),
+            html.Small(
+                context_summary,
+                style={"color": COLORS["text_secondary"], "fontSize": "9px",
+                       "display": "block", "marginBottom": "6px"},
+            ),
+            html.Hr(style={"margin": "8px 0", "borderColor": COLORS["border"]}),
             html.Div([
-                html.Span("AI: ", style={"color": COLORS["success"], "fontWeight": "bold", "fontSize": "11px"}),
+                html.Span(
+                    f"{source_label}: ",
+                    style={"color": source_color, "fontWeight": "bold", "fontSize": "11px"},
+                ),
                 html.Span(response_text, style={"color": COLORS["text"], "fontSize": "11px"}),
             ]),
         ])
-        
-    except Exception as e:
+
+    except Exception as exc:
         import traceback
-        print(f"AI chat error: {e}")
+        print(f"[AI Chat] error: {exc}")
         traceback.print_exc()
-        return status_html, html.Div(f"Error: {str(e)}", style={"color": COLORS["danger"]})
+        return status_html, html.Div(f"Error: {str(exc)}", style={"color": COLORS["danger"]})
 
 
 def run_monte_carlo_simulation(symbol, days, n_paths):
@@ -5482,6 +5978,9 @@ def update_unified_recommendation(symbol, n, pathname):
 
 # Start background news loading when app starts
 _init_background_news()
+
+# Register page callbacks eagerly so they are available before first navigation
+import pages.smma_strategy  # noqa: E402 — registers @callback for /strategy
 
 
 # Run the app

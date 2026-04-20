@@ -217,7 +217,7 @@ class OllamaClient:
             response = requests.post(
                 f"{self.base_url}/api/chat",
                 json=payload,
-                timeout=120
+                timeout=90    # llama3.2:1b on CPU takes ~25s even for short replies
             )
             
             print(f"[Ollama] Response status: {response.status_code}")
@@ -286,12 +286,54 @@ Keep your response concise and actionable."""
         
         return result
     
+    def analyze_market_with_context(
+        self,
+        symbol: str,
+        context,           # MarketContext — typed loosely to avoid circular import
+        formatted_prompt: str,
+    ) -> Dict:
+        """
+        Analyze market using the full MarketContext string already formatted by
+        market_context_builder.format_for_prompt().
+
+        This is the preferred method over analyze_market() because it receives
+        ALL platform data (indicators, Heston, Markov, GARCH, risk metrics,
+        Monte Carlo, FinBERT sentiment) rather than just 5 headlines.
+
+        Args:
+            symbol:           Trading symbol
+            context:          MarketContext dataclass (used for metadata)
+            formatted_prompt: Pre-built context block from format_for_prompt()
+
+        Returns:
+            Dict with: response (str), success (bool), error (str|None), source ("ollama")
+        """
+        # Use the compact prompt for Ollama (small local LLMs time out on long inputs)
+        try:
+            from services.market_context_builder import format_for_ollama_prompt
+            compact = format_for_ollama_prompt(context)
+        except Exception:
+            compact = formatted_prompt[:500]   # hard truncate as last resort
+
+        prompt = (
+            f"{compact}\n\n"
+            f"Give a short BUY/SELL/HOLD analysis for {symbol} based on the data above. "
+            f"3-4 sentences max."
+        )
+        result = self.generate(
+            prompt=prompt,
+            system_prompt="You are a concise trading analyst. Be brief and cite the numbers.",
+            max_tokens=250,
+        )
+        result["source"] = "ollama"
+        return result
+
     def answer_question(self, question: str, context: Optional[str] = None) -> Dict:
         """Answer a general trading question."""
         prompt = question
         if context:
             prompt = f"Context: {context}\n\nQuestion: {question}"
-        
+
         return self.generate(
             prompt=prompt,
             system_prompt="You are a helpful trading assistant. Answer questions about financial markets, trading, and investments."
