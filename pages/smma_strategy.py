@@ -25,7 +25,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import dash_bootstrap_components as dbc
-from dash import html, dcc, callback, Input, Output
+from dash import html, dcc, callback, Input, Output, State, Patch, no_update
 from datetime import datetime
 
 # ── Colour palette (matches main app) ────────────────────────────────────────
@@ -47,7 +47,20 @@ SMMA_COL = {"smma3": C["accent"], "smma9": C["info"],
             "smma40": C["warn"],  "smma75": C["danger"]}
 SIG_COL  = {"BUY": C["accent"], "SELL": C["danger"], "HOLD": C["warn"]}
 
-TF_PERIOD = {"1m": "1d", "5m": "5d", "15m": "5d"}
+_CRYPTO = {"BTCUSD", "ETHUSD"}
+_EQUITY = {"SPX500", "NAS100"}
+
+def _rangebreaks(symbol: str) -> list:
+    if symbol in _CRYPTO:
+        return []
+    breaks = [dict(bounds=["sat", "mon"])]
+    if symbol in _EQUITY:
+        breaks.append(dict(bounds=[16, 9.5], pattern="hour"))
+    else:
+        breaks.append(dict(bounds=[17, 18], pattern="hour"))
+    return breaks
+
+TF_PERIOD = {"1m": "5d", "5m": "5d", "15m": "5d"}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Layout helpers
@@ -576,9 +589,18 @@ def _fig_price(df, r, symbol, tf):
 
     ts = df["timestamp"] if "timestamp" in df.columns else df.index
 
+    # Categorical x-axis: string labels eliminate all overnight/weekend gaps
+    ts_pd = pd.to_datetime(ts)
+    if len(ts_pd) > 1:
+        _delta = (ts_pd.iloc[-1] - ts_pd.iloc[-2]).total_seconds()
+        _fmt = "%m/%d %H:%M" if _delta < 86400 else "%b %d"
+    else:
+        _fmt = "%b %d"
+    ts_str = ts_pd.dt.strftime(_fmt)
+
     # Row 1 — Candlestick
     fig.add_trace(go.Candlestick(
-        x=ts, open=df["open"], high=df["high"],
+        x=ts_str, open=df["open"], high=df["high"],
         low=df["low"], close=df["close"],
         name="Price",
         increasing_line_color=C["accent"],  decreasing_line_color=C["danger"],
@@ -592,13 +614,13 @@ def _fig_price(df, r, symbol, tf):
         s = r.get(key)
         if s is not None:
             lw = 2.2 if period in (40, 75) else 1.4
-            fig.add_trace(go.Scatter(x=ts, y=s, name=label, mode="lines",
+            fig.add_trace(go.Scatter(x=ts_str, y=s, name=label, mode="lines",
                                      line=dict(color=SMMA_COL[key], width=lw),
                                      opacity=0.9), row=1, col=1)
 
     # VWAP
     if r.get("vwap") is not None:
-        fig.add_trace(go.Scatter(x=ts, y=r["vwap"], name="VWAP", mode="lines",
+        fig.add_trace(go.Scatter(x=ts_str, y=r["vwap"], name="VWAP", mode="lines",
                                  line=dict(color=C["purple"], width=1.5, dash="dot"),
                                  opacity=0.8), row=1, col=1)
 
@@ -608,7 +630,7 @@ def _fig_price(df, r, symbol, tf):
         for band, lbl, dash in [("upper", "KC Up", "dash"),
                                  ("lower", "KC Lo", "dash"),
                                  ("middle","KC Mid","dot")]:
-            fig.add_trace(go.Scatter(x=ts, y=kc[band], name=lbl, mode="lines",
+            fig.add_trace(go.Scatter(x=ts_str, y=kc[band], name=lbl, mode="lines",
                                      line=dict(color=C["info"], width=1, dash=dash),
                                      opacity=0.45, showlegend=(band=="middle")),
                           row=1, col=1)
@@ -627,10 +649,11 @@ def _fig_price(df, r, symbol, tf):
     # Signal marker
     sig = r["signal"]
     if sig in ("BUY", "SELL"):
+        lr_idx = len(df) - 1
         lr = df.iloc[-1]
         my = lr["low"] * 0.9997 if sig == "BUY" else lr["high"] * 1.0003
         fig.add_trace(go.Scatter(
-            x=[lr["timestamp"]], y=[my],
+            x=[ts_str.iloc[lr_idx]], y=[my],
             mode="markers+text",
             marker=dict(symbol="triangle-up" if sig=="BUY" else "triangle-down",
                         size=16, color=SIG_COL[sig]),
@@ -642,9 +665,7 @@ def _fig_price(df, r, symbol, tf):
     # Row 2 — MFI
     mfi_s = _mfi(df, 14)
     if mfi_s is not None:
-        mfi_col = [C["danger"] if v > 80 else C["accent"] if v < 20
-                   else C["info"] for v in mfi_s]
-        fig.add_trace(go.Scatter(x=ts, y=mfi_s, name="MFI", mode="lines",
+        fig.add_trace(go.Scatter(x=ts_str, y=mfi_s, name="MFI", mode="lines",
                                  line=dict(color=C["info"], width=1.5)), row=2, col=1)
         for lvl, col in [(80, C["danger"]), (20, C["accent"]), (50, C["muted"])]:
             fig.add_hline(y=lvl, line=dict(color=col, width=0.8, dash="dot"), row=2, col=1)
@@ -652,7 +673,7 @@ def _fig_price(df, r, symbol, tf):
     # Row 3 — Volume bars
     vcol = [C["accent"] if c >= o else C["danger"]
             for c, o in zip(df["close"], df["open"])]
-    fig.add_trace(go.Bar(x=ts, y=df["volume"], name="Volume",
+    fig.add_trace(go.Bar(x=ts_str, y=df["volume"], name="Volume",
                          marker_color=vcol, opacity=0.7), row=3, col=1)
 
     fig.update_layout(
@@ -669,6 +690,7 @@ def _fig_price(df, r, symbol, tf):
                                         zerolinecolor=C["border"])})
     for row_n in (1, 2, 3):
         fig.update_yaxes(side="right", row=row_n, col=1)
+    fig.update_xaxes(nticks=8)
     return fig
 
 
@@ -744,13 +766,15 @@ def _fig_delta(df):
     if delta_df is None:
         return go.Figure(layout=dict(paper_bgcolor=C["bg"],
                                      plot_bgcolor=C["surface"]))
-    ts = df["timestamp"] if "timestamp" in df.columns else df.index
+    _ts = pd.to_datetime(df["timestamp"] if "timestamp" in df.columns else df.index)
+    _fmt = "%m/%d %H:%M" if len(_ts) > 1 and (_ts.iloc[-1] - _ts.iloc[-2]).total_seconds() < 86400 else "%b %d"
+    ts_str = _ts.dt.strftime(_fmt)
     dcol = [C["accent"] if v >= 0 else C["danger"] for v in delta_df["delta"]]
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Bar(x=ts, y=delta_df["delta"], name="Delta",
+    fig.add_trace(go.Bar(x=ts_str, y=delta_df["delta"], name="Delta",
                          marker_color=dcol, opacity=0.8), secondary_y=False)
-    fig.add_trace(go.Scatter(x=ts, y=delta_df["cum"], name="Cum Delta",
+    fig.add_trace(go.Scatter(x=ts_str, y=delta_df["cum"], name="Cum Delta",
                              line=dict(color=C["info"], width=1.5)),
                  secondary_y=True)
     fig.add_hline(y=0, line=dict(color=C["muted"], width=0.8))

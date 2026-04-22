@@ -45,6 +45,12 @@ class FinBERTSentiment:
             cls._loading = True
             
             try:
+                # Pre-import PIL submodules before transformers loads them to avoid
+                # circular-import race when multiple threads call _load_model
+                try:
+                    import PIL.Image, PIL.ImageFile  # noqa: F401
+                except ImportError:
+                    pass
                 import transformers
                 from transformers import pipeline
                 cls._model = pipeline(

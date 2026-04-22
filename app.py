@@ -4,6 +4,16 @@ Professional Trading Terminal - Dash Frontend
 A full-featured algorithmic trading dashboard built with Plotly Dash.
 Features real-time Yahoo Finance data, charts, and quantitative analysis.
 """
+# Pre-import PIL in the main thread before ThreadPoolExecutor starts background
+# threads — prevents "partially initialized module 'PIL.Image'" circular-import
+# race condition that occurs when transformers/torchvision import PIL concurrently.
+try:
+    import PIL.Image
+    import PIL.ImageFile
+    import PIL.JpegImagePlugin
+except ImportError:
+    pass
+
 import dash
 from dash import dcc, html, Input, Output, State, callback, ctx
 import plotly.graph_objects as go
@@ -50,7 +60,7 @@ API_URL = "http://localhost:8000"
 
 # Yahoo Finance symbol mapping
 YF_SYMBOLS = {
-    "XAUUSD": "GC=F",      # Gold futures
+    "XAUUSD": "GC=F",      # Gold front-month futures
     "BTCUSD": "BTC-USD",   # Bitcoin
     "ETHUSD": "ETH-USD",   # Ethereum
     "EURUSD": "EURUSD=X",  # EUR/USD
@@ -189,6 +199,16 @@ def fetch_yahoo_finance_data(symbol, period="5d", interval="15m"):
             if col not in df.columns:
                 return generate_fallback_data(symbol)
 
+        # Strip timezone so timestamps are naive local time — avoids Plotly UTC shift
+        try:
+            if df['timestamp'].dt.tz is not None:
+                df['timestamp'] = df['timestamp'].dt.tz_convert('America/New_York').dt.tz_localize(None)
+        except Exception:
+            try:
+                df['timestamp'] = df['timestamp'].dt.tz_localize(None)
+            except Exception:
+                pass
+
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
 
     except Exception as e:
@@ -241,11 +261,39 @@ def get_current_price(symbol):
     return base_prices.get(symbol, 100)
 
 
+_CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD"}
+_EQUITY_SYMBOLS = {"SPX500", "NAS100"}
+
+def _chart_rangebreaks(symbol: str) -> list:
+    """Return Plotly rangebreaks that remove non-trading periods for a symbol."""
+    if symbol in _CRYPTO_SYMBOLS:
+        return []  # crypto trades 24/7
+    breaks = [dict(bounds=["sat", "mon"])]  # weekends for all non-crypto
+    if symbol in _EQUITY_SYMBOLS:
+        # US equities: remove overnight 4pm–9:30am
+        breaks.append(dict(bounds=[16, 9.5], pattern="hour"))
+    else:
+        # Metals/forex: 1-hour daily settlement break 5pm–6pm ET
+        breaks.append(dict(bounds=[17, 18], pattern="hour"))
+    return breaks
+
+
 def create_candlestick_chart(df, symbol):
     """Create a candlestick chart with volume - Black Theme with TradingView-like controls."""
     current_price = df['close'].iloc[-1] if not df.empty else 0
     price_change = df['close'].iloc[-1] - df['open'].iloc[0] if len(df) > 1 else 0
     price_change_pct = (price_change / df['open'].iloc[0] * 100) if df['open'].iloc[0] != 0 else 0
+
+    # Categorical x-axis: format timestamps as strings so Plotly spaces bars
+    # equidistantly — this eliminates all overnight/weekend gaps automatically.
+    ts = pd.to_datetime(df["timestamp"])
+    n_bars = len(ts)
+    if n_bars > 1:
+        delta_sec = (ts.iloc[-1] - ts.iloc[-2]).total_seconds()
+        fmt = "%m/%d %H:%M" if delta_sec < 86400 else "%b %d"
+    else:
+        fmt = "%b %d"
+    x_cat = ts.dt.strftime(fmt)
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -258,7 +306,7 @@ def create_candlestick_chart(df, symbol):
     # Candlestick
     fig.add_trace(
         go.Candlestick(
-            x=df["timestamp"],
+            x=x_cat,
             open=df["open"],
             high=df["high"],
             low=df["low"],
@@ -279,7 +327,7 @@ def create_candlestick_chart(df, symbol):
               for o, c in zip(df["open"], df["close"])]
     fig.add_trace(
         go.Bar(
-            x=df["timestamp"],
+            x=x_cat,
             y=df["volume"],
             name="Volume",
             marker_color=colors,
@@ -324,6 +372,7 @@ def create_candlestick_chart(df, symbol):
         showgrid=True,
         gridwidth=0.5,
         rangeslider=dict(visible=False),
+        nticks=10,
     )
 
     fig.update_yaxes(
@@ -2859,8 +2908,8 @@ def update_price_chart(symbol, n, timeframe):
         symbol = "XAUUSD"
 
     # Map timeframe to Yahoo Finance period
-    period_map = {"5m": "1d", "15m": "5d", "1h": "1mo", "4h": "3mo", "1D": "1y"}
-    interval_map = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "1d", "1D": "1d"}
+    period_map = {"1m": "2d", "5m": "1d", "15m": "5d", "1h": "1mo", "4h": "3mo", "1D": "1y"}
+    interval_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "1d", "1D": "1d"}
 
     period = period_map.get(timeframe, "5d")
     interval = interval_map.get(timeframe, "15m")

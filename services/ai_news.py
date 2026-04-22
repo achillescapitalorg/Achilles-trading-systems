@@ -2,26 +2,56 @@
 Intelligent News Service - Unified News Aggregator
 ================================================
 Features:
-- Parallel fetching from multiple sources
-- Deduplication by headline similarity
+- Parallel fetching from multiple sources (RSS, yfinance, Alpha Vantage, NewsAPI, Marketaux)
+- Jaccard token deduplication (faster than SequenceMatcher at scale)
+- Recency bonus + relevance scoring for smarter ranking
 - Batch sentiment analysis with caching
 - Fallback chain with graceful degradation
 """
 import os
 import json
 import time
+import calendar
 import requests
 import threading
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from difflib import SequenceMatcher
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from services.local_ai_service import analyze_sentiment, get_local_ai_service
+
+
+def _jaccard(a: str, b: str) -> float:
+    """Token-based Jaccard similarity — faster than SequenceMatcher for dedup."""
+    sa, sb = set(a.lower().split()), set(b.lower().split())
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def _relevance(text: str, keywords: List[str]) -> float:
+    """Keyword density score 0–2 added to source priority during ranking."""
+    if not keywords or not text:
+        return 0.0
+    t = text.lower()
+    hits = sum(1 for kw in keywords if kw.lower() in t)
+    return min(hits / max(len(keywords), 1) * 2, 2.0)
+
+
+_YF_TICKER_MAP: Dict[str, str] = {
+    "XAUUSD": "GC=F",
+    "BTCUSD": "BTC-USD",
+    "ETHUSD": "ETH-USD",
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "JPY=X",
+    "SPX500": "^GSPC",
+    "NAS100": "^NDX",
+}
 
 
 class UnifiedNewsService:
@@ -78,93 +108,147 @@ class UnifiedNewsService:
         "ForexFactory": 7,
     }
 
-    # Direct RSS feed configuration
-    # url: primary feed URL; icon, priority match SOURCE_ICONS/PRIORITY above
+    # Direct RSS feed configuration — 21 feeds
     RSS_FEEDS: Dict[str, Dict] = {
         "Reuters": {
             "url": "https://feeds.reuters.com/reuters/businessNews",
-            "icon": "📰",
-            "priority": 10,
+            "icon": "📰", "priority": 10,
         },
         "Financial Times": {
             "url": "https://www.ft.com/rss/home/uk",
-            "icon": "📊",
-            "priority": 8,
+            "icon": "📊", "priority": 8,
         },
         "FXStreet": {
             "url": "https://www.fxstreet.com/rss/news",
-            "icon": "💱",
-            "priority": 8,
+            "icon": "💱", "priority": 8,
         },
-        "CoinDesk": {
-            "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
-            "icon": "₿",
-            "priority": 7,
+        "Kitco": {
+            "url": "https://www.kitco.com/rss/news.xml",
+            "icon": "🥇", "priority": 7,
         },
-        "Investing.com Commodities": {
-            "url": "https://www.investing.com/rss/news_301.rss",
-            "icon": "📈",
-            "priority": 7,
+        "DailyFX": {
+            "url": "https://www.dailyfx.com/feeds/all",
+            "icon": "📊", "priority": 6,
         },
-        "Investing.com Forex": {
-            "url": "https://www.investing.com/rss/news_1.rss",
-            "icon": "📈",
-            "priority": 7,
+        "CNBC Markets": {
+            "url": "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+            "icon": "📺", "priority": 9,
         },
-        "Investing.com Crypto": {
-            "url": "https://www.investing.com/rss/news_25.rss",
-            "icon": "📈",
-            "priority": 7,
+        "CNBC Finance": {
+            "url": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+            "icon": "📺", "priority": 9,
         },
         "MarketWatch": {
             "url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines",
-            "icon": "⌚",
-            "priority": 6,
+            "icon": "⌚", "priority": 6,
+        },
+        "Yahoo Finance": {
+            "url": "https://finance.yahoo.com/rss/topfinstories",
+            "icon": "🟣", "priority": 6,
+        },
+        "Benzinga": {
+            "url": "https://www.benzinga.com/feed",
+            "icon": "📰", "priority": 6,
+        },
+        "ZeroHedge": {
+            "url": "https://feeds.feedburner.com/zerohedge/feed",
+            "icon": "⚠️", "priority": 5,
+        },
+        "Nasdaq": {
+            "url": "https://www.nasdaq.com/feed/rssoutbound?category=Markets",
+            "icon": "💻", "priority": 7,
+        },
+        "Investing.com Commodities": {
+            "url": "https://www.investing.com/rss/news_301.rss",
+            "icon": "📈", "priority": 7,
+        },
+        "Investing.com Forex": {
+            "url": "https://www.investing.com/rss/news_1.rss",
+            "icon": "📈", "priority": 7,
+        },
+        "Investing.com Crypto": {
+            "url": "https://www.investing.com/rss/news_25.rss",
+            "icon": "📈", "priority": 7,
         },
         "MyFXBook": {
             "url": "https://www.myfxbook.com/rss/forex-news-rss",
-            "icon": "📒",
-            "priority": 7,
+            "icon": "📒", "priority": 7,
         },
         "ForexFactory": {
             "url": "https://www.forexfactory.com/ff_calendar.php?week=this&ctype=impact&timezone=NY&format=xml",
-            "icon": "🏭",
-            "priority": 7,
+            "icon": "🏭", "priority": 7,
+        },
+        "CoinDesk": {
+            "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "icon": "₿", "priority": 7,
+        },
+        "CoinTelegraph": {
+            "url": "https://cointelegraph.com/rss",
+            "icon": "📱", "priority": 7,
+        },
+        "Decrypt": {
+            "url": "https://decrypt.co/feed",
+            "icon": "🔑", "priority": 6,
+        },
+        "The Block": {
+            "url": "https://www.theblock.co/rss.xml",
+            "icon": "⛓️", "priority": 6,
         },
     }
 
     # Which RSS sources are relevant for each symbol
     SYMBOL_RSS_MAP: Dict[str, List[str]] = {
-        "XAUUSD": ["Reuters", "FXStreet", "Investing.com Commodities", "MyFXBook", "ForexFactory"],
-        "BTCUSD": ["CoinDesk", "Investing.com Crypto", "Reuters"],
-        "ETHUSD": ["CoinDesk", "Investing.com Crypto", "Reuters"],
-        "EURUSD": ["FXStreet", "Reuters", "Investing.com Forex", "MyFXBook", "ForexFactory"],
-        "GBPUSD": ["FXStreet", "Reuters", "Investing.com Forex", "MyFXBook"],
-        "USDJPY": ["FXStreet", "Reuters", "Investing.com Forex", "MyFXBook"],
-        "SPX500": ["MarketWatch", "Reuters", "Financial Times", "Investing.com Commodities"],
-        "NAS100": ["MarketWatch", "Reuters", "Financial Times"],
+        "XAUUSD": ["Reuters", "FXStreet", "Kitco", "Investing.com Commodities", "MyFXBook", "ForexFactory", "CNBC Markets"],
+        "BTCUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "The Block", "Investing.com Crypto", "Reuters"],
+        "ETHUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "The Block", "Investing.com Crypto", "Reuters"],
+        "EURUSD": ["FXStreet", "Reuters", "DailyFX", "Investing.com Forex", "MyFXBook", "ForexFactory"],
+        "GBPUSD": ["FXStreet", "Reuters", "DailyFX", "Investing.com Forex", "MyFXBook"],
+        "USDJPY": ["FXStreet", "Reuters", "DailyFX", "Investing.com Forex", "MyFXBook"],
+        "SPX500": ["MarketWatch", "Reuters", "CNBC Markets", "Financial Times", "Nasdaq", "Investing.com Commodities"],
+        "NAS100": ["MarketWatch", "CNBC Markets", "Nasdaq", "Reuters", "Financial Times", "Benzinga"],
     }
     
+    _HIGH_IMPACT = [
+        'breaking', 'crash', 'surprise', 'fomc', 'rate decision', 'rate hike', 'rate cut',
+        'bankruptcy', 'recession', 'war', 'fed chair', 'powell', 'lagarde', 'bailey',
+        'emergency', 'crisis', 'plunge', 'surges', 'record high', 'record low',
+        'nfp', 'cpi', 'inflation', 'gdp', 'jobs report', 'unemployment', 'default',
+        'sanctions', 'tariff', 'geopolitical', 'escalation', 'ceasefire',
+    ]
+    _LOW_IMPACT = [
+        'analysis', 'outlook', 'forecast', 'technical', 'review',
+        'weekly', 'monthly', 'seasonal', 'preview', 'wrap-up',
+    ]
+
     def __init__(self):
         self.newsapi_key = os.getenv("NEWSAPI_KEY", "")
         self.marketaux_api_key = os.getenv("MARKETAUX_API_KEY", "")
+        self.alphavantage_key = os.getenv("ALPHAVANTAGE_KEY", "")
         self._symbol_keywords = {
-            "XAUUSD": ["gold price", "gold futures", "precious metals", "XAUUSD"],
-            "BTCUSD": ["bitcoin price", "BTC", "cryptocurrency", "BTCUSD"],
-            "ETHUSD": ["ethereum price", "ETH", "ether", "ETHUSD"],
-            "EURUSD": ["EUR USD", "euro forex", "eurozone", "EURUSD"],
-            "GBPUSD": ["GBP USD", "british pound", "sterling forex", "GBPUSD"],
-            "USDJPY": ["USD JPY", "yen", "japanese yen", "USDJPY"],
-            "SPX500": ["S&P 500", "US stock market", "US equities"],
-            "NAS100": ["NASDAQ", "tech stocks", "nasdaq"],
+            "XAUUSD": ["gold price", "gold futures", "precious metals", "XAUUSD", "gold rally",
+                       "gold demand", "gold ETF", "XAU", "safe haven", "gold market"],
+            "BTCUSD": ["bitcoin price", "BTC", "cryptocurrency", "BTCUSD", "bitcoin rally",
+                       "bitcoin ETF", "crypto market", "bitcoin halving", "digital asset"],
+            "ETHUSD": ["ethereum price", "ETH", "ether", "ETHUSD", "ethereum upgrade",
+                       "DeFi", "smart contract", "layer 2", "ethereum network"],
+            "EURUSD": ["EUR USD", "euro forex", "eurozone", "EURUSD", "ECB", "euro rate",
+                       "european central bank", "euro inflation", "EUR/USD"],
+            "GBPUSD": ["GBP USD", "british pound", "sterling forex", "GBPUSD", "BOE",
+                       "bank of england", "pound sterling", "UK economy", "GBP/USD"],
+            "USDJPY": ["USD JPY", "yen", "japanese yen", "USDJPY", "BOJ", "bank of japan",
+                       "yen intervention", "japan inflation", "USD/JPY"],
+            "SPX500": ["S&P 500", "US stock market", "US equities", "S&P500", "SPX",
+                       "wall street", "dow jones", "market rally", "stock market crash"],
+            "NAS100": ["NASDAQ", "tech stocks", "nasdaq", "NAS100", "technology sector",
+                       "big tech", "nasdaq composite", "QQQ", "semiconductor"],
         }
-        
+
         self._financial_domains = "reuters.com,bloomberg.com,cnbc.com,fxstreet.com,kitco.com,investing.com,yahoofinance.com,marketwatch.com,wsj.com,ft.com"
-        
+
         self._sentiment_cache: Dict[str, Dict] = {}
         self._sentiment_cache_lock = threading.Lock()
         self._SENTIMENT_CACHE_TTL = 900
-        
+
         self._max_workers = 4
     
     def get_news(self, symbol: str, max_items: int = 15) -> List[Dict]:
@@ -178,7 +262,7 @@ class UnifiedNewsService:
         if not results:
             return []
         
-        deduplicated = self._deduplicate_and_rank(results)
+        deduplicated = self._deduplicate_and_rank(results, keywords)
         
         for item in deduplicated[:max_items]:
             item["sentiment_label"] = item.get("sentiment_label") or self._get_cached_sentiment(item["headline"])
@@ -187,33 +271,26 @@ class UnifiedNewsService:
     
     def _fetch_all_sources_parallel(self, symbol: str, keywords: List[str]) -> List[Dict]:
         """
-        Fetch from all sources in parallel using ThreadPoolExecutor.
-        Uses as_completed() so fast sources are not blocked by slow ones.
-        Includes direct RSS feeds in addition to existing sources.
+        Fetch from all sources in parallel — RSS, yfinance, Alpha Vantage, NewsAPI, Marketaux.
+        Uses as_completed() with 20s wall-clock budget.
         """
         all_results = []
         relevant_rss = self.SYMBOL_RSS_MAP.get(symbol, list(self.RSS_FEEDS.keys())[:4])
-
-        max_workers = self._max_workers + len(relevant_rss)
-
-        # Sources that use Google News RSS are unreliable (often blocked).
-        # Only include them if the direct RSS sources are insufficient.
-        _google_news_sources = {"forexcom", "google"}
+        max_workers = self._max_workers + len(relevant_rss) + 3
+        _silent_sources = {"forexcom", "google"}
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
+            futures: Dict = {}
 
+            # Tier 1: paid APIs
             if self.newsapi_key:
                 futures[executor.submit(self._fetch_newsapi, keywords)] = "newsapi"
-
-            # Google News RSS — skip silently if key-less scraping is blocked
-            futures[executor.submit(self._fetch_forexcom_news, keywords)] = "forexcom"
-            futures[executor.submit(self._fetch_google_news, keywords, symbol)] = "google"
-
             if self.marketaux_api_key:
                 futures[executor.submit(self._fetch_marketaux, symbol)] = "marketaux"
+            if self.alphavantage_key:
+                futures[executor.submit(self._fetch_alphavantage, symbol, keywords)] = "alphavantage"
 
-            # Direct RSS feeds for this symbol
+            # Tier 2: direct RSS
             for src_name in relevant_rss:
                 feed_cfg = self.RSS_FEEDS.get(src_name, {})
                 feed_url = feed_cfg.get("url", "")
@@ -222,27 +299,27 @@ class UnifiedNewsService:
                         self._fetch_rss_direct, src_name, feed_url, keywords
                     )] = f"rss_{src_name}"
 
-            # Use as_completed so fast sources return immediately; 20s total budget
+            # Tier 3: yfinance JSON (no API key required)
+            futures[executor.submit(self._fetch_yfinance_news, symbol, keywords)] = "yfinance"
+
+            # Tier 4: Google News scraping (unreliable — silent on failure)
+            futures[executor.submit(self._fetch_forexcom_news, keywords)] = "forexcom"
+            futures[executor.submit(self._fetch_google_news, keywords, symbol)] = "google"
+
             try:
                 for future in as_completed(futures, timeout=20):
                     source = futures[future]
                     try:
-                        items = future.result()   # already done — no extra wait
+                        items = future.result()
                         if items:
                             for item in items:
                                 item["_source"] = source
                             all_results.extend(items)
                     except Exception as e:
-                        exc_type = type(e).__name__
-                        # Silently skip unreliable Google-News scraping failures
-                        if source in _google_news_sources:
-                            pass
-                        else:
-                            msg = str(e) or exc_type
-                            print(f"[UnifiedNews] {source} failed ({exc_type}): {msg}")
+                        if source not in _silent_sources:
+                            print(f"[UnifiedNews] {source} failed ({type(e).__name__}): {e}")
             except TimeoutError:
-                # Some futures exceeded the 20s wall-clock budget — return what we have
-                print(f"[UnifiedNews] Partial timeout — returning {len(all_results)} items collected so far")
+                print(f"[UnifiedNews] Partial timeout — {len(all_results)} items collected")
 
         return all_results
 
@@ -335,46 +412,173 @@ class UnifiedNewsService:
             print(f"[UnifiedNews] RSS {source_name} error: {exc}")
             return []
     
-    def _deduplicate_and_rank(self, items: List[Dict]) -> List[Dict]:
+    def _fetch_yfinance_news(self, symbol: str, keywords: List[str]) -> List[Dict]:
+        """Fetch news from yfinance Ticker.news — no API key required."""
+        ticker_sym = _YF_TICKER_MAP.get(symbol, symbol)
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(ticker_sym)
+            raw = ticker.news or []
+            now = datetime.now(timezone.utc)
+            cutoff = now - timedelta(days=3)
+            items = []
+            for art in raw[:20]:
+                title = art.get("title", "")
+                if not title or len(title) < 20:
+                    continue
+                pub_ts = art.get("providerPublishTime") or art.get("published_at")
+                time_ago_str = "Live"
+                if pub_ts:
+                    try:
+                        pub_dt = datetime.fromtimestamp(int(pub_ts), tz=timezone.utc)
+                        if pub_dt < cutoff:
+                            continue
+                        diff_min = (now - pub_dt).total_seconds() / 60
+                        if diff_min < 60:
+                            time_ago_str = f"{int(diff_min)}m ago"
+                        elif diff_min < 1440:
+                            time_ago_str = f"{int(diff_min/60)}h ago"
+                        else:
+                            time_ago_str = f"{int(diff_min/1440)}d ago"
+                    except Exception:
+                        pass
+                publisher = art.get("publisher", "Yahoo Finance")
+                sentiment_result = self._analyze_with_cache(title)
+                impact = self._analyze_impact(title)
+                items.append({
+                    "headline": title[:250],
+                    "sentiment": sentiment_result["score"],
+                    "sentiment_label": sentiment_result["sentiment"],
+                    "confidence": sentiment_result["confidence"],
+                    "impact": impact,
+                    "time_ago": time_ago_str,
+                    "source": publisher,
+                    "source_icon": self.SOURCE_ICONS.get(publisher, "🟣"),
+                    "url": art.get("link", ""),
+                    "impact_timing": "Market hours",
+                })
+            return items
+        except Exception as e:
+            print(f"[UnifiedNews] yfinance news error ({ticker_sym}): {e}")
+            return []
+
+    def _fetch_alphavantage(self, symbol: str, keywords: List[str]) -> List[Dict]:
+        """Fetch from Alpha Vantage News & Sentiment API (free: 25 req/day)."""
+        try:
+            av_symbol = _YF_TICKER_MAP.get(symbol, symbol).replace("=X", "").replace("=F", "")
+            url = "https://www.alphavantage.co/query"
+            params = {
+                "function": "NEWS_SENTIMENT",
+                "tickers": av_symbol,
+                "limit": 10,
+                "sort": "LATEST",
+                "apikey": self.alphavantage_key,
+            }
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            feed = data.get("feed", [])
+            now = datetime.now(timezone.utc)
+            items = []
+            for art in feed:
+                title = art.get("title", "")
+                if not title or len(title) < 20:
+                    continue
+                raw_score = float(art.get("overall_sentiment_score", 0))
+                raw_label = art.get("overall_sentiment_label", "Neutral").lower()
+                if "bullish" in raw_label:
+                    sentiment_label = "bullish"
+                elif "bearish" in raw_label:
+                    sentiment_label = "bearish"
+                else:
+                    sentiment_label = "neutral"
+                # Parse time format: 20240422T120000
+                time_str = art.get("time_published", "")
+                time_ago_str = "Live"
+                try:
+                    pub_dt = datetime.strptime(time_str, "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+                    diff_min = (now - pub_dt).total_seconds() / 60
+                    if diff_min < 60:
+                        time_ago_str = f"{int(diff_min)}m ago"
+                    elif diff_min < 1440:
+                        time_ago_str = f"{int(diff_min/60)}h ago"
+                    else:
+                        time_ago_str = f"{int(diff_min/1440)}d ago"
+                except Exception:
+                    pass
+                source = art.get("source", "AlphaVantage")
+                impact = self._analyze_impact(title)
+                items.append({
+                    "headline": title[:250],
+                    "sentiment": raw_score,
+                    "sentiment_label": sentiment_label,
+                    "confidence": abs(raw_score),
+                    "impact": impact,
+                    "time_ago": time_ago_str,
+                    "source": source,
+                    "source_icon": self.SOURCE_ICONS.get(source, "📰"),
+                    "url": art.get("url", ""),
+                    "impact_timing": "Market hours",
+                })
+            return items
+        except Exception as e:
+            print(f"[UnifiedNews] Alpha Vantage error: {e}")
+            return []
+
+    def _deduplicate_and_rank(self, items: List[Dict], keywords: Optional[List[str]] = None) -> List[Dict]:
         """
-        Deduplicate by headline similarity and URL, then rank by source priority.
+        Deduplicate using Jaccard token similarity (≥0.55 = duplicate).
+        Rank by: source_priority + recency_bonus (0/1/3) + relevance*2.
         """
         if not items:
             return []
-        
-        seen_headlines = []
-        seen_urls = set()
-        unique_items = []
-        
+
+        seen_headlines: List[str] = []
+        seen_urls: set = set()
+        unique_items: List[Dict] = []
+        now = datetime.now(timezone.utc)
+
         for item in items:
             headline = item.get("headline", "")
             url = item.get("url", "")
-            
+
             if not headline or len(headline) < 20:
                 continue
-            
             if url and url in seen_urls:
                 continue
-            
-            is_duplicate = False
-            for seen in seen_headlines:
-                similarity = SequenceMatcher(None, headline.lower(), seen.lower()).ratio()
-                if similarity > 0.75:
-                    is_duplicate = True
-                    break
-            
-            if is_duplicate:
+
+            is_dup = any(_jaccard(headline, seen) >= 0.55 for seen in seen_headlines)
+            if is_dup:
                 continue
-            
+
             seen_headlines.append(headline)
             if url:
                 seen_urls.add(url)
-            
-            item["_priority"] = self.SOURCE_PRIORITY.get(item.get("source", ""), 5)
+
+            # Recency bonus from time_ago string
+            recency_bonus = 0
+            ta = item.get("time_ago", "")
+            try:
+                if ta.endswith("m ago"):
+                    mins = int(ta.split("m")[0])
+                    if mins <= 60:
+                        recency_bonus = 3
+                    elif mins <= 120:
+                        recency_bonus = 1
+                elif ta.endswith("h ago"):
+                    hrs = int(ta.split("h")[0])
+                    if hrs <= 2:
+                        recency_bonus = 1
+            except Exception:
+                pass
+
+            src_priority = self.SOURCE_PRIORITY.get(item.get("source", ""), 5)
+            rel = _relevance(headline, keywords or []) if keywords else 0.0
+            item["_score"] = src_priority + recency_bonus + rel * 2
             unique_items.append(item)
-        
-        unique_items.sort(key=lambda x: (x["_priority"], x.get("sentiment", 0)), reverse=True)
-        
+
+        unique_items.sort(key=lambda x: x.get("_score", 0), reverse=True)
         return unique_items
     
     def _get_cached_sentiment(self, headline: str) -> str:
@@ -691,19 +895,10 @@ class UnifiedNewsService:
         """Analyze news impact level."""
         if not text:
             return "MEDIUM"
-        
-        text_lower = text.lower()
-        
-        high_impact = ['breaking', 'crash', 'surprise', 'fomc', 'rate decision',
-                       'bankruptcy', 'recession', 'war', 'fed chair', 'powell',
-                       'emergency', 'crisis', 'plunge', 'surges']
-        
-        low_impact = ['analysis', 'outlook', 'forecast', 'technical', 'review',
-                      'weekly', 'monthly', 'seasonal']
-        
-        if any(word in text_lower for word in high_impact):
+        t = text.lower()
+        if any(w in t for w in self._HIGH_IMPACT):
             return "HIGH"
-        elif any(word in text_lower for word in low_impact):
+        if any(w in t for w in self._LOW_IMPACT):
             return "LOW"
         return "MEDIUM"
     
