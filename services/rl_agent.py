@@ -168,12 +168,31 @@ class QLearningAgent:
         self.rewards.append(reward)
 
     def save(self, filepath: str):
-        """Save Q-table to file."""
-        np.save(filepath, self.q_table)
+        """Save agent state (Q-table, epsilon, rewards) to disk via pickle."""
+        import pickle, os
+        os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else ".", exist_ok=True)
+        with open(filepath, "wb") as f:
+            pickle.dump({
+                "q_table": self.q_table,
+                "epsilon": self.epsilon,
+                "rewards": self.rewards,
+            }, f)
 
     def load(self, filepath: str):
-        """Load Q-table from file."""
-        self.q_table = np.load(filepath, allow_pickle=True).item()
+        """Load agent state from disk. Returns True on success."""
+        import pickle, os
+        if not os.path.exists(filepath):
+            return False
+        try:
+            with open(filepath, "rb") as f:
+                state = pickle.load(f)
+            self.q_table = state.get("q_table", {})
+            self.epsilon = state.get("epsilon", self.epsilon_min)
+            self.rewards = state.get("rewards", [])
+            return True
+        except Exception as e:
+            print(f"[RLAgent] Could not load from {filepath}: {e}")
+            return False
 
 
 if TORCH_AVAILABLE:
@@ -544,28 +563,47 @@ def train_rl_agent(data: pd.DataFrame,
         total_reward = 0
         steps = 0
 
+        pct = data['close'].pct_change()
+
         while True:
-            action = agent.get_action(state)
+            # QLearningAgent expects TradingState; DeepRLAgent takes raw ndarray
+            if agent_type == 'qlearning':
+                cs = env.current_step
+                _qstate = TradingState(
+                    position=env.position,
+                    price=data.iloc[cs]['close'],
+                    returns=np.array([pct.iloc[max(0, cs-20):cs+1].mean()]),
+                    indicators={'rsi': data.iloc[cs].get('rsi', 50)},
+                    account_value=env.capital,
+                    step=cs,
+                )
+                action = agent.get_action(_qstate)
+            else:
+                action = agent.get_action(state)
+
             next_state, reward, done, info = env.step(action)
 
             if agent_type == 'qlearning':
+                cs = env.current_step
+                ns = min(cs + 1, len(data) - 1)
+                pct = data['close'].pct_change()
                 agent.update(
                     TradingState(
                         position=env.position,
-                        price=data.iloc[env.step]['close'],
-                        returns=np.array([data['close'].pct_change().iloc[max(0, env.step-20):env.step+1].mean()]),
-                        indicators={'rsi': data.iloc[env.step].get('rsi', 50)},
+                        price=data.iloc[cs]['close'],
+                        returns=np.array([pct.iloc[max(0, cs-20):cs+1].mean()]),
+                        indicators={'rsi': data.iloc[cs].get('rsi', 50)},
                         account_value=info['portfolio_value'],
-                        step=env.step
+                        step=cs
                     ),
                     action, reward,
                     TradingState(
                         position=env.position,
-                        price=data.iloc[min(env.step+1, len(data)-1)]['close'],
-                        returns=np.array([data['close'].pct_change().iloc[max(0, env.step-19):env.step+2].mean()]),
-                        indicators={'rsi': data.iloc[min(env.step+1, len(data)-1)].get('rsi', 50)},
+                        price=data.iloc[ns]['close'],
+                        returns=np.array([pct.iloc[max(0, ns-20):ns+1].mean()]),
+                        indicators={'rsi': data.iloc[ns].get('rsi', 50)},
                         account_value=info['portfolio_value'],
-                        step=env.step + 1
+                        step=ns
                     ),
                     done
                 )

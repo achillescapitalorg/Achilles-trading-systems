@@ -90,18 +90,28 @@ def _render_news_item(item, show_instrument=True):
     ], style={"padding": "10px", "backgroundColor": COLORS["surface_light"], "borderRadius": "6px", "marginBottom": "10px"})
 
 
-def _get_all_news():
+def _fetch_and_cache(symbol: str, force: bool = False):
+    """Fetch news for one symbol, bypassing cache when force=True."""
+    if not force:
+        cached = news_cache.get(symbol)
+        if cached is not None:
+            return cached
+    try:
+        items = _fetch_news_from_sources(symbol)
+        if items:
+            news_cache.set(symbol, items)
+            return items
+    except Exception:
+        pass
+    # Fall back to cache even on forced refresh if fetch fails
+    return news_cache.get(symbol) or []
+
+
+def _get_all_news(force_refresh: bool = False):
     all_news = []
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
-        news_items = news_cache.get(symbol)
-        if news_items is None:
-            try:
-                news_items = _fetch_news_from_sources(symbol)
-                if news_items:
-                    news_cache.set(symbol, news_items)
-            except:
-                news_items = []
+        news_items = _fetch_and_cache(symbol, force=force_refresh)
         if news_items:
             for item in news_items:
                 item["instrument"] = symbol
@@ -116,27 +126,17 @@ def _get_all_news():
     return all_news
 
 
-def _get_news_with_aggregate():
+def _get_news_with_aggregate(force_refresh: bool = False):
     """Get news and aggregate sentiment for each instrument."""
     result = {}
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
-        news_items = news_cache.get(symbol)
-        if news_items is None:
-            try:
-                news_items = _fetch_news_from_sources(symbol)
-                if news_items:
-                    news_cache.set(symbol, news_items)
-            except:
-                news_items = []
-        
+        news_items = _fetch_and_cache(symbol, force=force_refresh)
         headlines = [item.get("headline", "") for item in news_items] if news_items else []
-        
         result[symbol] = {
             "news": news_items or [],
             "headlines": headlines,
         }
-    
     return result
 
 
@@ -276,8 +276,8 @@ def _render_sentiment_meter(sentiment_data):
     ], style={"padding": "15px", "backgroundColor": COLORS["surface"], "borderRadius": "8px", "marginBottom": "20px"})
 
 
-def _build_news_tabs():
-    all_news = _get_all_news()
+def _build_news_tabs(force_refresh: bool = False):
+    all_news = _get_all_news(force_refresh=force_refresh)
     news_by_instrument = {inst["symbol"]: [item for item in all_news if item.get("instrument") == inst["symbol"]] for inst in INSTRUMENTS}
     news_by_topic = {}
     for item in all_news:
@@ -476,9 +476,12 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": COLORS["background"
     Input("refresh-interval", "n_intervals"),
 )
 def update_news(pathname, n_clicks, n_intervals):
+    from dash import callback_context
     if pathname != "/news":
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-    tabs, count, updated = _build_news_tabs()
+    triggered = callback_context.triggered_id if callback_context.triggered else None
+    force = (triggered == "refresh-btn")
+    tabs, count, updated = _build_news_tabs(force_refresh=force)
     sentiment_data = _calculate_instrument_sentiment()
     sentiment_meter = _render_sentiment_meter(sentiment_data)
     return tabs, f"{count} articles", f"⏰ {updated}", sentiment_meter

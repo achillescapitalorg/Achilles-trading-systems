@@ -60,6 +60,7 @@ class FinBERTSentiment:
                     truncation=True,
                     max_length=512
                 )
+                cls._loading = False
                 print("[FinBERT] Model loaded successfully")
                 return cls._model
             except Exception as e:
@@ -413,11 +414,6 @@ def analyze_market(symbol: str, news: List[str], price_data: Dict) -> Dict:
 def chat_with_ai(message: str, context: Optional[str] = None) -> Dict:
     """Convenience function for chatting with AI."""
     return get_local_ai_service().chat(message, context)
-
-
-def get_ai_status() -> Dict:
-    """Get status of AI services."""
-    return get_local_ai_service().get_status()
 
 
 def get_ai_status() -> Dict:

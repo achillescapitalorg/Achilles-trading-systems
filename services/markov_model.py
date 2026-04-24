@@ -118,11 +118,18 @@ class MarkovRegimeModel:
         
         # Simple volatility-based regime detection
         vol_percentile = pd.qcut(df['volatility_5d'], q=self.n_regimes, labels=False, duplicates='drop')
+        # Fill NaN (can occur at quantile boundaries) and clamp to valid range
+        vol_percentile = vol_percentile.fillna(0).astype(int)
+        # qcut with duplicates='drop' may yield fewer than n_regimes bins; remap to 0..k-1
+        unique_bins = sorted(vol_percentile.unique())
+        bin_remap = {old: new for new, old in enumerate(unique_bins)}
+        vol_percentile = vol_percentile.map(bin_remap)
         self.hidden_states = vol_percentile.values
-        
+        actual_n = len(unique_bins)
+
         # Label regimes
         self.regime_labels = {}
-        for i in range(self.n_regimes):
+        for i in range(actual_n):
             mask = self.hidden_states == i
             avg_vol = df.loc[mask, 'volatility_5d'].mean() if mask.sum() > 0 else 0
             avg_return = df.loc[mask, 'returns'].mean() if mask.sum() > 0 else 0
@@ -147,23 +154,25 @@ class MarkovRegimeModel:
             }
         
         current_state = int(self.hidden_states[-1])
-        current_regime = self.regime_labels[current_state]
-        
-        # Simple transition matrix (random walk approximation)
-        self.transition_matrix = np.full((self.n_regimes, self.n_regimes), 1.0 / self.n_regimes)
-        
+        current_regime = self.regime_labels.get(current_state, 'NORMAL')
+
+        # Compute empirical transition matrix from fallback states
+        self._calculate_transition_matrix()
+        next_probs = self.transition_matrix[current_state] if self.transition_matrix is not None else None
+
         return {
             'current_regime': current_regime,
             'current_state': current_state,
             'regime_stats': self.regime_stats,
             'transition_matrix': self.transition_matrix,
+            'next_state_probs': next_probs,
             'hidden_states': self.hidden_states,
             'data': df
         }
     
     def _calculate_transition_matrix(self):
         """Calculate empirical transition matrix from state sequence."""
-        n_states = self.n_regimes
+        n_states = int(self.hidden_states.max()) + 1  # handles fallback with fewer bins
         trans_matrix = np.zeros((n_states, n_states))
         
         for i in range(len(self.hidden_states) - 1):

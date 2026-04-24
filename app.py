@@ -14,6 +14,7 @@ try:
 except ImportError:
     pass
 
+import os
 import dash
 from dash import dcc, html, Input, Output, State, callback, ctx
 import plotly.graph_objects as go
@@ -99,8 +100,39 @@ COLORS = {
     "grid": "#1a1a1a",
 }
 
-# Global RL Agent and Models state
-rl_agent_state = {
+# Path where the RL agent is persisted between app restarts
+_RL_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rl_state.pkl")
+
+def _load_rl_state_from_disk() -> dict:
+    """Try to restore a previously trained RL agent from disk."""
+    agent = QLearningAgent(state_size=8, action_size=5, epsilon=1.0)
+    loaded = agent.load(_RL_SAVE_PATH)
+    if loaded:
+        import pickle
+        try:
+            with open(_RL_SAVE_PATH, "rb") as f:
+                raw = pickle.load(f)
+            print(f"[RL] Restored agent: {len(agent.q_table)} states, "
+                  f"ε={agent.epsilon:.3f}, {len(agent.rewards)} reward steps")
+            return {
+                "agent": agent,
+                "env": None,
+                "training": False,
+                "episode": raw.get("episode", len(agent.rewards)),
+                "rewards": agent.rewards,
+                "last_action": "HOLD",
+                "q_table": agent.q_table,
+                "position": 0,
+                "account_value": 10000.0,
+            }
+        except Exception:
+            pass
+    return None
+
+
+# Global RL Agent and Models state — restored from disk if a saved model exists
+_persisted = _load_rl_state_from_disk()
+rl_agent_state = _persisted if _persisted else {
     "agent": None,
     "env": None,
     "training": False,
@@ -199,15 +231,9 @@ def fetch_yahoo_finance_data(symbol, period="5d", interval="15m"):
             if col not in df.columns:
                 return generate_fallback_data(symbol)
 
-        # Strip timezone so timestamps are naive local time — avoids Plotly UTC shift
-        try:
-            if df['timestamp'].dt.tz is not None:
-                df['timestamp'] = df['timestamp'].dt.tz_convert('America/New_York').dt.tz_localize(None)
-        except Exception:
-            try:
-                df['timestamp'] = df['timestamp'].dt.tz_localize(None)
-            except Exception:
-                pass
+        # Normalize to UTC-naive so categorical x-axis labels are consistent
+        if df['timestamp'].dt.tz is not None:
+            df['timestamp'] = df['timestamp'].dt.tz_convert('UTC').dt.tz_localize(None)
 
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
 
@@ -261,21 +287,12 @@ def get_current_price(symbol):
     return base_prices.get(symbol, 100)
 
 
-_CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD"}
-_EQUITY_SYMBOLS = {"SPX500", "NAS100"}
-
-def _chart_rangebreaks(symbol: str) -> list:
-    """Return Plotly rangebreaks that remove non-trading periods for a symbol."""
-    if symbol in _CRYPTO_SYMBOLS:
-        return []  # crypto trades 24/7
-    breaks = [dict(bounds=["sat", "mon"])]  # weekends for all non-crypto
-    if symbol in _EQUITY_SYMBOLS:
-        # US equities: remove overnight 4pm–9:30am
-        breaks.append(dict(bounds=[16, 9.5], pattern="hour"))
-    else:
-        # Metals/forex: 1-hour daily settlement break 5pm–6pm ET
-        breaks.append(dict(bounds=[17, 18], pattern="hour"))
-    return breaks
+def _categorical_x(timestamps) -> "pd.Series":
+    """Format timestamps as categorical string labels for gap-free Plotly charts."""
+    import pandas as _pd
+    ts = _pd.to_datetime(timestamps)
+    fmt = "%m/%d %H:%M" if len(ts) > 1 and (ts.iloc[-1] - ts.iloc[-2]).total_seconds() < 86400 else "%b %d"
+    return ts.dt.strftime(fmt)
 
 
 def create_candlestick_chart(df, symbol):
@@ -284,16 +301,7 @@ def create_candlestick_chart(df, symbol):
     price_change = df['close'].iloc[-1] - df['open'].iloc[0] if len(df) > 1 else 0
     price_change_pct = (price_change / df['open'].iloc[0] * 100) if df['open'].iloc[0] != 0 else 0
 
-    # Categorical x-axis: format timestamps as strings so Plotly spaces bars
-    # equidistantly — this eliminates all overnight/weekend gaps automatically.
-    ts = pd.to_datetime(df["timestamp"])
-    n_bars = len(ts)
-    if n_bars > 1:
-        delta_sec = (ts.iloc[-1] - ts.iloc[-2]).total_seconds()
-        fmt = "%m/%d %H:%M" if delta_sec < 86400 else "%b %d"
-    else:
-        fmt = "%b %d"
-    x_cat = ts.dt.strftime(fmt)
+    x_cat = _categorical_x(df["timestamp"])
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -4029,6 +4037,21 @@ def update_rl_agent(symbol, n):
             # Update account value (ensure it doesn't go negative)
             new_value = rl_agent_state["account_value"] * (1 + reward/100)
             rl_agent_state["account_value"] = max(0.01, new_value)
+
+            # Persist every 50 live steps so progress survives restarts
+            if len(rl_agent_state["rewards"]) % 50 == 0:
+                try:
+                    import pickle as _pk, os as _os2
+                    _os2.makedirs(_os2.path.dirname(_RL_SAVE_PATH), exist_ok=True)
+                    with open(_RL_SAVE_PATH, "wb") as _f2:
+                        _pk.dump({
+                            "q_table": rl_agent_state["agent"].q_table,
+                            "epsilon": rl_agent_state["agent"].epsilon,
+                            "rewards": rl_agent_state["rewards"],
+                            "episode": rl_agent_state["episode"],
+                        }, _f2)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Error creating trading state: {e}")
             # Fallback to simple values
@@ -4285,7 +4308,23 @@ def train_rl_model(n_clicks, episodes, lr, gamma, symbol):
     
     rl_agent_state["episode"] += episodes
     rl_agent_state["rewards"].extend(rewards_history)
-    
+
+    # Persist trained agent so it survives app restarts
+    try:
+        import pickle, os as _os
+        _os.makedirs(_os.path.dirname(_RL_SAVE_PATH), exist_ok=True)
+        with open(_RL_SAVE_PATH, "wb") as _f:
+            pickle.dump({
+                "q_table": rl_agent_state["agent"].q_table,
+                "epsilon": rl_agent_state["agent"].epsilon,
+                "rewards": rl_agent_state["rewards"],
+                "episode": rl_agent_state["episode"],
+            }, _f)
+        print(f"[RL] Saved agent to {_RL_SAVE_PATH} "
+              f"({len(rl_agent_state['agent'].q_table)} states)")
+    except Exception as _e:
+        print(f"[RL] Save failed: {_e}")
+
     # Create training chart
     fig = make_subplots(rows=2, cols=1, subplot_titles=('Training Rewards', 'Portfolio Value'))
     

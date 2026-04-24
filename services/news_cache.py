@@ -58,8 +58,8 @@ class NewsCache:
     """
     
     CACHE_VERSION = 1
-    DEFAULT_TTL_MINUTES = 5
-    MAX_ITEMS_PER_SYMBOL = 10
+    DEFAULT_TTL_MINUTES = 2
+    MAX_ITEMS_PER_SYMBOL = 25
     
     def __init__(self, cache_dir: str = None):
         """Initialize the news cache."""

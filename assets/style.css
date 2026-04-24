@@ -243,9 +243,24 @@ a:hover {
     color: #ffffff !important;
 }
 
-/* Loading state */
+/* Loading state — suppress spinners on all graph updates */
 ._dash-loading {
-    color: #00ff88 !important;
+    display: none !important;
+}
+
+/* Suppress Dash's dim-overlay on graph components during callback */
+#smma-chart,
+#smma-orderbook-chart,
+#smma-delta-chart,
+#price-chart {
+    opacity: 1 !important;
+}
+
+/* Hide the callback loading overlay globally on graphs */
+.dash-graph--pending,
+.dash-graph--reloading {
+    opacity: 1 !important;
+    filter: none !important;
 }
 
 /* Plotly modebar */

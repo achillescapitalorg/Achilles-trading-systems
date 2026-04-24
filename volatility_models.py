@@ -126,15 +126,15 @@ class VolatilityModels:
         Parameters
         ----------
         params : np.ndarray
-            [omega, alpha_1, ..., alpha_p, beta_1, ..., beta_q]
+            [omega, alpha_1, ..., alpha_q, beta_1, ..., beta_p]
         returns : np.ndarray
             Return series
         p, q : int
-            GARCH and ARCH orders
+            GARCH order (variance lags, beta count) and ARCH order (return lags, alpha count)
         """
         omega = params[0]
-        alphas = params[1:p+1]
-        betas = params[p+1:p+q+1]
+        alphas = params[1:q+1]       # q ARCH coefficients
+        betas = params[q+1:q+p+1]    # p GARCH coefficients
         
         n = len(returns)
         sigma2 = np.zeros(n)
@@ -223,18 +223,18 @@ class VolatilityModels:
         sigma2[0] = np.var(returns)
         
         omega = params[0]
-        alphas = params[1:p+1]
-        betas = params[p+1:p+q+1]
-        
+        alphas = params[1:q+1]       # q ARCH coefficients
+        betas = params[q+1:q+p+1]    # p GARCH coefficients
+
         for t in range(1, n):
             lag = min(t, max(p, q))
             start = t - lag
-            arch_term = sum(alphas[i] * returns[start + i]**2 
+            arch_term = sum(alphas[i] * returns[start + i]**2
                           for i in range(min(q, lag)))
-            garch_term = sum(betas[i] * sigma2[start + i] 
+            garch_term = sum(betas[i] * sigma2[start + i]
                            for i in range(min(p, lag)))
             sigma2[t] = omega + arch_term + garch_term
-            
+
         self.conditional_variance = sigma2
         self.conditional_volatility = np.sqrt(sigma2)
         

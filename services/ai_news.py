@@ -11,11 +11,10 @@ Features:
 import os
 import json
 import time
-import calendar
 import requests
 import threading
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
@@ -84,15 +83,22 @@ class UnifiedNewsService:
         "MyFXBook": "📒",
         "ForexFactory": "🏭",
         "Myfxbook": "📒",
+        "ForexLive": "📰",
+        "Guardian Business": "📰",
+        "Mining.com": "⛏️",
+        "Business Wire": "📡",
     }
-    
+
     SOURCE_PRIORITY = {
         "Reuters": 10,
         "Bloomberg": 10,
+        "ForexLive": 9,
         "CNBC": 9,
         "FXStreet": 8,
         "Forex.com": 8,
+        "Guardian Business": 7,
         "Kitco": 7,
+        "Mining.com": 7,
         "Investing.com": 7,
         "MarketWatch": 6,
         "Yahoo Finance": 6,
@@ -106,17 +112,19 @@ class UnifiedNewsService:
         "MyFXBook": 7,
         "Myfxbook": 7,
         "ForexFactory": 7,
+        "Business Wire": 6,
     }
 
-    # Direct RSS feed configuration — 21 feeds
+    # Direct RSS feed configuration — 20 feeds (blocked feeds replaced with working alternatives)
     RSS_FEEDS: Dict[str, Dict] = {
-        "Reuters": {
-            "url": "https://feeds.reuters.com/reuters/businessNews",
-            "icon": "📰", "priority": 10,
+        # reuters.com and ft.com dropped public RSS — replaced with ForexLive + Guardian
+        "ForexLive": {
+            "url": "https://www.forexlive.com/feed/news",
+            "icon": "📰", "priority": 9,
         },
-        "Financial Times": {
-            "url": "https://www.ft.com/rss/home/uk",
-            "icon": "📊", "priority": 8,
+        "Guardian Business": {
+            "url": "https://www.theguardian.com/uk/business/rss",
+            "icon": "📰", "priority": 7,
         },
         "FXStreet": {
             "url": "https://www.fxstreet.com/rss/news",
@@ -126,12 +134,17 @@ class UnifiedNewsService:
             "url": "https://www.kitco.com/rss/news.xml",
             "icon": "🥇", "priority": 7,
         },
+        # investing.com blocks scrapers via Cloudflare — replaced with Mining.com for metals
+        "Mining.com": {
+            "url": "https://www.mining.com/feed/",
+            "icon": "⛏️", "priority": 7,
+        },
         "DailyFX": {
             "url": "https://www.dailyfx.com/feeds/all",
             "icon": "📊", "priority": 6,
         },
         "CNBC Markets": {
-            "url": "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+            "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
             "icon": "📺", "priority": 9,
         },
         "CNBC Finance": {
@@ -141,10 +154,6 @@ class UnifiedNewsService:
         "MarketWatch": {
             "url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines",
             "icon": "⌚", "priority": 6,
-        },
-        "Yahoo Finance": {
-            "url": "https://finance.yahoo.com/rss/topfinstories",
-            "icon": "🟣", "priority": 6,
         },
         "Benzinga": {
             "url": "https://www.benzinga.com/feed",
@@ -157,18 +166,6 @@ class UnifiedNewsService:
         "Nasdaq": {
             "url": "https://www.nasdaq.com/feed/rssoutbound?category=Markets",
             "icon": "💻", "priority": 7,
-        },
-        "Investing.com Commodities": {
-            "url": "https://www.investing.com/rss/news_301.rss",
-            "icon": "📈", "priority": 7,
-        },
-        "Investing.com Forex": {
-            "url": "https://www.investing.com/rss/news_1.rss",
-            "icon": "📈", "priority": 7,
-        },
-        "Investing.com Crypto": {
-            "url": "https://www.investing.com/rss/news_25.rss",
-            "icon": "📈", "priority": 7,
         },
         "MyFXBook": {
             "url": "https://www.myfxbook.com/rss/forex-news-rss",
@@ -194,18 +191,26 @@ class UnifiedNewsService:
             "url": "https://www.theblock.co/rss.xml",
             "icon": "⛓️", "priority": 6,
         },
+        "Yahoo Finance": {
+            "url": "https://finance.yahoo.com/rss/topfinstories",
+            "icon": "🟣", "priority": 6,
+        },
+        "Business Wire": {
+            "url": "https://www.businesswire.com/rss/home/?rss=G1",
+            "icon": "📡", "priority": 6,
+        },
     }
 
     # Which RSS sources are relevant for each symbol
     SYMBOL_RSS_MAP: Dict[str, List[str]] = {
-        "XAUUSD": ["Reuters", "FXStreet", "Kitco", "Investing.com Commodities", "MyFXBook", "ForexFactory", "CNBC Markets"],
-        "BTCUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "The Block", "Investing.com Crypto", "Reuters"],
-        "ETHUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "The Block", "Investing.com Crypto", "Reuters"],
-        "EURUSD": ["FXStreet", "Reuters", "DailyFX", "Investing.com Forex", "MyFXBook", "ForexFactory"],
-        "GBPUSD": ["FXStreet", "Reuters", "DailyFX", "Investing.com Forex", "MyFXBook"],
-        "USDJPY": ["FXStreet", "Reuters", "DailyFX", "Investing.com Forex", "MyFXBook"],
-        "SPX500": ["MarketWatch", "Reuters", "CNBC Markets", "Financial Times", "Nasdaq", "Investing.com Commodities"],
-        "NAS100": ["MarketWatch", "CNBC Markets", "Nasdaq", "Reuters", "Financial Times", "Benzinga"],
+        "XAUUSD": ["ForexLive", "FXStreet", "Kitco", "Mining.com", "MyFXBook", "ForexFactory", "CNBC Markets"],
+        "BTCUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "The Block", "ForexLive", "CNBC Markets"],
+        "ETHUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "The Block", "ForexLive"],
+        "EURUSD": ["FXStreet", "ForexLive", "DailyFX", "MyFXBook", "ForexFactory", "Guardian Business"],
+        "GBPUSD": ["FXStreet", "ForexLive", "DailyFX", "MyFXBook", "Guardian Business"],
+        "USDJPY": ["FXStreet", "ForexLive", "DailyFX", "MyFXBook", "CNBC Markets"],
+        "SPX500": ["MarketWatch", "ForexLive", "CNBC Markets", "Guardian Business", "Nasdaq", "Business Wire"],
+        "NAS100": ["MarketWatch", "CNBC Markets", "Nasdaq", "ForexLive", "Guardian Business", "Benzinga"],
     }
     
     _HIGH_IMPACT = [
@@ -247,7 +252,7 @@ class UnifiedNewsService:
 
         self._sentiment_cache: Dict[str, Dict] = {}
         self._sentiment_cache_lock = threading.Lock()
-        self._SENTIMENT_CACHE_TTL = 900
+        self._SENTIMENT_CACHE_TTL = 300
 
         self._max_workers = 4
     
@@ -359,7 +364,7 @@ class UnifiedNewsService:
             icon = self.RSS_FEEDS.get(source_name, {}).get("icon", "📰")
             news_items = []
 
-            for entry in feed.entries[:20]:
+            for entry in feed.entries[:30]:
                 title = getattr(entry, "title", "") or ""
                 if not title or len(title) < 20:
                     continue
@@ -422,7 +427,7 @@ class UnifiedNewsService:
             now = datetime.now(timezone.utc)
             cutoff = now - timedelta(days=3)
             items = []
-            for art in raw[:20]:
+            for art in raw[:30]:
                 title = art.get("title", "")
                 if not title or len(title) < 20:
                     continue
@@ -530,10 +535,12 @@ class UnifiedNewsService:
         """
         Deduplicate using Jaccard token similarity (≥0.55 = duplicate).
         Rank by: source_priority + recency_bonus (0/1/3) + relevance*2.
+        Token sets are stored for O(1) pre-filter before full Jaccard check.
         """
         if not items:
             return []
 
+        seen_token_sets: List[set] = []   # parallel list to seen_headlines
         seen_headlines: List[str] = []
         seen_urls: set = set()
         unique_items: List[Dict] = []
@@ -548,11 +555,20 @@ class UnifiedNewsService:
             if url and url in seen_urls:
                 continue
 
-            is_dup = any(_jaccard(headline, seen) >= 0.55 for seen in seen_headlines)
+            htokens = set(headline.lower().split())
+            is_dup = False
+            for i, seen in enumerate(seen_headlines):
+                # Fast pre-filter: if token sets share no words, Jaccard=0
+                if not htokens & seen_token_sets[i]:
+                    continue
+                if _jaccard(headline, seen) >= 0.55:
+                    is_dup = True
+                    break
             if is_dup:
                 continue
 
             seen_headlines.append(headline)
+            seen_token_sets.append(htokens)
             if url:
                 seen_urls.add(url)
 
@@ -636,23 +652,38 @@ class UnifiedNewsService:
             data = response.json()
             articles = data.get("articles", [])
             
+            now = datetime.now(timezone.utc)
             news_items = []
             for article in articles:
                 headline = article.get("title", "")
                 if not headline or headline == "[Removed]":
                     continue
-                
+
+                published_at = article.get("publishedAt", "")
+                time_ago_str = "Live"
+                try:
+                    pub_dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+                    diff_min = (now - pub_dt).total_seconds() / 60
+                    if diff_min < 60:
+                        time_ago_str = f"{int(diff_min)}m ago"
+                    elif diff_min < 1440:
+                        time_ago_str = f"{int(diff_min / 60)}h ago"
+                    else:
+                        time_ago_str = f"{int(diff_min / 1440)}d ago"
+                except Exception:
+                    pass
+
                 sentiment_result = self._analyze_with_cache(headline)
                 impact = self._analyze_impact(headline)
                 source = article.get("source", {}).get("name", "News")
-                
+
                 news_items.append({
                     "headline": headline[:250],
                     "sentiment": sentiment_result["score"],
                     "sentiment_label": sentiment_result["sentiment"],
                     "confidence": sentiment_result["confidence"],
                     "impact": impact,
-                    "time_ago": "Live",
+                    "time_ago": time_ago_str,
                     "source": source,
                     "source_icon": self.SOURCE_ICONS.get(source, "📰"),
                     "url": article.get("url", ""),
@@ -896,9 +927,9 @@ class UnifiedNewsService:
         if not text:
             return "MEDIUM"
         t = text.lower()
-        if any(w in t for w in self._HIGH_IMPACT):
+        if any(w in t for w in UnifiedNewsService._HIGH_IMPACT):
             return "HIGH"
-        if any(w in t for w in self._LOW_IMPACT):
+        if any(w in t for w in UnifiedNewsService._LOW_IMPACT):
             return "LOW"
         return "MEDIUM"
     

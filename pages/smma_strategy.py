@@ -47,18 +47,12 @@ SMMA_COL = {"smma3": C["accent"], "smma9": C["info"],
             "smma40": C["warn"],  "smma75": C["danger"]}
 SIG_COL  = {"BUY": C["accent"], "SELL": C["danger"], "HOLD": C["warn"]}
 
-_CRYPTO = {"BTCUSD", "ETHUSD"}
-_EQUITY = {"SPX500", "NAS100"}
 
-def _rangebreaks(symbol: str) -> list:
-    if symbol in _CRYPTO:
-        return []
-    breaks = [dict(bounds=["sat", "mon"])]
-    if symbol in _EQUITY:
-        breaks.append(dict(bounds=[16, 9.5], pattern="hour"))
-    else:
-        breaks.append(dict(bounds=[17, 18], pattern="hour"))
-    return breaks
+def _categorical_x(timestamps) -> pd.Series:
+    """Gap-free categorical x-axis labels for Plotly charts."""
+    ts = pd.to_datetime(timestamps)
+    fmt = "%m/%d %H:%M" if len(ts) > 1 and (ts.iloc[-1] - ts.iloc[-2]).total_seconds() < 86400 else "%b %d"
+    return ts.dt.strftime(fmt)
 
 TF_PERIOD = {"1m": "5d", "5m": "5d", "15m": "5d"}
 
@@ -149,6 +143,21 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
         ], width=5, style={"textAlign": "right"}),
     ], className="mb-3", align="center"),
 
+    # Suppress all loading spinners for every callback output on this page
+    dcc.Loading(
+        display="hide",
+        target_components={
+            "smma-chart": "figure",
+            "smma-orderbook-chart": "figure",
+            "smma-delta-chart": "figure",
+            "smma-stat-strip": "children",
+            "smma-live-price": "children",
+            "smma-verification-panel": "children",
+            "smma-mtf-hurst": "children",
+            "smma-signal-log": "children",
+        },
+    ),
+
     # ── Stat strip ────────────────────────────────────────────────────────────
     html.Div(id="smma-stat-strip",
              style={"display": "flex", "flexWrap": "wrap",
@@ -163,20 +172,28 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
         # Price + indicators chart
         dbc.Col([
             _card("📈 PRICE  ·  SMMA  ·  VWAP  ·  KELTNER",
-                  dcc.Loading(type="circle", color=C["accent"], children=
-                      dcc.Graph(id="smma-chart",
-                                figure=go.Figure(layout=dict(
-                                    paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
-                                    font=dict(color=C["text"]),
-                                    annotations=[dict(text="Loading…", x=0.5, y=0.5,
-                                                      showarrow=False,
-                                                      font=dict(color=C["muted"],size=12))],
-                                    xaxis=dict(visible=False), yaxis=dict(visible=False),
-                                )),
-                                config={"scrollZoom": True, "responsive": True,
-                                        "displayModeBar": True,
-                                        "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
-                                style={"height": "520px"})),
+                  dcc.Graph(id="smma-chart",
+                      figure=go.Figure(layout=dict(
+                          paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
+                          font=dict(color=C["text"]),
+                          annotations=[dict(text="Loading…", x=0.5, y=0.5,
+                                            showarrow=False,
+                                            font=dict(color=C["muted"],size=12))],
+                          xaxis=dict(visible=False), yaxis=dict(visible=False),
+                      )),
+                      config={
+                          "scrollZoom": True,
+                          "responsive": False,
+                          "displayModeBar": True,
+                          "displaylogo": False,
+                          "modeBarButtonsToRemove": [
+                              "lasso2d", "select2d", "autoScale2d", "toggleSpikelines",
+                          ],
+                          "modeBarButtonsToAdd": ["drawline", "eraseshape"],
+                          "doubleClick": "reset",
+                          "showTips": False,
+                      },
+                      style={"height": "520px"}),
                   right=html.Div(id="smma-live-price",
                                  style={"fontSize": "14px", "fontWeight": "bold",
                                         "color": C["accent"]})),
@@ -185,15 +202,14 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
         # Right column: order book + verification
         dbc.Col([
             _card("📚 SYNTHETIC ORDER BOOK  (Volume Profile)",
-                  dcc.Loading(type="circle", color=C["accent"], children=
-                      dcc.Graph(id="smma-orderbook-chart",
-                                figure=go.Figure(layout=dict(
-                                    paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
-                                    font=dict(color=C["text"]),
-                                    xaxis=dict(visible=False), yaxis=dict(visible=False),
-                                )),
-                                config={"displayModeBar": False},
-                                style={"height": "260px"}))),
+                  dcc.Graph(id="smma-orderbook-chart",
+                      figure=go.Figure(layout=dict(
+                          paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
+                          font=dict(color=C["text"]),
+                          xaxis=dict(visible=False), yaxis=dict(visible=False),
+                      )),
+                      config={"displayModeBar": False},
+                      style={"height": "260px"})),
             _card("🔍 TREND + MOMENTUM + VOLATILITY",
                   html.Div(id="smma-verification-panel")),
         ], width=4),
@@ -203,15 +219,14 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
     dbc.Row([
         dbc.Col([
             _card("🌊 VOLUME DELTA  (Buy − Sell Pressure)",
-                  dcc.Loading(type="circle", color=C["accent"], children=
-                      dcc.Graph(id="smma-delta-chart",
-                                figure=go.Figure(layout=dict(
-                                    paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
-                                    font=dict(color=C["text"]),
-                                    xaxis=dict(visible=False), yaxis=dict(visible=False),
-                                )),
-                                config={"displayModeBar": False},
-                                style={"height": "180px"}))),
+                  dcc.Graph(id="smma-delta-chart",
+                      figure=go.Figure(layout=dict(
+                          paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
+                          font=dict(color=C["text"]),
+                          xaxis=dict(visible=False), yaxis=dict(visible=False),
+                      )),
+                      config={"displayModeBar": False},
+                      style={"height": "180px"})),
         ], width=6),
         dbc.Col([
             _card("〰 MULTI-TIMEFRAME HURST  (1m · 5m · 15m)",
@@ -226,7 +241,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
         ], width=3),
     ]),
 
-    dcc.Interval(id="smma-interval", interval=30_000, n_intervals=0),
+    dcc.Interval(id="smma-interval", interval=15_000, n_intervals=0),
 ])
 
 
@@ -588,15 +603,7 @@ def _fig_price(df, r, symbol, tf):
     )
 
     ts = df["timestamp"] if "timestamp" in df.columns else df.index
-
-    # Categorical x-axis: string labels eliminate all overnight/weekend gaps
-    ts_pd = pd.to_datetime(ts)
-    if len(ts_pd) > 1:
-        _delta = (ts_pd.iloc[-1] - ts_pd.iloc[-2]).total_seconds()
-        _fmt = "%m/%d %H:%M" if _delta < 86400 else "%b %d"
-    else:
-        _fmt = "%b %d"
-    ts_str = ts_pd.dt.strftime(_fmt)
+    ts_str = _categorical_x(ts)
 
     # Row 1 — Candlestick
     fig.add_trace(go.Candlestick(
@@ -608,21 +615,21 @@ def _fig_price(df, r, symbol, tf):
         line=dict(width=1),
     ), row=1, col=1)
 
-    # SMMA lines
+    # SMMA lines — Scattergl uses WebGL for much faster rendering
     for key, period, label in [("smma3",3,"SMMA 3"), ("smma9",9,"SMMA 9"),
                                 ("smma40",40,"SMMA 40"), ("smma75",75,"SMMA 75")]:
         s = r.get(key)
         if s is not None:
             lw = 2.2 if period in (40, 75) else 1.4
-            fig.add_trace(go.Scatter(x=ts_str, y=s, name=label, mode="lines",
-                                     line=dict(color=SMMA_COL[key], width=lw),
-                                     opacity=0.9), row=1, col=1)
+            fig.add_trace(go.Scattergl(x=ts_str, y=s, name=label, mode="lines",
+                                       line=dict(color=SMMA_COL[key], width=lw),
+                                       opacity=0.9), row=1, col=1)
 
     # VWAP
     if r.get("vwap") is not None:
-        fig.add_trace(go.Scatter(x=ts_str, y=r["vwap"], name="VWAP", mode="lines",
-                                 line=dict(color=C["purple"], width=1.5, dash="dot"),
-                                 opacity=0.8), row=1, col=1)
+        fig.add_trace(go.Scattergl(x=ts_str, y=r["vwap"], name="VWAP", mode="lines",
+                                   line=dict(color=C["purple"], width=1.5, dash="dot"),
+                                   opacity=0.8), row=1, col=1)
 
     # Keltner
     kc = r.get("keltner")
@@ -630,9 +637,9 @@ def _fig_price(df, r, symbol, tf):
         for band, lbl, dash in [("upper", "KC Up", "dash"),
                                  ("lower", "KC Lo", "dash"),
                                  ("middle","KC Mid","dot")]:
-            fig.add_trace(go.Scatter(x=ts_str, y=kc[band], name=lbl, mode="lines",
-                                     line=dict(color=C["info"], width=1, dash=dash),
-                                     opacity=0.45, showlegend=(band=="middle")),
+            fig.add_trace(go.Scattergl(x=ts_str, y=kc[band], name=lbl, mode="lines",
+                                       line=dict(color=C["info"], width=1, dash=dash),
+                                       opacity=0.45, showlegend=(band=="middle")),
                           row=1, col=1)
 
     # Volume Profile levels as horizontal lines
@@ -652,7 +659,7 @@ def _fig_price(df, r, symbol, tf):
         lr_idx = len(df) - 1
         lr = df.iloc[-1]
         my = lr["low"] * 0.9997 if sig == "BUY" else lr["high"] * 1.0003
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=[ts_str.iloc[lr_idx]], y=[my],
             mode="markers+text",
             marker=dict(symbol="triangle-up" if sig=="BUY" else "triangle-down",
@@ -665,8 +672,8 @@ def _fig_price(df, r, symbol, tf):
     # Row 2 — MFI
     mfi_s = _mfi(df, 14)
     if mfi_s is not None:
-        fig.add_trace(go.Scatter(x=ts_str, y=mfi_s, name="MFI", mode="lines",
-                                 line=dict(color=C["info"], width=1.5)), row=2, col=1)
+        fig.add_trace(go.Scattergl(x=ts_str, y=mfi_s, name="MFI", mode="lines",
+                                   line=dict(color=C["info"], width=1.5)), row=2, col=1)
         for lvl, col in [(80, C["danger"]), (20, C["accent"]), (50, C["muted"])]:
             fig.add_hline(y=lvl, line=dict(color=col, width=0.8, dash="dot"), row=2, col=1)
 
@@ -676,6 +683,13 @@ def _fig_price(df, r, symbol, tf):
     fig.add_trace(go.Bar(x=ts_str, y=df["volume"], name="Volume",
                          marker_color=vcol, opacity=0.7), row=3, col=1)
 
+    # Crosshair spike lines — TradingView style
+    spike_style = dict(showspikes=True, spikecolor=C["muted"],
+                       spikethickness=1, spikedash="solid", spikemode="across",
+                       spikesnap="cursor")
+    y_spike = dict(showspikes=True, spikecolor=C["muted"],
+                   spikethickness=1, spikedash="dot", spikesnap="cursor")
+
     fig.update_layout(
         paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
         font=dict(color=C["text"], size=9),
@@ -683,18 +697,27 @@ def _fig_price(df, r, symbol, tf):
                     bgcolor="rgba(0,0,0,0)", font=dict(size=8)),
         xaxis_rangeslider_visible=False,
         margin=dict(l=6, r=6, t=24, b=6),
+        uirevision=f"{symbol}_{tf}",
+        # TradingView defaults: pan by default, crosshair hover
+        dragmode="pan",
+        hovermode="x unified",
+        hoverdistance=20,
     )
-    for axis in ("xaxis", "xaxis2", "xaxis3",
-                 "yaxis", "yaxis2", "yaxis3"):
+    for axis in ("xaxis", "xaxis2", "xaxis3"):
         fig.update_layout(**{axis: dict(gridcolor=C["border"],
-                                        zerolinecolor=C["border"])})
+                                        zerolinecolor=C["border"],
+                                        **spike_style)})
+    for axis in ("yaxis", "yaxis2", "yaxis3"):
+        fig.update_layout(**{axis: dict(gridcolor=C["border"],
+                                        zerolinecolor=C["border"],
+                                        **y_spike)})
     for row_n in (1, 2, 3):
         fig.update_yaxes(side="right", row=row_n, col=1)
-    fig.update_xaxes(nticks=8)
+    fig.update_xaxes(nticks=10)
     return fig
 
 
-def _fig_orderbook(df, r, price):
+def _fig_orderbook(df, r, price, symbol="", tf=""):
     """Horizontal Volume Profile — synthetic order book."""
     vp = r.get("vp")
     fig = go.Figure(layout=dict(
@@ -756,27 +779,26 @@ def _fig_orderbook(df, r, price):
         xaxis=dict(title="Volume", gridcolor=C["border"], showticklabels=False),
         yaxis=dict(title="Price", gridcolor=C["border"], side="right"),
         xaxis_rangeslider_visible=False,
+        uirevision=f"{symbol}_{tf}",
     )
     return fig
 
 
-def _fig_delta(df):
+def _fig_delta(df, symbol="", tf=""):
     """Bar chart of per-bar volume delta with cumulative line."""
     delta_df = _delta(df)
     if delta_df is None:
         return go.Figure(layout=dict(paper_bgcolor=C["bg"],
                                      plot_bgcolor=C["surface"]))
-    _ts = pd.to_datetime(df["timestamp"] if "timestamp" in df.columns else df.index)
-    _fmt = "%m/%d %H:%M" if len(_ts) > 1 and (_ts.iloc[-1] - _ts.iloc[-2]).total_seconds() < 86400 else "%b %d"
-    ts_str = _ts.dt.strftime(_fmt)
+    ts_str = _categorical_x(df["timestamp"] if "timestamp" in df.columns else df.index)
     dcol = [C["accent"] if v >= 0 else C["danger"] for v in delta_df["delta"]]
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(go.Bar(x=ts_str, y=delta_df["delta"], name="Delta",
                          marker_color=dcol, opacity=0.8), secondary_y=False)
-    fig.add_trace(go.Scatter(x=ts_str, y=delta_df["cum"], name="Cum Delta",
-                             line=dict(color=C["info"], width=1.5)),
-                 secondary_y=True)
+    fig.add_trace(go.Scattergl(x=ts_str, y=delta_df["cum"], name="Cum Delta",
+                               line=dict(color=C["info"], width=1.5)),
+                  secondary_y=True)
     fig.add_hline(y=0, line=dict(color=C["muted"], width=0.8))
     fig.update_layout(
         paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
@@ -788,6 +810,7 @@ def _fig_delta(df):
         yaxis=dict(gridcolor=C["border"], side="right"),
         yaxis2=dict(gridcolor=C["border"], overlaying="y", side="left",
                     showgrid=False),
+        uirevision=f"{symbol}_{tf}",
     )
     return fig
 
@@ -875,6 +898,8 @@ def _verification_panel(r, price):
     return html.Div(sections)
 
 
+_last_data_hash: dict = {}   # {f"{symbol}_{tf}": (last_close, last_ts)}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main callback
 # ─────────────────────────────────────────────────────────────────────────────
@@ -900,10 +925,12 @@ def _verification_panel(r, price):
 )
 def update_smma_strategy(n_clicks, n_intervals, timeframe, symbol):
     from app import fetch_yahoo_finance_data, get_current_price
+    from dash import callback_context
 
     symbol    = symbol    or "XAUUSD"
     timeframe = timeframe or "1m"
     period    = TF_PERIOD.get(timeframe, "1d")
+    cache_key = f"{symbol}_{timeframe}"
 
     # Fetch data
     df = fetch_yahoo_finance_data(symbol, period=period, interval=timeframe)
@@ -920,6 +947,22 @@ def update_smma_strategy(n_clicks, n_intervals, timeframe, symbol):
                        style={"color": C["danger"], "fontSize": "11px"})
         return blank_fig, blank_fig, blank_fig, [], "N/A", err, err, err
 
+    # Skip full pipeline rebuild when triggered by interval and data hasn't changed
+    triggered = callback_context.triggered_id if callback_context.triggered else None
+    last_close = float(df["close"].iloc[-1])
+    last_ts    = str(df["timestamp"].iloc[-1])
+    data_sig   = (last_close, last_ts)
+    if triggered == "smma-refresh-btn":
+        # Force rebuild: clear the saved hash so interval also re-renders after manual refresh
+        _last_data_hash.pop(cache_key, None)
+    elif triggered == "smma-interval" and _last_data_hash.get(cache_key) == data_sig:
+        return no_update
+    _last_data_hash[cache_key] = data_sig
+
+    # Cap data to 400 candles for chart performance — enough for all indicators (SMMA-75 needs 75)
+    if len(df) > 400:
+        df = df.iloc[-400:].reset_index(drop=True)
+
     # Run full strategy pipeline
     r = _run_strategy(df)
 
@@ -935,8 +978,8 @@ def update_smma_strategy(n_clicks, n_intervals, timeframe, symbol):
 
     # ── Figures ───────────────────────────────────────────────────────────────
     fig_price     = _fig_price(df, r, symbol, timeframe)
-    fig_orderbook = _fig_orderbook(df, r, price)
-    fig_delta     = _fig_delta(df)
+    fig_orderbook = _fig_orderbook(df, r, price, symbol, timeframe)
+    fig_delta     = _fig_delta(df, symbol, timeframe)
 
     # ── Stat strip ────────────────────────────────────────────────────────────
     v3  = float(r["smma3"].iloc[-1])  if r["smma3"]  is not None else 0
