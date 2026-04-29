@@ -59,7 +59,7 @@ class NewsCache:
     
     CACHE_VERSION = 1
     DEFAULT_TTL_MINUTES = 2
-    MAX_ITEMS_PER_SYMBOL = 25
+    MAX_ITEMS_PER_SYMBOL = 15  # Reduced from 25 to save memory
     
     def __init__(self, cache_dir: str = None):
         """Initialize the news cache."""
@@ -326,30 +326,38 @@ class NewsCache:
 
 def run_background_news_refresh(cache: NewsCache, symbols: List[str], fetch_func):
     """
-    Run news refresh for all symbols in background.
-    
-    Args:
-        cache: NewsCache instance
-        symbols: List of symbols to refresh
-        fetch_func: Function that takes symbol and returns list of news items
+    Refresh news for all symbols in parallel (capped at 3 workers).
+
+    Each symbol's fetch is itself heavy (multi-source aggregation), so a small
+    pool keeps total memory bounded while still finishing in seconds rather
+    than minutes. Forces a GC pass at the end to release transient allocations.
     """
-    print(f"[NewsCache] Starting background refresh for {len(symbols)} symbols")
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    print(f"[NewsCache] Starting parallel background refresh for {len(symbols)} symbols")
     start_time = time.time()
-    
+
     news_by_symbol = {}
-    for symbol in symbols:
-        try:
-            items = fetch_func(symbol)
-            if items:
-                news_by_symbol[symbol] = items
-                print(f"[NewsCache] Fetched {len(items)} items for {symbol}")
-        except Exception as e:
-            print(f"[NewsCache] Error fetching {symbol}: {e}")
-            continue
-    
+    # Cap at 3 — each worker spawns its own internal source pool, so the
+    # multiplicative concurrency is what matters.
+    max_workers = min(len(symbols), 3) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_sym = {executor.submit(fetch_func, sym): sym for sym in symbols}
+        for fut in as_completed(future_to_sym):
+            sym = future_to_sym[fut]
+            try:
+                items = fut.result(timeout=25)
+                if items:
+                    news_by_symbol[sym] = items
+                    print(f"[NewsCache] Fetched {len(items)} items for {sym}")
+            except Exception as e:
+                print(f"[NewsCache] Error fetching {sym}: {e}")
+
     if news_by_symbol:
         cache.set_all(news_by_symbol)
-    
+
+    import gc
+    gc.collect()
+
     elapsed = time.time() - start_time
     print(f"[NewsCache] Background refresh completed in {elapsed:.2f}s")
 

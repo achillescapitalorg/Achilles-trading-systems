@@ -15,6 +15,16 @@ except ImportError:
     pass
 
 import os
+import sys
+
+# Alias this module under the name "app" so that page modules doing
+# `from app import ...` find it in sys.modules and reuse it, instead of
+# triggering a SECOND import of this file under the canonical name (which
+# would re-run every @callback decorator and produce "Duplicate callback
+# outputs" errors at boot).
+if __name__ in ("__main__", "app"):
+    sys.modules.setdefault("app", sys.modules[__name__])
+
 import dash
 from dash import dcc, html, Input, Output, State, callback, ctx
 import plotly.graph_objects as go
@@ -45,6 +55,18 @@ from services.news_cache import NewsCache, start_background_refresh_thread
 from services.ai_news import get_intelligent_news
 from services.markov_model import MarkovRegimeModel, run_markov_analysis
 import threading
+
+# Lazy import helper for callback functions (reduces initial memory)
+def _lazy_load_models():
+    from services.advanced_models import BlackScholes, HestonModel, HestonParams, SABRModel, SABRParams, RegimeSwitchingModel
+    from services.rl_agent import QLearningAgent
+    return {
+        "black_scholes": BlackScholes(),
+        "heston_params": None,
+        "sabr_params": None,
+        "regime_model": RegimeSwitchingModel(n_regimes=3),
+        "regime_history": []
+    }
 
 # Initialize the Dash app
 app = dash.Dash(
@@ -143,6 +165,34 @@ rl_agent_state = _persisted if _persisted else {
     "position": 0,
     "account_value": 10000.0
 }
+
+# ── Gold RL Trainer singleton (custom 1m DQN — lazy-loaded) ──────────────────
+# Construct the trainer cheaply (no torch.load yet). The actual checkpoint
+# restore is fired in a daemon thread so app startup is NOT delayed by the
+# 5-10s torch deserialization, and an OOM at load can never wedge main.
+import threading as _threading_for_rl
+try:
+    from services.gold_rl_trainer import GoldRLTrainer as _GoldRLTrainer
+    _GOLD_RL_SAVE_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data", "gold_rl_seq_model.pt",
+    )
+    _gold_rl_trainer = _GoldRLTrainer()
+
+    def _bg_load_gold_rl():
+        try:
+            if os.path.exists(_GOLD_RL_SAVE_PATH):
+                _gold_rl_trainer.load_sequence_model()
+                print("[GoldRL] Sequence model loaded in background")
+        except Exception as _e:
+            print(f"[GoldRL] Background load failed: {_e}")
+
+    _threading_for_rl.Thread(
+        target=_bg_load_gold_rl, daemon=True, name="GoldRLBgLoad",
+    ).start()
+except Exception as _grl_err:
+    print(f"[GoldRL] Trainer import failed: {_grl_err}")
+    _gold_rl_trainer = None
 
 # Global models state
 models_state = {
@@ -2430,8 +2480,8 @@ app.layout = dbc.Container(fluid=True, children=[
     html.Div(id="page-content"),
     
     # Global state components
-    dcc.Interval(id="interval-component", interval=5000, n_intervals=0),
-    dcc.Interval(id="news-refresh-interval", interval=60000, n_intervals=0),  # 60s news refresh
+    dcc.Interval(id="interval-component", interval=30000, n_intervals=0),  # 30s (reduced from 5s for memory)
+    dcc.Interval(id="news-refresh-interval", interval=300000, n_intervals=0),  # 5min (reduced from 60s for memory)
     dcc.Store(id="selected-symbol", data="XAUUSD"),
     dcc.Store(id="current-price", data=0),
     dcc.Store(id="news-refresh-trigger", data=None),  # Triggers news refresh
@@ -6064,8 +6114,15 @@ def update_unified_recommendation(symbol, n, pathname):
     return recommendation_card
 
 
-# Start background news loading when app starts
-_init_background_news()
+# Background news loading is deferred to first /news visit. Kicking it at app
+# boot was the dominant cause of OOM/swap (8 parallel symbol fetches × FinBERT
+# load each). The news page itself triggers a throttled refresh the first
+# time the user opens it. See pages.news._kick_background_refresh.
+# _init_background_news()  # disabled intentionally
+
+# Eagerly register page callbacks so they're available before first navigation.
+import pages.smma_strategy   # noqa: E402  — registers @callback for /strategy
+import pages.news            # noqa: E402  — registers @callback for /news
 
 # Register page callbacks eagerly so they are available before first navigation
 import pages.smma_strategy  # noqa: E402 — registers @callback for /strategy

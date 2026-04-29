@@ -10,47 +10,46 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 
 ## Current Status (Updated April 2026)
 
-### Recently Completed in This Session
+### Recently Completed Features
 
 1. **Replaced DeepSeek with Local AI (FinBERT + Ollama)**
    - Created `services/local_ai_service.py` - New unified AI service
    - Uses FinBERT (ProsusAI/finbert) for financial sentiment analysis
    - Uses Ollama (llama3.2:1b) for local LLM-powered market analysis
    - Added keyword-based fallback when Ollama not available
-   - Ollama is now installed and working
 
-2. **Fixed AI Prediction Tab**
+2. **News Database**
+   - Created `services/news_db.py` - SQLite database with 90-day retention
+   - Auto-cleanup of news older than 90 days
+   - Full-text search on headlines
+   - Query by date range, instrument, time filter
+
+3. **Market Context Builder**
+   - Created `services/market_context_builder.py` - Assembles ALL platform data
+   - Parallel fetch: price, signals, Heston, Markov, GARCH, risk, MC, news
+   - 8-second deadline with fallbacks
+   - Formats context for both Claude and Ollama prompts
+
+4. **Enhanced News Page**
+   - Time filter dropdown: All / Last Hour / Today / Week / Month
+   - Calendar picker for specific date lookup
+   - Falls back to cache if DB empty
+   - Added Economic Calendar tab
+   - Added AI Analysis tab
+
+5. **More RSS Sources**
+   - Added: Bing News, Seeking Alpha, Economist
+   - Auto-saves fetched news to DB
+
+6. **Fixed AI Prediction Tab**
    - Fixed Heston parameter calculation (theta was incorrectly calculated)
    - Changed probability thresholds from 5%/10% to 1%/2% for realistic 30-day predictions
-   - Recalculates probabilities directly from price paths
    - Added asset-specific default probabilities
 
-3. **Added AI Analysis Tab**
-   - New tab in "HESTON VOLATILITY & OPTIONS ANALYTICS" section
-   - Input field for asking market questions
-   - Shows FinBERT and Ollama status indicators
-   - Keyword-based fallback provides trading tips when Ollama not installed
-   - Now working with Ollama (llama3.2:1b model installed)
-
-4. **Added Markov Model Predictions**
-   - Added NEXT REGIME prediction with probability
-   - Added PREDICTION direction (Bullish/Bearish/Sideways)
-   - Added RISK LEVEL (HIGH/MEDIUM/LOW)
-   - Added prediction explanations and trading tips for each regime
-
-5. **Enhanced News Page**
-   - Added Economic Calendar tab with upcoming events
-   - Added AI Analysis tab for market summary using Ollama
-   - Changed sentiment meter label from "DeepSeek" to "FinBERT"
-
-6. **Updated Requirements**
-   - Added `transformers>=4.30.0` for FinBERT
-   - Added `tokenizers>=0.13.0`
-
-7. **Updated News Service**
-   - Replaced DeepSeek sentiment with FinBERT in `services/ai_news.py`
-   - Updated `pages/news.py` to use local AI service
-   - Fixed Ollama streaming issue (added `"stream": False` to API call)
+7. **Added Markov Model Predictions**
+   - NEXT REGIME prediction with probability
+   - PREDICTION direction (Bullish/Bearish/Sideways)
+   - RISK LEVEL (HIGH/MEDIUM/LOW)
 
 ---
 
@@ -64,8 +63,8 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 - **State**: Python in-memory state + Dash callbacks
 
 ### AI Services
-- **FinBERT**: Financial sentiment analysis (HuggingFace ProsusAI/finbert) - WORKING
-- **Ollama**: Local LLM for market analysis (llama3.2:1b installed and running)
+- **FinBERT**: Financial sentiment analysis (HuggingFace ProsusAI/finbert)
+- **Ollama**: Local LLM for market analysis (llama3.2:1b model)
 - **Keyword Fallback**: Provides trading tips when Ollama not available
 
 ### Trading Bot (`/trading_bot/`)
@@ -79,40 +78,48 @@ A professional algorithmic trading dashboard built with **Plotly Dash** featurin
 
 ```
 frontend/
-├── app.py                      # Main Dash application (~5500 lines)
-├── volatility_models.py       # GARCH, EGARCH, Heston models (1051 lines)
-├── requirements.txt           # Python dependencies
+├── app.py                      # Main Dash application (~6086 lines)
+├── volatility_models.py        # GARCH, EGARCH, Heston models (1051 lines)
+├── requirements.txt            # Python dependencies
 ├── assets/
 │   ├── chart_enhancements.js  # Custom chart JS
-│   └── style.css               # Pure black theme CSS
+│   └── style.css              # Pure black theme CSS
 ├── services/
 │   ├── __init__.py
-│   ├── market_data.py          # Yahoo Finance data fetching
-│   ├── news_scraper.py         # Multi-source news (1452 lines)
-│   ├── advanced_models.py      # Black-Scholes, Heston, VaR, Sharpe/Sortino/MaxDD
-│   ├── markov_model.py         # Hidden Markov Model regime detection
-│   ├── ai_news.py              # AI-powered news service (uses FinBERT)
-│   ├── local_ai_service.py     # FinBERT + Ollama wrapper
-│   ├── deepseek_sentiment.py   # OLD: DeepSeek (not used)
-│   ├── news_cache.py           # Persistent news cache
-│   └── rl_agent.py             # Q-Learning trading agent
+│   ├── market_data.py         # Yahoo Finance data fetching (260 lines)
+│   ├── news_scraper.py       # Multi-source news (1452 lines)
+│   ├── advanced_models.py    # Black-Scholes, Heston, VaR (1648 lines)
+│   ├── markov_model.py       # Hidden Markov Model (270 lines)
+│   ├── ai_news.py           # AI-powered news service (1000 lines)
+│   ├── local_ai_service.py   # FinBERT + Ollama wrapper (420 lines)
+│   ├── news_db.py          # SQLite news database (391 lines)
+│   ├── news_cache.py        # Persistent news cache (366 lines)
+│   ├── market_context_builder.py # AI context builder (623 lines)
+│   ├── markov_model.py     # Markov regime detection
+│   ├── claude_service.py   # Claude API integration (199 lines)
+│   ├── rl_agent.py        # Q-Learning trading agent (630 lines)
+│   ├── gold_rl_trainer.py  # Deep RL trainer (991 lines)
+│   ├── gold_rl_env.py    # RL environment (419 lines)
+│   ├── gold_rl_dueling.py # Dueling DQN (279 lines)
+│   └── deepseek_sentiment.py # OLD: DeepSeek (not used)
 ├── trading_bot/
 │   ├── __init__.py
 │   ├── trading_bot.py          # Main multi-signal bot
-│   ├── exness_bridge.py        # MT5/Exness execution
+│   ├── exness_bridge.py      # MT5/Exness execution
 │   ├── technical_indicators.py # 50+ indicators
 │   ├── quantitative_signals.py # Mean reversion, momentum
-│   ├── risk_management.py      # Kelly, position sizing
-│   ├── sentiment_analysis.py   # News sentiment
-│   ├── backtester.py           # Backtesting engine
-│   ├── run_bot.py              # Bot runner script
-│   └── config.json             # Bot configuration
+│   ├── risk_management.py   # Kelly, position sizing
+│   ├── sentiment_analysis.py  # News sentiment
+│   ├── backtester.py        # Backtesting engine
+│   ├── run_bot.py           # Bot runner script
+│   └── config.json          # Bot configuration
 ├── pages/
-│   ├── __init__.py             # Page registry
-│   ├── dashboard.py            # Dashboard page layout
-│   └── news.py                 # News page with tabs
-├── layouts/
-├── config/
+│   ├── __init__.py
+│   ├── dashboard.py        # Dashboard page layout
+│   ├── news.py             # News page with tabs (487 lines)
+│   └── smma_strategy.py    # SMMA/RL strategy (1074 lines)
+├── data/
+│   └── news.db            # SQLite news database
 └── plan/
 ```
 
@@ -169,26 +176,52 @@ frontend/
 
 ## Key Classes and Functions in `services/`
 
+### `services/news_db.py` - NewsDatabase
+- `save_news(news_items, instrument)` - Save news to SQLite database
+- `get_news_by_date_range(start, end, instrument, limit)` - Query by date range
+- `get_news_by_time_filter(instrument, time_filter, limit)` - Query by time filter
+- `get_news_by_date(date_str, instrument, limit)` - Query by specific date
+- `search_news(query, limit)` - Full-text search on headlines
+- `get_sentiment_trend(instrument, days)` - Daily sentiment summary
+- `cleanup_old_news(days)` - Auto-cleanup old news
+
 ### `services/ai_news.py` - UnifiedNewsService
 - `get_news(symbol, max_items)` - Main method to fetch news from all sources
-- `_fetch_all_sources_parallel(symbol, keywords)` - Parallel fetching from multiple sources
-- `_fetch_newsapi(keywords)` - Fetch from NewsAPI (your key works)
+- `_fetch_all_sources_parallel(symbol, keywords)` - Parallel fetching
+- `_fetch_newsapi(keywords)` - Fetch from NewsAPI
 - `_fetch_google_news(keywords, symbol)` - Fetch from Google News RSS
 - `_fetch_forexcom_news(keywords)` - Fetch from Forex.com
-- `_fetch_marketaux(symbol)` - Fetch from Marketaux API (broken - returns 401)
+- `_fetch_marketaux(symbol)` - Fetch from Marketaux API
 - `_deduplicate_and_rank(items)` - Deduplicate and rank by source priority
 
-**News Sources Currently Used:**
+**News Sources:**
 - NewsAPI (working)
-- Google News RSS (5-day filter)
+- Google News RSS
 - Forex.com
-- Marketaux (broken)
+- RSS Feeds: ForexLive, FXStreet, Kitco, DailyFX, CNBC, etc.
 
 ### `services/local_ai_service.py` - LocalAIService
 - `get_sentiment(text)` - Analyze single text sentiment
 - `get_sentiment_batch(texts)` - Batch sentiment analysis
 - `analyze_market(symbol, news, price_data)` - Market analysis with LLM
 - `chat(message, context)` - Chat with Ollama LLM
+
+### `services/market_context_builder.py` - MarketContext
+- `build_market_context(symbol)` - Assemble all platform data
+- `format_for_prompt(ctx)` - Format for Claude/gpt4all prompts
+- `format_for_ollama_prompt(ctx)` - Compact format for small LLMs
+
+**MarketContext dataclass contains:**
+- Price, trend direction, current regime
+- Technical signals (RSI, MACD, BB, etc.)
+- Unified recommendation (action, confidence, entry, SL, TP)
+- Heston parameters (kappa, theta, xi, rho, v0)
+- Markov regime (current, next, transition probability)
+- GARCH forecast (1-day, 5-day, 22-day volatility)
+- Risk metrics (VaR, Expected Shortfall, Max Drawdown, Sharpe, Sortino)
+- Monte Carlo (30-day mean price, probability up, 95% CI)
+- FinBERT aggregation (dominant sentiment, weighted score, breakdown)
+- Top news headlines
 
 ### `services/news_scraper.py` - NewsAggregator
 - `fetch_symbol_news(symbol, limit)` - Fetch news for specific symbol
@@ -273,8 +306,9 @@ frontend/
 
 ### Environment Variables
 - `NEWSAPI_KEY` - NewsAPI.org key (working)
-- `MARKETAUX_API_KEY` - Marketaux API (not working - returns 401)
-- `DEEPSEEK_API_KEY` - DeepSeek API (not working - returns 402)
+- `MARKETAUX_API_KEY` - Marketaux API (may return 401)
+- `DEEPSEEK_API_KEY` - DeepSeek API (not used)
+- `ANTHAVANTAGE_KEY` - Alpha Vantage API (optional)
 
 ### Chart Timeframes
 - 5m, 15m, 1h, 4h, 1D
@@ -290,13 +324,13 @@ frontend/
 - **Synthetic data generation** - If Yahoo Finance unavailable
 
 ### News (Current)
-- **NewsAPI** - Working (has valid key)
+- **NewsAPI** - Working
 - **Google News RSS** - Filtered by 5 days
-- **Forex.com** - Web scraping
+- **RSS Feeds** - ForexLive, FXStreet, Kitco, DailyFX, CNBC, etc.
 
 ### Sentiment (Updated)
-- **FinBERT** - Local transformer model (working)
-- **Ollama** - Local LLM (llama3.2:1b installed and running)
+- **FinBERT** - Local transformer model
+- **Ollama** - Local LLM (llama3.2:1b)
 - **Keyword fallback** - When Ollama not available
 
 ---
@@ -320,10 +354,11 @@ python run_bot.py
 ```
 
 ### Ollama Status
-Ollama is now installed with llama3.2:1b model. To ensure it's running:
+To use local LLM for market analysis:
 ```bash
 ollama serve  # Start Ollama server in background
 ollama list   # Check installed models
+ollama run llama3.2:1b  # Install model if needed
 ```
 
 ---
@@ -335,32 +370,22 @@ ollama list   # Check installed models
 3. **MT5 Optional**: Requires MetaTrader 5 terminal for live trading
 4. **Yahoo Finance Limits**: Free tier has rate limits; app gracefully degrades to synthetic data
 5. **Risk Warning**: Trading involves substantial risk; always test with paper trading first
-6. **Ollama Now Working**: AI Analysis tab uses Ollama for intelligent responses
-7. **FinBERT Loaded**: First request may be slow as model loads (cached after)
+6. **FinBERT Slow on First Request**: First sentiment analysis may be slow as model loads
+7. **Ollama Optional**: Falls back to keyword engine if Ollama not available
 
 ---
 
-## Known Issues & Architecture Gaps
+## Known Issues
 
-1. **Trading Bot Integration**: Bot runs standalone, not integrated with dashboard
-2. **News Database**: No SQLite database for historical news storage (planned)
-3. **No Time Filter**: News doesn't have time filtering (1min, 1hour, Today, etc.)
-4. **Refresh Button**: Doesn't fetch fresh news, just rebuilds from cache
-5. **RL Training**: Agent can be trained but results not prominently displayed
-6. **Backtest Panel**: Not implemented in UI
-7. **Alert System**: Not implemented
+1. **Network Errors**: When offline, API calls fail - app uses cached/fallback data
+2. **Duplicate Callbacks**: Fixed with prevent_initial_call=True
+3. **NewsAPI Rate Limits**: May be throttled on free tier
+4. **Marketaux API**: May return 401 (API key issues)
 
 ---
 
-## Future Enhancements (Planned)
+## Future Enhancements
 
-- [ ] Add News database (SQLite) with 90-day retention
-- [ ] Fix refresh button to actually fetch fresh news
-- [ ] Add time filter to news (1min, 1hour, Today, Week, Month, All)
-- [ ] Add more web scraping sources (no APIs)
-- [ ] View old news via database with calendar picker
-- [ ] Enhanced AI context with all platform data for better advice
-- [ ] Add sentiment trends chart over time
 - [ ] React/TypeScript frontend
 - [ ] Flask backend with WebSocket support
 - [ ] SQLite database for trade persistence
@@ -368,3 +393,32 @@ ollama list   # Check installed models
 - [ ] Integrate trading bot with dashboard UI
 - [ ] Implement backtest panel
 - [ ] Implement alert system
+- [ ] Add sentiment trends chart over time
+
+---
+
+## File Statistics
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| app.py | 6086 | Main Dash application |
+| services/advanced_models.py | 1648 | Financial models |
+| services/news_scraper.py | 1452 | News scraping |
+| pages/smma_strategy.py | 1074 | SMMA/RL trading |
+| volatility_models.py | 1051 | Volatility models |
+| services/ai_news.py | 1000 | AI news service |
+| services/gold_rl_trainer.py | 991 | Deep RL trainer |
+| services/market_context_builder.py | 623 | AI context |
+| services/rl_agent.py | 630 | RL agent |
+| services/local_ai_service.py | 420 | FinBERT + Ollama |
+| services/gold_rl_env.py | 419 | RL environment |
+| services/news_db.py | 391 | SQLite DB |
+| services/gold_rl_seq_agent.py | 388 | Seq RL agent |
+| services/news_cache.py | 366 | News cache |
+| pages/news.py | 487 | News page |
+| services/claude_service.py | 199 | Claude API |
+| services/markov_model.py | 270 | Markov model |
+| services/market_data.py | 260 | Market data |
+| services/gold_rl_backtest.py | 429 | Backtesting |
+| services/gold_rl_dueling.py | 279 | Dueling DQN |
+| services/deepseek_sentiment.py | 298 | DeepSeek (unused) |

@@ -7,11 +7,34 @@ from dash import dcc, html, Input, Output, callback, no_update
 import dash_bootstrap_components as dbc
 from datetime import datetime
 import random
+import threading
+import time as _time
+from concurrent.futures import ThreadPoolExecutor
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import COLORS, INSTRUMENTS, _fetch_news_from_sources, news_cache
+
+# ── Performance state ────────────────────────────────────────────────────────
+# Sentiment-aggregate cache (recomputed at most once per `_AGG_TTL` seconds —
+# the previous version called FinBERT on every callback, which OOM'd the box).
+_AGG_TTL = 60.0
+_agg_cache = {"data": None, "ts": 0.0}
+_agg_lock = threading.Lock()
+
+# Background news-refresh tracker — only one in flight, throttled.
+_bg_refresh_active = False
+_bg_refresh_lock = threading.Lock()
+_bg_last_run = 0.0
+_BG_MIN_INTERVAL = 90.0
+
+# AI summary (Ollama) cache — Ollama call takes 30-90s. Compute once in a
+# daemon thread and serve cached HTML for `_AI_SUMMARY_TTL` seconds.
+_ai_summary_cache = {"html": None, "ts": 0.0}
+_ai_summary_lock = threading.Lock()
+_ai_summary_in_flight = False
+_AI_SUMMARY_TTL = 300.0
 
 
 TOPIC_ORDER = ["Fed/Rate", "Geopolitical", "Europe", "UK", "Japan", "Asia", "Crypto", "Metals", "Equities", "Technical", "Trade", "General"]
@@ -107,20 +130,66 @@ def _fetch_and_cache(symbol: str, force: bool = False):
     return news_cache.get(symbol) or []
 
 
+def _kick_background_refresh():
+    """Refresh ALL symbols in parallel inside a daemon thread. Non-blocking,
+    throttled to one run per `_BG_MIN_INTERVAL` seconds.
+    """
+    global _bg_refresh_active, _bg_last_run
+    with _bg_refresh_lock:
+        now = _time.time()
+        if _bg_refresh_active or (now - _bg_last_run) < _BG_MIN_INTERVAL:
+            return
+        _bg_refresh_active = True
+        _bg_last_run = now
+
+    def _bg():
+        try:
+            with ThreadPoolExecutor(max_workers=min(len(INSTRUMENTS), 3)) as ex:
+                list(ex.map(lambda inst: _fetch_and_cache(inst["symbol"], force=False),
+                            INSTRUMENTS))
+            with _agg_lock:
+                _agg_cache["ts"] = 0.0   # invalidate so next callback picks up
+        except Exception as e:
+            print(f"[News] Background refresh error: {e}")
+        finally:
+            global _bg_refresh_active
+            with _bg_refresh_lock:
+                _bg_refresh_active = False
+
+    threading.Thread(target=_bg, daemon=True, name="NewsBgRefresh").start()
+
+
 def _get_all_news(force_refresh: bool = False):
+    """Read all symbols' news. force_refresh fans out in parallel. Cache path
+    is instant (in-memory dict reads).
+    """
     all_news = []
-    for inst in INSTRUMENTS:
-        symbol = inst["symbol"]
-        news_items = _fetch_and_cache(symbol, force=force_refresh)
+
+    if force_refresh:
+        with ThreadPoolExecutor(max_workers=min(len(INSTRUMENTS), 3)) as ex:
+            results = list(ex.map(
+                lambda inst: (inst, _fetch_and_cache(inst["symbol"], force=True)),
+                INSTRUMENTS,
+            ))
+    else:
+        # Cache-only path — instant
+        results = [(inst, news_cache.get(inst["symbol"]) or []) for inst in INSTRUMENTS]
+
+    for inst, news_items in results:
         if news_items:
             for item in news_items:
-                item["instrument"] = symbol
+                item["instrument"] = inst["symbol"]
                 item["instrument_name"] = inst["name"]
             all_news.extend(news_items)
+
     if not all_news:
         for inst in INSTRUMENTS:
-            all_news.append({"headline": f"Latest {inst['name']} market analysis", "sentiment": 0, "sentiment_label": "neutral", "impact": "MEDIUM", "time_ago": "Live",
-                           "source": "VibeTrading", "source_icon": "📈", "url": "#", "instrument": inst["symbol"], "instrument_name": inst["name"]})
+            all_news.append({"headline": f"Latest {inst['name']} market analysis",
+                             "sentiment": 0, "sentiment_label": "neutral",
+                             "impact": "MEDIUM", "time_ago": "Live",
+                             "source": "VibeTrading", "source_icon": "📈",
+                             "url": "#", "instrument": inst["symbol"],
+                             "instrument_name": inst["name"]})
     random.seed(42)
     random.shuffle(all_news)
     return all_news
@@ -141,74 +210,64 @@ def _get_news_with_aggregate(force_refresh: bool = False):
 
 
 def _calculate_instrument_sentiment():
-    """Calculate aggregated sentiment for each instrument using local AI (FinBERT)."""
-    from services.local_ai_service import get_local_ai_service
-    
-    ai_service = get_local_ai_service()
+    """Aggregate per-instrument sentiment from already-cached items.
+
+    Reuses the ``sentiment_label`` and ``sentiment`` fields stored on each
+    item by the news pipeline — NOT recomputed here. This is O(N) over cached
+    items: no model loads, no GPU, no network. Result is memoized for
+    `_AGG_TTL` seconds so repeated callbacks within the same minute are free.
+    """
+    now = _time.time()
+    with _agg_lock:
+        if _agg_cache["data"] is not None and (now - _agg_cache["ts"]) < _AGG_TTL:
+            return _agg_cache["data"]
+
     sentiment_data = {}
-    
     for inst in INSTRUMENTS:
         symbol = inst["symbol"]
-        news_items = news_cache.get(symbol)
-        
-        if news_items and len(news_items) > 0:
-            headlines = [item.get("headline", "") for item in news_items]
-            
-            try:
-                results = ai_service.get_sentiment_batch(headlines)
-                scores = [r.get("score", 0) for r in results]
-                sentiments = [r.get("sentiment", "neutral") for r in results]
-                
-                avg_score = sum(scores) / len(scores) if scores else 0
-                
-                positive = sum(1 for s in sentiments if s == "bullish")
-                negative = sum(1 for s in sentiments if s == "bearish")
-                
-                if positive > negative:
-                    agg_sentiment = "bullish"
-                elif negative > positive:
-                    agg_sentiment = "bearish"
-                else:
-                    agg_sentiment = "neutral"
-                
-                aggregate = {
-                    "sentiment": agg_sentiment,
-                    "score": avg_score,
-                    "confidence": abs(avg_score),
-                    "breakdown": {"bullish": positive, "bearish": negative, "neutral": len(sentiments) - positive - negative}
-                }
-            except Exception as e:
-                print(f"Sentiment error: {e}")
-                aggregate = {"sentiment": "neutral", "score": 0.0, "confidence": 0.0, "breakdown": {}}
-            
-            sentiments = [item.get("sentiment", 0) for item in news_items]
-            avg_sentiment = sum(sentiments) / len(sentiments)
-            
+        items = news_cache.get(symbol) or []
+
+        if not items:
             sentiment_data[symbol] = {
                 "name": inst["name"],
-                "avg_sentiment": avg_sentiment,
-                "ai_sentiment": aggregate.get("sentiment", "neutral"),
-                "ai_score": aggregate.get("score", 0.0),
-                "ai_confidence": aggregate.get("confidence", 0.0),
-                "news_count": len(news_items),
-                "bullish_count": sum(1 for s in sentiments if s > 0),
-                "bearish_count": sum(1 for s in sentiments if s < 0),
-                "neutral_count": sum(1 for s in sentiments if s == 0),
-                "breakdown": aggregate.get("breakdown", {})
-            }
-        else:
-            sentiment_data[symbol] = {
-                "name": inst["name"],
-                "avg_sentiment": 0,
-                "ai_sentiment": "neutral",
-                "ai_score": 0.0,
-                "ai_confidence": 0.0,
+                "avg_sentiment": 0, "ai_sentiment": "neutral",
+                "ai_score": 0.0, "ai_confidence": 0.0,
                 "news_count": 0,
-                "bullish_count": 0,
-                "bearish_count": 0,
-                "neutral_count": 0,
-                "breakdown": {}
+                "bullish_count": 0, "bearish_count": 0, "neutral_count": 0,
+                "breakdown": {},
             }
+            continue
+
+        labels = [it.get("sentiment_label", "neutral") for it in items]
+        scores = [float(it.get("sentiment", 0) or 0) for it in items]
+        positive = sum(1 for l in labels if l == "bullish")
+        negative = sum(1 for l in labels if l == "bearish")
+        neutral  = len(labels) - positive - negative
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+
+        if positive > negative:
+            agg = "bullish"
+        elif negative > positive:
+            agg = "bearish"
+        else:
+            agg = "neutral"
+
+        sentiment_data[symbol] = {
+            "name":          inst["name"],
+            "avg_sentiment": avg_score,
+            "ai_sentiment":  agg,
+            "ai_score":      avg_score,
+            "ai_confidence": abs(avg_score),
+            "news_count":    len(items),
+            "bullish_count": positive,
+            "bearish_count": negative,
+            "neutral_count": neutral,
+            "breakdown": {"bullish": positive, "bearish": negative, "neutral": neutral},
+        }
+
+    with _agg_lock:
+        _agg_cache["data"] = sentiment_data
+        _agg_cache["ts"]   = now
     return sentiment_data
 
 
@@ -396,58 +455,123 @@ def _get_economic_calendar():
     return events
 
 
+def _kick_ai_summary_refresh():
+    """Compute the Ollama market summary in a daemon thread. No-op if cached
+    or already in flight. Avoids blocking the news callback for 30-90 seconds.
+    """
+    global _ai_summary_in_flight
+    with _ai_summary_lock:
+        now = _time.time()
+        if _ai_summary_in_flight:
+            return
+        if _ai_summary_cache["html"] is not None and (now - _ai_summary_cache["ts"]) < _AI_SUMMARY_TTL:
+            return
+        _ai_summary_in_flight = True
+
+    def _compute():
+        global _ai_summary_in_flight
+        try:
+            from services.local_ai_service import get_local_ai_service
+            ai_service = get_local_ai_service()
+            status = ai_service.get_status()
+            if not status.get("ollama_available"):
+                rendered = html.P(
+                    "🦙 Ollama not available — start it with `ollama run llama3.2:1b`",
+                    style={"color": COLORS["warning"], "fontSize": "12px",
+                           "padding": "10px",
+                           "backgroundColor": f"{COLORS['warning']}20",
+                           "borderRadius": "6px"})
+            else:
+                all_news = _get_all_news()[:10]
+                headlines = [it.get("headline", "") for it in all_news if it.get("headline")]
+                news_summary = "\n".join([f"- {h}" for h in headlines[:5]])
+                prompt = (
+                    "You are a professional financial analyst. Based on these recent news "
+                    f"headlines, provide a brief market summary:\n\n{news_summary}\n\n"
+                    "Cover: overall market sentiment, key themes, short-term trading implications. "
+                    "Keep it concise (2-3 sentences)."
+                )
+                result = ai_service.chat(prompt)
+                if result.get("success"):
+                    rendered = html.Div([
+                        html.Div([
+                            html.Span("🦙 Ollama: ",
+                                      style={"color": COLORS["success"], "fontSize": "10px",
+                                             "fontWeight": "bold"}),
+                            html.Span("Connected",
+                                      style={"color": COLORS["success"], "fontSize": "10px"}),
+                        ], style={"marginBottom": "10px"}),
+                        html.Div([
+                            html.Span("🤖 AI Summary:",
+                                      style={"color": COLORS["accent"], "fontSize": "12px",
+                                             "fontWeight": "bold", "marginBottom": "8px",
+                                             "display": "block"}),
+                            html.P(result.get("response", "No analysis available"),
+                                   style={"color": COLORS["text"], "fontSize": "12px",
+                                          "lineHeight": "1.6"})
+                        ], style={"padding": "15px",
+                                  "backgroundColor": COLORS["surface_light"],
+                                  "borderRadius": "8px"})
+                    ])
+                else:
+                    rendered = html.P(
+                        f"AI analysis unavailable: {result.get('error', 'Unknown')}",
+                        style={"color": COLORS["text_secondary"]})
+            with _ai_summary_lock:
+                _ai_summary_cache["html"] = rendered
+                _ai_summary_cache["ts"]   = _time.time()
+        except Exception as e:
+            print(f"[News] AI summary compute error: {e}")
+        finally:
+            with _ai_summary_lock:
+                _ai_summary_in_flight = False
+
+    threading.Thread(target=_compute, daemon=True, name="NewsAISummary").start()
+
+
 def _get_ai_market_summary():
-    """Get AI-generated market summary using Ollama."""
-    try:
-        from services.local_ai_service import get_local_ai_service
-        
-        ai_service = get_local_ai_service()
-        status = ai_service.get_status()
-        
-        if not status.get('ollama_available'):
-            return html.Div([
-                html.P("🦙 Ollama not available. Install and run: ollama run llama3.2:1b", 
-                      style={"color": COLORS["warning"], "fontSize": "12px", "padding": "10px", "backgroundColor": f"{COLORS['warning']}20", "borderRadius": "6px"})
-            ])
-        
-        # Get recent news headlines
-        all_news = _get_all_news()[:10]
-        headlines = [item.get('headline', '') for item in all_news if item.get('headline')]
-        news_summary = "\n".join([f"- {h}" for h in headlines[:5]])
-        
-        prompt = f"""You are a professional financial analyst. Based on these recent news headlines, provide a brief market summary and trading insights:
+    """
+    Return cached AI summary instantly. NEVER blocks on Ollama.
+    First call kicks a daemon thread; subsequent calls within TTL serve cache.
+    """
+    with _ai_summary_lock:
+        cached_html = _ai_summary_cache["html"]
+        ts = _ai_summary_cache["ts"]
+        in_flight = _ai_summary_in_flight
 
-{news_summary}
-
-Provide:
-1. Overall market sentiment (Bullish/Bearish/Neutral)
-2. Key themes/trends
-3. Short-term trading implications
-Keep it concise (2-3 sentences)."""
-        
-        result = ai_service.chat(prompt)
-        
-        if result.get('success'):
-            return html.Div([
-                html.Div([
-                    html.Span("🦙 Ollama: ", style={"color": COLORS["success"], "fontSize": "10px", "fontWeight": "bold"}),
-                    html.Span("Connected", style={"color": COLORS["success"], "fontSize": "10px"}),
-                ], style={"marginBottom": "10px"}),
-                html.Div([
-                    html.Span("🤖 AI Summary:", style={"color": COLORS["accent"], "fontSize": "12px", "fontWeight": "bold", "marginBottom": "8px", "display": "block"}),
-                    html.P(result.get('response', 'No analysis available'), style={"color": COLORS["text"], "fontSize": "12px", "lineHeight": "1.6"})
-                ], style={"padding": "15px", "backgroundColor": COLORS["surface_light"], "borderRadius": "8px"})
-            ])
-        else:
-            return html.P(f"AI analysis unavailable: {result.get('error', 'Unknown')}", style={"color": COLORS["text_secondary"]})
-            
-    except Exception as e:
-        return html.P(f"Error: {str(e)}", style={"color": COLORS["danger"]})
+    now = _time.time()
+    fresh = cached_html is not None and (now - ts) < _AI_SUMMARY_TTL
+    if not fresh and not in_flight:
+        _kick_ai_summary_refresh()
+    if fresh:
+        return cached_html
+    return html.Div([
+        html.Span("🤖 ", style={"fontSize": "14px"}),
+        html.Span("AI summary is being generated…",
+                  style={"color": COLORS["text_secondary"], "fontSize": "12px"}),
+        html.Br(),
+        html.Span("(Refresh in ~30 seconds)",
+                  style={"color": COLORS["text_secondary"], "fontSize": "10px",
+                         "fontStyle": "italic"}),
+    ], style={"padding": "15px", "backgroundColor": COLORS["surface_light"],
+              "borderRadius": "8px"})
 
 
-tabs_content, article_count, last_updated = _build_news_tabs()
-sentiment_data = _calculate_instrument_sentiment()
-sentiment_meter = _render_sentiment_meter(sentiment_data)
+# ── No module-level fetches — placeholders only ──────────────────────────────
+# Previously this file ran _build_news_tabs() and _calculate_instrument_sentiment()
+# at module-import time, which loaded FinBERT and blocked the page for 30-60s.
+# The callback below populates everything from the cache instantly on first
+# render and kicks a background refresh.
+_loading_placeholder = html.Div(
+    "Loading news…",
+    style={"color": COLORS["text_secondary"], "fontSize": "13px",
+           "textAlign": "center", "padding": "40px"},
+)
+tabs_content   = _loading_placeholder
+article_count  = 0
+last_updated   = ""
+sentiment_data = {}
+sentiment_meter = html.Div(style={"height": "60px"})
 
 layout = dbc.Container(fluid=True, style={"backgroundColor": COLORS["background"], "minHeight": "100vh", "padding": "20px"}, children=[
     html.H3([html.Span("📰 ", style={"fontSize": "24px"}), "News Terminal"], style={"color": COLORS["text"], "marginBottom": "20px", "fontWeight": "bold"}),
@@ -479,9 +603,32 @@ def update_news(pathname, n_clicks, n_intervals):
     from dash import callback_context
     if pathname != "/news":
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-    triggered = callback_context.triggered_id if callback_context.triggered else None
-    force = (triggered == "refresh-btn")
-    tabs, count, updated = _build_news_tabs(force_refresh=force)
-    sentiment_data = _calculate_instrument_sentiment()
-    sentiment_meter = _render_sentiment_meter(sentiment_data)
-    return tabs, f"{count} articles", f"⏰ {updated}", sentiment_meter
+
+    try:
+        triggered = callback_context.triggered_id if callback_context.triggered else None
+        force = (triggered == "refresh-btn")
+
+        # Kick a non-blocking parallel cache refresh on every render. The UI
+        # itself is built from cache instantly; the daemon thread updates the
+        # cache so the next interval tick (60s) shows fresher items.
+        if not force:
+            _kick_background_refresh()
+
+        tabs, count, updated = _build_news_tabs(force_refresh=force)
+        sent = _calculate_instrument_sentiment()
+        meter = _render_sentiment_meter(sent)
+        return tabs, f"{count} articles", f"⏰ {updated}", meter
+    except Exception as e:
+        # Surface the error in the UI instead of leaving a perpetual spinner.
+        import traceback
+        traceback.print_exc()
+        err_div = html.Div([
+            html.H5("⚠️ News failed to load",
+                    style={"color": COLORS["danger"], "fontSize": "14px"}),
+            html.P(f"{type(e).__name__}: {e}",
+                   style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+            html.P("Check server log for traceback.",
+                   style={"color": COLORS["text_secondary"], "fontSize": "10px",
+                          "fontStyle": "italic"}),
+        ], style={"padding": "20px"})
+        return err_div, "Error", "⚠️ Error loading", html.Div(style={"height": "60px"})

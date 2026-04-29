@@ -27,6 +27,7 @@ from plotly.subplots import make_subplots
 import dash_bootstrap_components as dbc
 from dash import html, dcc, callback, Input, Output, State, Patch, no_update
 from datetime import datetime
+import threading
 
 # ── Colour palette (matches main app) ────────────────────────────────────────
 C = {
@@ -242,6 +243,64 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
     ]),
 
     dcc.Interval(id="smma-interval", interval=15_000, n_intervals=0),
+
+    # ── Gold RL Signal Panel ──────────────────────────────────────────────────
+    dbc.Row([
+        dbc.Col([
+            _card("🤖 RL SIGNAL  ·  Gold 1m DQN",
+                html.Div([
+                    dbc.Row([
+                        dbc.Col([
+                            html.Div("SIGNAL", style={"color": C["muted"],
+                                       "fontSize": "9px", "letterSpacing": "0.8px",
+                                       "textTransform": "uppercase",
+                                       "marginBottom": "2px"}),
+                            html.Div(id="smma-rl-signal-badge", children="---",
+                                     style={"fontSize": "28px", "fontWeight": "bold",
+                                            "color": C["muted"], "lineHeight": "1"}),
+                            html.Div(id="smma-rl-confidence", children="Confidence: --",
+                                     style={"color": C["muted"], "fontSize": "10px",
+                                            "marginTop": "4px"}),
+                        ], width=3),
+                        dbc.Col([
+                            dbc.Row([
+                                dbc.Col(_stat("STOP LOSS",   html.Span(id="smma-rl-sl",       children="--"), C["danger"]), width=4),
+                                dbc.Col(_stat("TAKE PROFIT", html.Span(id="smma-rl-tp",       children="--"), C["accent"]), width=4),
+                                dbc.Col(_stat("LOT SIZE",    html.Span(id="smma-rl-lot",      children="--"), C["info"]),   width=4),
+                            ]),
+                            dbc.Row([
+                                dbc.Col(_stat("WIN RATE",  html.Span(id="smma-rl-winrate",  children="--"), C["accent"]), width=4),
+                                dbc.Col(_stat("SHARPE",    html.Span(id="smma-rl-sharpe",   children="--"), C["info"]),   width=4),
+                                dbc.Col(_stat("MAX DD",    html.Span(id="smma-rl-drawdown", children="--"), C["warn"]),   width=4),
+                            ], className="mt-1"),
+                        ], width=6),
+                        dbc.Col([
+                            dbc.Button("🧠 Train Model", id="smma-rl-train-btn",
+                                       color="warning", size="sm",
+                                       style={"fontSize": "10px", "width": "100%",
+                                              "marginBottom": "6px"}),
+                            dbc.Switch(id="smma-rl-autotrade-toggle",
+                                       label="Auto Trade (Paper)",
+                                       value=False,
+                                       style={"color": C["text"], "fontSize": "10px"}),
+                            html.Div(id="smma-rl-status", children="Not trained",
+                                     style={"color": C["muted"], "fontSize": "9px",
+                                            "marginTop": "4px"}),
+                        ], width=3),
+                    ], align="center"),
+                    dbc.Progress(id="smma-rl-progress", value=0, max=500,
+                                 color="warning", striped=True, animated=True,
+                                 style={"height": "4px", "marginTop": "10px"}),
+                    html.Div(id="smma-rl-progress-text", children="",
+                             style={"color": C["muted"], "fontSize": "9px",
+                                    "marginTop": "3px"}),
+                ])
+            ),
+        ], width=12),
+    ], className="mt-2"),
+
+    dcc.Store(id="smma-rl-autotrade-store", data=False),
+    html.Div(id="smma-rl-train-output", style={"display": "none"}),
 ])
 
 
@@ -1072,3 +1131,152 @@ def update_smma_strategy(n_clicks, n_intervals, timeframe, symbol):
     return (fig_price, fig_orderbook, fig_delta,
             stat_strip, price_html,
             verif, mtf_html, log_html)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RL Signal Callbacks
+# ─────────────────────────────────────────────────────────────────────────────
+
+@callback(
+    Output("smma-rl-signal-badge",   "children"),
+    Output("smma-rl-signal-badge",   "style"),
+    Output("smma-rl-confidence",     "children"),
+    Output("smma-rl-sl",             "children"),
+    Output("smma-rl-tp",             "children"),
+    Output("smma-rl-lot",            "children"),
+    Output("smma-rl-winrate",        "children"),
+    Output("smma-rl-sharpe",         "children"),
+    Output("smma-rl-drawdown",       "children"),
+    Output("smma-rl-status",         "children"),
+    Output("smma-rl-progress",       "value"),
+    Output("smma-rl-progress-text",  "children"),
+    Input("smma-interval",           "n_intervals"),
+    Input("smma-symbol-selector",    "value"),
+    prevent_initial_call=False,
+)
+def update_rl_signal(n_intervals, symbol):
+    from app import fetch_yahoo_finance_data, _gold_rl_trainer
+
+    _muted = {"fontSize": "28px", "fontWeight": "bold", "color": C["muted"], "lineHeight": "1"}
+
+    if _gold_rl_trainer is None:
+        return "N/A", _muted, "Trainer unavailable", "--","--","--","--","--","--", "Trainer import error", 0, ""
+
+    trainer = _gold_rl_trainer
+
+    if trainer.is_training:
+        prog = trainer.progress
+        ep, total, rew = prog.get("episode", 0), prog.get("total", 500), prog.get("reward", 0.0)
+        phase = prog.get("phase", "training")
+        return (
+            "⏳", {"fontSize":"28px","fontWeight":"bold","color":C["warn"],"lineHeight":"1"},
+            f"Phase: {phase}", "--","--","--","--","--","--",
+            f"Training ep {ep}/{total}  reward={rew:.3f}", ep,
+            f"Episode {ep}/{total}  •  reward={rew:.4f}",
+        )
+
+    if trainer.agent is None:
+        return ("---", _muted, "Model not trained — click Train",
+                "--","--","--","--","--","--",
+                "Click 'Train Model' to begin (~5-15 min)", 0, "")
+
+    if symbol != "XAUUSD":
+        return ("N/A", _muted, "RL model is XAUUSD-only",
+                "--","--","--","--","--","--",
+                "Switch to XAUUSD to see RL signals", 0, "")
+
+    try:
+        df = fetch_yahoo_finance_data("XAUUSD", period="5d", interval="1m")
+        if df is None or len(df) < 100:
+            return (no_update,)*9 + ("No data", no_update, no_update)
+        sig = trainer.generate_live_signal(trainer.agent, df)
+    except Exception as e:
+        return ("ERR", {"fontSize":"28px","fontWeight":"bold","color":C["danger"],"lineHeight":"1"},
+                str(e)[:50], "--","--","--","--","--","--", "Signal error", 0, "")
+
+    action = sig["action"]
+    if "BUY" in action:
+        col = C["accent"] if action == "BUY" else "#7fff7f"
+    elif "SELL" in action:
+        col = C["danger"] if action == "SELL" else "#ff7575"
+    else:
+        col = C["warn"]
+    badge_style = {"fontSize":"28px","fontWeight":"bold","color":col,"lineHeight":"1"}
+
+    probs = sig.get("probs", {})
+    p_buy, p_sell, p_hold = probs.get("BUY",0), probs.get("SELL",0), probs.get("HOLD",0)
+    conf_txt = f"BUY {p_buy:.0%}  SELL {p_sell:.0%}  HOLD {p_hold:.0%}  |  ATR {sig.get('atr',0):.2f}"
+
+    m = trainer.get_last_metrics()
+    win_rate = f"{m.get('win_rate', 0):.1%}"
+    sharpe   = f"{m.get('sharpe', 0):.2f}"
+    max_dd   = f"{m.get('max_drawdown', 0):.1%}"
+
+    da = m.get("test_direction_acc", m.get("direction_accuracy", 0))
+    return (
+        action, badge_style, conf_txt,
+        f"{sig['sl']:,.2f}", f"{sig['tp']:,.2f}", f"{sig['lot_size']:.2f}",
+        win_rate, sharpe, max_dd,
+        f"Ready  •  Test Dir.Acc: {da:.1%}  •  Trades: {m.get('total_trades', 0)}",
+        500, f"Trained on {m.get('train_bars', 0):,} bars  •  test on {m.get('test_bars', 0):,} bars",
+    )
+
+
+@callback(
+    Output("smma-rl-train-output", "children"),
+    Input("smma-rl-train-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def start_rl_training(n_clicks):
+    from app import _gold_rl_trainer
+    if not n_clicks:
+        return no_update
+    if _gold_rl_trainer is None:
+        return "Trainer unavailable"
+    if _gold_rl_trainer.is_training:
+        return "Already training…"
+
+    def _bg():
+        try:
+            # Use the sequence model (CNN multi-head) — pre-train + RL fine-tune
+            _gold_rl_trainer.train_sequence_model(pretrain_epochs=40, months_back=1)
+        except Exception as e:
+            print(f"[GoldRL] BG training error: {e}")
+        finally:
+            _gold_rl_trainer.is_training = False
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return "Training started!"
+
+
+@callback(
+    Output("smma-rl-autotrade-store", "data"),
+    Input("smma-interval",             "n_intervals"),
+    State("smma-rl-autotrade-toggle",  "value"),
+    State("smma-rl-autotrade-store",   "data"),
+    prevent_initial_call=True,
+)
+def execute_auto_trade(n_intervals, auto_on, store_data):
+    from app import fetch_yahoo_finance_data, _gold_rl_trainer
+    if not auto_on or _gold_rl_trainer is None:
+        return store_data
+    if _gold_rl_trainer.agent is None or _gold_rl_trainer.is_training:
+        return store_data
+
+    try:
+        df = fetch_yahoo_finance_data("XAUUSD", period="5d", interval="1m")
+        if df is None or len(df) < 100:
+            return store_data
+        sig = _gold_rl_trainer.generate_live_signal(_gold_rl_trainer.agent, df)
+        if sig["action"] in ("HOLD",):
+            return store_data
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"[AutoTrade] {ts} {sig['action']} {sig['lot_size']:.2f}L "
+              f"SL={sig['sl']:.2f} TP={sig['tp']:.2f}")
+        return {**(store_data or {}),
+                "last_trade": sig["action"],
+                "last_price": sig["price"],
+                "last_ts":    ts}
+    except Exception as e:
+        print(f"[AutoTrade] Error: {e}")
+        return store_data

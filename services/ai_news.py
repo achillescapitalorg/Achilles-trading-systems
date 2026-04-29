@@ -21,7 +21,12 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from services.local_ai_service import analyze_sentiment, get_local_ai_service
+from services.local_ai_service import analyze_sentiment, get_local_ai_service, FinBERTSentiment
+
+# When True, every headline triggers a FinBERT inference. With 8 symbols × 25
+# items each fetched in parallel, this caused 3-4 GB RAM blowups + swap thrash.
+# The keyword analyzer is good enough for the news ticker and uses zero MB.
+USE_FINBERT_IN_FETCH = False
 
 
 def _jaccard(a: str, b: str) -> float:
@@ -254,7 +259,9 @@ class UnifiedNewsService:
         self._sentiment_cache_lock = threading.Lock()
         self._SENTIMENT_CACHE_TTL = 300
 
-        self._max_workers = 4
+        # Lower worker count caps simultaneous outbound requests to keep RAM
+        # bounded. With FinBERT skipped, the bottleneck is network I/O.
+        self._max_workers = 2
     
     def get_news(self, symbol: str, max_items: int = 15) -> List[Dict]:
         """
@@ -279,24 +286,17 @@ class UnifiedNewsService:
         Fetch from all sources in parallel — RSS, yfinance, Alpha Vantage, NewsAPI, Marketaux.
         Uses as_completed() with 20s wall-clock budget.
         """
+        # Use fewer workers to reduce memory usage
         all_results = []
-        relevant_rss = self.SYMBOL_RSS_MAP.get(symbol, list(self.RSS_FEEDS.keys())[:4])
-        max_workers = self._max_workers + len(relevant_rss) + 3
-        _silent_sources = {"forexcom", "google"}
+        relevant_rss = self.SYMBOL_RSS_MAP.get(symbol, list(self.RSS_FEEDS.keys())[:3])
+        max_workers = min(4, len(relevant_rss) + 2)  # Limit to 4 workers max
+        _silent_sources = {"forexcom", "google", "marketaux", "newsapi", "alphavantage"}
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures: Dict = {}
 
-            # Tier 1: paid APIs
-            if self.newsapi_key:
-                futures[executor.submit(self._fetch_newsapi, keywords)] = "newsapi"
-            if self.marketaux_api_key:
-                futures[executor.submit(self._fetch_marketaux, symbol)] = "marketaux"
-            if self.alphavantage_key:
-                futures[executor.submit(self._fetch_alphavantage, symbol, keywords)] = "alphavantage"
-
-            # Tier 2: direct RSS
-            for src_name in relevant_rss:
+            # Only fetch from direct RSS sources (most reliable, no API key needed)
+            for src_name in relevant_rss[:3]:  # Only first 3 RSS sources
                 feed_cfg = self.RSS_FEEDS.get(src_name, {})
                 feed_url = feed_cfg.get("url", "")
                 if feed_url:
@@ -304,15 +304,11 @@ class UnifiedNewsService:
                         self._fetch_rss_direct, src_name, feed_url, keywords
                     )] = f"rss_{src_name}"
 
-            # Tier 3: yfinance JSON (no API key required)
+            # Tier 2: yfinance JSON (no API key required) - fetch last as fallback
             futures[executor.submit(self._fetch_yfinance_news, symbol, keywords)] = "yfinance"
 
-            # Tier 4: Google News scraping (unreliable — silent on failure)
-            futures[executor.submit(self._fetch_forexcom_news, keywords)] = "forexcom"
-            futures[executor.submit(self._fetch_google_news, keywords, symbol)] = "google"
-
             try:
-                for future in as_completed(futures, timeout=20):
+                for future in as_completed(futures, timeout=15):
                     source = futures[future]
                     try:
                         items = future.result()
@@ -607,7 +603,7 @@ class UnifiedNewsService:
                 if time.time() - cached["timestamp"] < self._SENTIMENT_CACHE_TTL:
                     return cached["sentiment"]
         
-        result = analyze_sentiment(headline)
+        result = analyze_sentiment(headline) if USE_FINBERT_IN_FETCH else FinBERTSentiment._keyword_fallback(headline)
         sentiment = result.get("sentiment", "neutral")
         
         with self._sentiment_cache_lock:
@@ -910,7 +906,7 @@ class UnifiedNewsService:
                         "confidence": cached["confidence"]
                     }
         
-        result = analyze_sentiment(headline)
+        result = analyze_sentiment(headline) if USE_FINBERT_IN_FETCH else FinBERTSentiment._keyword_fallback(headline)
         
         with self._sentiment_cache_lock:
             self._sentiment_cache[cache_key] = {
