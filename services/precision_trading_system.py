@@ -1015,15 +1015,23 @@ class HMMRegimeDetector:
         self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
 
     def fit(self, df: pd.DataFrame):
-        if not HMMLEARN_AVAILABLE or self.scaler is None:
+        if not HMMLEARN_AVAILABLE or not SKLEARN_AVAILABLE:
             return
-        rets = df["close"].pct_change().fillna(0).values.reshape(-1, 1)
-        vol = pd.Series(rets.flatten()).rolling(10).std().fillna(0).values.reshape(-1, 1)
-        feats = np.hstack([rets, vol])
+        # Always re-init scaler — avoids dtype issues from stale pickles saved
+        # under an older sklearn version (array_api_compat changed in 1.4+).
+        self.scaler = StandardScaler()
+        rets = df["close"].pct_change().fillna(0).values.reshape(-1, 1).astype(np.float64)
+        vol = pd.Series(rets.flatten()).rolling(10).std().fillna(0).values.reshape(-1, 1).astype(np.float64)
+        feats = np.hstack([rets, vol]).astype(np.float64)
         feats = feats[~np.isnan(feats).any(axis=1)]
         if len(feats) < 100:
             return
-        Xs = self.scaler.fit_transform(feats)
+        try:
+            Xs = self.scaler.fit_transform(feats)
+        except Exception as e:
+            print(f"[HMM] scaler fit failed: {e}")
+            self.model = None
+            return
         self.model = GaussianHMM(
             n_components=self.n_regimes, covariance_type="full",
             n_iter=100, random_state=42,
@@ -1037,13 +1045,14 @@ class HMMRegimeDetector:
     def predict_regime(self, df: pd.DataFrame) -> pd.Series:
         if self.model is None or self.scaler is None:
             return pd.Series(0, index=df.index)
-        rets = df["close"].pct_change().fillna(0).values.reshape(-1, 1)
-        vol = pd.Series(rets.flatten()).rolling(10).std().fillna(0).values.reshape(-1, 1)
-        feats = np.hstack([rets, vol])
-        feats = self.scaler.transform(feats)
         try:
+            rets = df["close"].pct_change().fillna(0).values.reshape(-1, 1).astype(np.float64)
+            vol = pd.Series(rets.flatten()).rolling(10).std().fillna(0).values.reshape(-1, 1).astype(np.float64)
+            feats = np.hstack([rets, vol]).astype(np.float64)
+            feats = self.scaler.transform(feats)
             return pd.Series(self.model.predict(feats), index=df.index)
-        except Exception:
+        except Exception as e:
+            print(f"[HMM] predict_regime failed: {e}")
             return pd.Series(0, index=df.index)
 
 
