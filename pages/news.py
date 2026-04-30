@@ -36,6 +36,15 @@ _ai_summary_lock = threading.Lock()
 _ai_summary_in_flight = False
 _AI_SUMMARY_TTL = 300.0
 
+# AI sentiment refinement — once the news cache is filled (with cheap keyword
+# sentiment), a daemon thread re-scores headlines with the DistilRoBERTa
+# financial-sentiment model. The refined results overwrite the cached items
+# so the next callback render shows accurate sentiment.
+_ai_refine_in_flight = False
+_ai_refine_lock = threading.Lock()
+_ai_refine_last_run = 0.0
+_AI_REFINE_INTERVAL = 600.0   # at most one refinement per 10 minutes
+
 
 TOPIC_ORDER = ["Fed/Rate", "Geopolitical", "Europe", "UK", "Japan", "Asia", "Crypto", "Metals", "Equities", "Technical", "Trade", "General"]
 TOPIC_ICONS = {"Fed/Rate": "🏦", "Europe": "🇪🇺", "UK": "🇬🇧", "Japan": "🇯🇵", "Asia": "🌏", "Geopolitical": "🌍", "Crypto": "₿", "Metals": "🥇", "Equities": "📈", "Technical": "📊", "Trade": "📦", "General": "📰"}
@@ -132,7 +141,9 @@ def _fetch_and_cache(symbol: str, force: bool = False):
 
 def _kick_background_refresh():
     """Refresh ALL symbols in parallel inside a daemon thread. Non-blocking,
-    throttled to one run per `_BG_MIN_INTERVAL` seconds.
+    throttled to one run per `_BG_MIN_INTERVAL` seconds. After the fetch
+    completes, kicks the AI sentiment refinement (DistilRoBERTa) so the next
+    page render shows model-grade scores instead of keyword-fallback ones.
     """
     global _bg_refresh_active, _bg_last_run
     with _bg_refresh_lock:
@@ -149,6 +160,10 @@ def _kick_background_refresh():
                             INSTRUMENTS))
             with _agg_lock:
                 _agg_cache["ts"] = 0.0   # invalidate so next callback picks up
+            # Now that fresh items are in cache, schedule sentiment refinement.
+            # This runs in its own daemon (non-blocking) and is throttled to
+            # at most one run per _AI_REFINE_INTERVAL.
+            _kick_ai_sentiment_refinement()
         except Exception as e:
             print(f"[News] Background refresh error: {e}")
         finally:
@@ -157,6 +172,67 @@ def _kick_background_refresh():
                 _bg_refresh_active = False
 
     threading.Thread(target=_bg, daemon=True, name="NewsBgRefresh").start()
+
+
+def _kick_ai_sentiment_refinement():
+    """Re-score cached headlines using the heavy financial-sentiment model
+    (DistilRoBERTa preferred, FinBERT fallback). Throttled to one run per
+    `_AI_REFINE_INTERVAL` seconds. Updates each item's
+    ``sentiment``/``sentiment_label``/``confidence`` in-place and writes the
+    cache back to disk.
+    """
+    global _ai_refine_in_flight, _ai_refine_last_run
+    with _ai_refine_lock:
+        now = _time.time()
+        if _ai_refine_in_flight or (now - _ai_refine_last_run) < _AI_REFINE_INTERVAL:
+            return
+        _ai_refine_in_flight = True
+        _ai_refine_last_run = now
+
+    def _refine():
+        global _ai_refine_in_flight
+        try:
+            from services.local_ai_service import FinBERTSentiment
+
+            # Load (or reuse) the model — first call here is the only place
+            # we pay the load cost. After that the model stays in memory and
+            # subsequent inferences are quick.
+            for inst in INSTRUMENTS:
+                symbol = inst["symbol"]
+                items = news_cache.get(symbol)
+                if not items:
+                    continue
+                changed = False
+                # Cap refinement to top 15 items per symbol to keep CPU bounded
+                for it in items[:15]:
+                    headline = it.get("headline", "")
+                    if not headline:
+                        continue
+                    try:
+                        result = FinBERTSentiment.analyze(headline)
+                    except Exception:
+                        continue
+                    if not result:
+                        continue
+                    new_label = result.get("sentiment", "neutral")
+                    if it.get("sentiment_label") != new_label:
+                        it["sentiment_label"] = new_label
+                        it["sentiment"]       = result.get("score", 0.0)
+                        it["confidence"]      = result.get("confidence", 0.0)
+                        changed = True
+                if changed:
+                    news_cache.set(symbol, items)
+            # Invalidate sentiment-aggregate cache so the new scores take effect
+            with _agg_lock:
+                _agg_cache["ts"] = 0.0
+            print("[News] AI sentiment refinement done")
+        except Exception as e:
+            print(f"[News] AI refinement error: {e}")
+        finally:
+            with _ai_refine_lock:
+                _ai_refine_in_flight = False
+
+    threading.Thread(target=_refine, daemon=True, name="NewsAIRefine").start()
 
 
 def _get_all_news(force_refresh: bool = False):

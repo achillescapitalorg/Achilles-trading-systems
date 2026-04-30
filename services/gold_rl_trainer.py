@@ -627,14 +627,42 @@ class GoldRLTrainer:
             return {"action": "HOLD", "confidence": 0.0, "sl": 0.0, "tp": 0.0,
                     "lot_size": 0.01, "q_values": [0, 0, 0]}
 
-        # Build observation for the LAST bar
+        # Build observation for the LAST bar. SequenceAgent and DuelingAgent
+        # have different inputs:
+        #   SequenceAgent.get_q_values(seq, dyn)  ← (T,F) sequence + (D,) dyn
+        #   GoldDuelingAgent.get_q_values(state)  ← flat (state_size,) vector
         env = self._make_env(df_feat, scaler=self.scaler)
         last_static = env._static_feats[-1]   # already scaled if scaler present
         dynamic = np.array([0.0, 0.0, 0.5, 1.0], dtype=np.float32)
-        obs = np.concatenate([last_static, dynamic]).astype(np.float32)
+        try:
+            if isinstance(agent, SequenceAgent):
+                # Use the env's sequence helper if available; otherwise build
+                # the trailing window manually from _static_feats.
+                seq_len = getattr(agent, "seq_len", self.SEQ_LEN)
+                if hasattr(env, "get_sequence_obs"):
+                    # _step is at the start; seek to the last bar so that
+                    # get_sequence_obs returns the trailing window.
+                    env._step = len(env._static_feats) - 1
+                    seq = env.get_sequence_obs(seq_len=seq_len)
+                else:
+                    static = env._static_feats
+                    if len(static) >= seq_len:
+                        seq = static[-seq_len:].astype(np.float32)
+                    else:
+                        pad = np.zeros((seq_len - len(static), static.shape[1]),
+                                        dtype=np.float32)
+                        seq = np.concatenate([pad, static], axis=0).astype(np.float32)
+                q_vals = agent.get_q_values(seq, dynamic)
+            else:
+                # Single-bar agent (DuelingAgent)
+                obs = np.concatenate([last_static, dynamic]).astype(np.float32)
+                q_vals = agent.get_q_values(obs)
+        except Exception as e:
+            print(f"[GoldRL] get_q_values failed: {e}")
+            return {"action": "HOLD", "confidence": 0.0, "sl": 0.0, "tp": 0.0,
+                    "lot_size": 0.01, "q_values": [0, 0, 0]}
 
-        q_vals = agent.get_q_values(obs)
-        if len(q_vals) < 3:
+        if q_vals is None or len(q_vals) < 3:
             q_vals = np.zeros(3)
 
         # Softmax over Q-values for probabilities

@@ -48,3 +48,8 @@ anthropic>=0.40.0
 # RSS feed parsing - for new news sources
 feedparser>=6.0.0
 
+# Precision Trading System (1-min) — Layer 3 ML signal models
+xgboost>=2.0.0     # gradient-boosted classifier (XAU/BTC/EUR/GBP)
+pykalman>=0.9.5    # Kalman price denoising (Layer 1)
+hmmlearn>=0.3.0    # HMM regime detection (Layer 3)
+

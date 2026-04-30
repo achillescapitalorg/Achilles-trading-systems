@@ -121,32 +121,46 @@ class UnifiedNewsService:
     }
 
     # Direct RSS feed configuration — 20 feeds (blocked feeds replaced with working alternatives)
+    # Each feed audited for HTTP 200 + non-zero entry count. Dead ones removed:
+    # Kitco (404), Mining.com (403), DailyFX (RST), Benzinga (403), MyFXBook
+    # (404), ForexFactory (403), The Block (403), Business Wire (404).
+    # Replacements added: Action Forex, Bloomberg Markets, Seeking Alpha,
+    # Investing.com Forex/Commodities, BeInCrypto, CryptoSlate.
     RSS_FEEDS: Dict[str, Dict] = {
-        # reuters.com and ft.com dropped public RSS — replaced with ForexLive + Guardian
+        # ── Forex / macro ──
         "ForexLive": {
             "url": "https://www.forexlive.com/feed/news",
             "icon": "📰", "priority": 9,
-        },
-        "Guardian Business": {
-            "url": "https://www.theguardian.com/uk/business/rss",
-            "icon": "📰", "priority": 7,
         },
         "FXStreet": {
             "url": "https://www.fxstreet.com/rss/news",
             "icon": "💱", "priority": 8,
         },
-        "Kitco": {
-            "url": "https://www.kitco.com/rss/news.xml",
+        "Action Forex": {
+            "url": "https://www.actionforex.com/feed/",
+            "icon": "💱", "priority": 7,
+        },
+        "Investing Forex": {
+            "url": "https://www.investing.com/rss/forex.rss",
+            "icon": "💱", "priority": 7,
+        },
+        # ── Commodities / gold ──
+        "Investing Commodities": {
+            "url": "https://www.investing.com/rss/commodities.rss",
             "icon": "🥇", "priority": 7,
         },
-        # investing.com blocks scrapers via Cloudflare — replaced with Mining.com for metals
-        "Mining.com": {
-            "url": "https://www.mining.com/feed/",
-            "icon": "⛏️", "priority": 7,
+        # ── Big-picture / equities ──
+        "Bloomberg Markets": {
+            "url": "https://feeds.bloomberg.com/markets/news.rss",
+            "icon": "💼", "priority": 9,
         },
-        "DailyFX": {
-            "url": "https://www.dailyfx.com/feeds/all",
-            "icon": "📊", "priority": 6,
+        "Guardian Business": {
+            "url": "https://www.theguardian.com/uk/business/rss",
+            "icon": "📰", "priority": 7,
+        },
+        "Seeking Alpha": {
+            "url": "https://seekingalpha.com/feed.xml",
+            "icon": "📊", "priority": 7,
         },
         "CNBC Markets": {
             "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
@@ -160,26 +174,19 @@ class UnifiedNewsService:
             "url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines",
             "icon": "⌚", "priority": 6,
         },
-        "Benzinga": {
-            "url": "https://www.benzinga.com/feed",
-            "icon": "📰", "priority": 6,
+        "Nasdaq": {
+            "url": "https://www.nasdaq.com/feed/rssoutbound?category=Markets",
+            "icon": "💻", "priority": 7,
+        },
+        "Yahoo Finance": {
+            "url": "https://finance.yahoo.com/rss/topfinstories",
+            "icon": "🟣", "priority": 6,
         },
         "ZeroHedge": {
             "url": "https://feeds.feedburner.com/zerohedge/feed",
             "icon": "⚠️", "priority": 5,
         },
-        "Nasdaq": {
-            "url": "https://www.nasdaq.com/feed/rssoutbound?category=Markets",
-            "icon": "💻", "priority": 7,
-        },
-        "MyFXBook": {
-            "url": "https://www.myfxbook.com/rss/forex-news-rss",
-            "icon": "📒", "priority": 7,
-        },
-        "ForexFactory": {
-            "url": "https://www.forexfactory.com/ff_calendar.php?week=this&ctype=impact&timezone=NY&format=xml",
-            "icon": "🏭", "priority": 7,
-        },
+        # ── Crypto ──
         "CoinDesk": {
             "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
             "icon": "₿", "priority": 7,
@@ -192,30 +199,35 @@ class UnifiedNewsService:
             "url": "https://decrypt.co/feed",
             "icon": "🔑", "priority": 6,
         },
-        "The Block": {
-            "url": "https://www.theblock.co/rss.xml",
-            "icon": "⛓️", "priority": 6,
+        "BeInCrypto": {
+            "url": "https://beincrypto.com/feed/",
+            "icon": "🟠", "priority": 6,
         },
-        "Yahoo Finance": {
-            "url": "https://finance.yahoo.com/rss/topfinstories",
-            "icon": "🟣", "priority": 6,
-        },
-        "Business Wire": {
-            "url": "https://www.businesswire.com/rss/home/?rss=G1",
-            "icon": "📡", "priority": 6,
+        "CryptoSlate": {
+            "url": "https://cryptoslate.com/feed/",
+            "icon": "🪙", "priority": 6,
         },
     }
 
-    # Which RSS sources are relevant for each symbol
+    # Which RSS sources are relevant for each symbol — only feeds confirmed
+    # working today. Each list ordered by relevance for that symbol.
     SYMBOL_RSS_MAP: Dict[str, List[str]] = {
-        "XAUUSD": ["ForexLive", "FXStreet", "Kitco", "Mining.com", "MyFXBook", "ForexFactory", "CNBC Markets"],
-        "BTCUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "The Block", "ForexLive", "CNBC Markets"],
-        "ETHUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "The Block", "ForexLive"],
-        "EURUSD": ["FXStreet", "ForexLive", "DailyFX", "MyFXBook", "ForexFactory", "Guardian Business"],
-        "GBPUSD": ["FXStreet", "ForexLive", "DailyFX", "MyFXBook", "Guardian Business"],
-        "USDJPY": ["FXStreet", "ForexLive", "DailyFX", "MyFXBook", "CNBC Markets"],
-        "SPX500": ["MarketWatch", "ForexLive", "CNBC Markets", "Guardian Business", "Nasdaq", "Business Wire"],
-        "NAS100": ["MarketWatch", "CNBC Markets", "Nasdaq", "ForexLive", "Guardian Business", "Benzinga"],
+        "XAUUSD": ["ForexLive", "FXStreet", "Investing Commodities", "Action Forex",
+                   "Bloomberg Markets", "CNBC Markets"],
+        "BTCUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "BeInCrypto", "CryptoSlate",
+                   "Bloomberg Markets", "ForexLive"],
+        "ETHUSD": ["CoinDesk", "CoinTelegraph", "Decrypt", "BeInCrypto", "CryptoSlate",
+                   "ForexLive"],
+        "EURUSD": ["FXStreet", "ForexLive", "Action Forex", "Investing Forex",
+                   "Guardian Business", "Bloomberg Markets"],
+        "GBPUSD": ["FXStreet", "ForexLive", "Action Forex", "Investing Forex",
+                   "Guardian Business"],
+        "USDJPY": ["FXStreet", "ForexLive", "Action Forex", "Investing Forex",
+                   "CNBC Markets"],
+        "SPX500": ["MarketWatch", "Bloomberg Markets", "Seeking Alpha",
+                   "CNBC Markets", "Guardian Business", "Nasdaq"],
+        "NAS100": ["MarketWatch", "Bloomberg Markets", "Seeking Alpha",
+                   "CNBC Markets", "Nasdaq", "ForexLive"],
     }
     
     _HIGH_IMPACT = [
@@ -230,10 +242,30 @@ class UnifiedNewsService:
         'weekly', 'monthly', 'seasonal', 'preview', 'wrap-up',
     ]
 
+    # Finnhub forex/crypto symbol mapping (uses OANDA convention for forex)
+    _FINNHUB_FOREX_MAP: Dict[str, str] = {
+        "XAUUSD": "OANDA:XAU_USD",
+        "EURUSD": "OANDA:EUR_USD",
+        "GBPUSD": "OANDA:GBP_USD",
+        "USDJPY": "OANDA:USD_JPY",
+    }
+    _FINNHUB_CRYPTO_MAP: Dict[str, str] = {
+        "BTCUSD": "BINANCE:BTCUSDT",
+        "ETHUSD": "BINANCE:ETHUSDT",
+    }
+    _FINNHUB_CATEGORY_MAP: Dict[str, str] = {
+        # Finnhub /news endpoint takes category in {general, forex, crypto, merger}
+        "XAUUSD": "forex",
+        "EURUSD": "forex", "GBPUSD": "forex", "USDJPY": "forex",
+        "BTCUSD": "crypto", "ETHUSD": "crypto",
+        "SPX500": "general", "NAS100": "general",
+    }
+
     def __init__(self):
         self.newsapi_key = os.getenv("NEWSAPI_KEY", "")
         self.marketaux_api_key = os.getenv("MARKETAUX_API_KEY", "")
         self.alphavantage_key = os.getenv("ALPHAVANTAGE_KEY", "")
+        self.finnhub_key = os.getenv("FINNHUB_KEY", "")
         self._symbol_keywords = {
             "XAUUSD": ["gold price", "gold futures", "precious metals", "XAUUSD", "gold rally",
                        "gold demand", "gold ETF", "XAU", "safe haven", "gold market"],
@@ -290,13 +322,15 @@ class UnifiedNewsService:
         all_results = []
         relevant_rss = self.SYMBOL_RSS_MAP.get(symbol, list(self.RSS_FEEDS.keys())[:3])
         max_workers = min(4, len(relevant_rss) + 2)  # Limit to 4 workers max
-        _silent_sources = {"forexcom", "google", "marketaux", "newsapi", "alphavantage"}
+        _silent_sources = {"forexcom", "google", "marketaux", "newsapi", "alphavantage", "finnhub"}
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures: Dict = {}
 
-            # Only fetch from direct RSS sources (most reliable, no API key needed)
-            for src_name in relevant_rss[:3]:  # Only first 3 RSS sources
+            # Tier 1: direct RSS sources (most reliable, no API key needed).
+            # Increased to 4 sources since dead feeds were pruned and the
+            # remaining ones are all confirmed working.
+            for src_name in relevant_rss[:4]:
                 feed_cfg = self.RSS_FEEDS.get(src_name, {})
                 feed_url = feed_cfg.get("url", "")
                 if feed_url:
@@ -304,8 +338,12 @@ class UnifiedNewsService:
                         self._fetch_rss_direct, src_name, feed_url, keywords
                     )] = f"rss_{src_name}"
 
-            # Tier 2: yfinance JSON (no API key required) - fetch last as fallback
+            # Tier 2: yfinance JSON (no API key required) — broad coverage
             futures[executor.submit(self._fetch_yfinance_news, symbol, keywords)] = "yfinance"
+
+            # Tier 3: Finnhub (60 req/min free tier; news + sentiment endpoint)
+            if self.finnhub_key:
+                futures[executor.submit(self._fetch_finnhub, symbol, keywords)] = "finnhub"
 
             try:
                 for future in as_completed(futures, timeout=15):
@@ -461,6 +499,98 @@ class UnifiedNewsService:
             return items
         except Exception as e:
             print(f"[UnifiedNews] yfinance news error ({ticker_sym}): {e}")
+            return []
+
+    def _fetch_finnhub(self, symbol: str, keywords: List[str]) -> List[Dict]:
+        """Fetch news from Finnhub (free tier: 60 req/min).
+
+        Uses two endpoints depending on the symbol:
+          1. /company-news for forex/crypto pairs that map to a Finnhub symbol.
+             (Returns the most actionable, symbol-specific news.)
+          2. /news for category-level news (general/forex/crypto) when there's
+             no direct symbol mapping (indices like SPX500, NAS100).
+
+        Set FINNHUB_KEY in .env to enable. Skipped silently if not set.
+        """
+        if not self.finnhub_key:
+            return []
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.utcnow()
+            news_items: List[Dict] = []
+
+            # Try symbol-specific endpoint first
+            mapped = (self._FINNHUB_FOREX_MAP.get(symbol)
+                      or self._FINNHUB_CRYPTO_MAP.get(symbol))
+            articles = []
+
+            if mapped:
+                from_date = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+                to_date = now.strftime("%Y-%m-%d")
+                resp = requests.get(
+                    "https://finnhub.io/api/v1/company-news",
+                    params={
+                        "symbol": mapped,
+                        "from": from_date,
+                        "to": to_date,
+                        "token": self.finnhub_key,
+                    },
+                    timeout=8,
+                )
+                if resp.status_code == 200:
+                    articles = resp.json() or []
+
+            # Fall back to category news if symbol query yielded nothing
+            if not articles:
+                category = self._FINNHUB_CATEGORY_MAP.get(symbol, "general")
+                resp = requests.get(
+                    "https://finnhub.io/api/v1/news",
+                    params={"category": category, "token": self.finnhub_key},
+                    timeout=8,
+                )
+                if resp.status_code == 200:
+                    articles = resp.json() or []
+
+            # Recency filter (3 days)
+            cutoff_ts = (now - timedelta(days=3)).timestamp()
+            for art in articles[:25]:
+                title = art.get("headline", "") or art.get("title", "")
+                if not title or len(title) < 20:
+                    continue
+                pub_ts = float(art.get("datetime") or 0)
+                if pub_ts and pub_ts < cutoff_ts:
+                    continue
+
+                # Build "X minutes ago"
+                time_ago_str = "Live"
+                if pub_ts:
+                    diff_min = (now.timestamp() - pub_ts) / 60.0
+                    if diff_min < 60:
+                        time_ago_str = f"{int(diff_min)}m ago"
+                    elif diff_min < 1440:
+                        time_ago_str = f"{int(diff_min / 60)}h ago"
+                    else:
+                        time_ago_str = f"{int(diff_min / 1440)}d ago"
+
+                source_name = (art.get("source") or "Finnhub")[:40]
+                sentiment_result = self._analyze_with_cache(title)
+                impact = self._analyze_impact(title)
+
+                news_items.append({
+                    "headline":     title[:250],
+                    "sentiment":    sentiment_result["score"],
+                    "sentiment_label": sentiment_result["sentiment"],
+                    "confidence":   sentiment_result["confidence"],
+                    "impact":       impact,
+                    "time_ago":     time_ago_str,
+                    "source":       source_name,
+                    "source_icon":  self.SOURCE_ICONS.get(source_name, "🌐"),
+                    "url":          art.get("url", ""),
+                    "impact_timing": "Market hours",
+                })
+            return news_items
+        except Exception as e:
+            print(f"[UnifiedNews] Finnhub error: {e}")
             return []
 
     def _fetch_alphavantage(self, symbol: str, keywords: List[str]) -> List[Dict]:

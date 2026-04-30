@@ -2469,6 +2469,12 @@ app.layout = dbc.Container(fluid=True, children=[
                     active="exact",
                     style={"color": COLORS["accent"], "fontSize": "12px", "fontWeight": "bold"},
                 ),
+                dbc.NavLink(
+                    [html.Span("🎯", style={"marginRight": "4px"}), "Precision"],
+                    href="/precision",
+                    active="exact",
+                    style={"color": COLORS["info"], "fontSize": "12px", "fontWeight": "bold"},
+                ),
             ], style={"marginLeft": "auto"}),
         ]),
         color=COLORS["surface"],
@@ -2886,6 +2892,9 @@ def render_page(pathname):
     if pathname == "/strategy":
         from pages.smma_strategy import layout as strategy_layout
         return strategy_layout
+    if pathname == "/precision":
+        from pages.precision_strategy import layout as precision_layout
+        return precision_layout
     return get_dashboard_layout()
 
 
@@ -6121,11 +6130,9 @@ def update_unified_recommendation(symbol, n, pathname):
 # _init_background_news()  # disabled intentionally
 
 # Eagerly register page callbacks so they're available before first navigation.
-import pages.smma_strategy   # noqa: E402  — registers @callback for /strategy
-import pages.news            # noqa: E402  — registers @callback for /news
-
-# Register page callbacks eagerly so they are available before first navigation
-import pages.smma_strategy  # noqa: E402 — registers @callback for /strategy
+import pages.smma_strategy        # noqa: E402  — registers @callback for /strategy
+import pages.news                 # noqa: E402  — registers @callback for /news
+import pages.precision_strategy   # noqa: E402  — registers @callback for /precision
 
 
 # Run the app

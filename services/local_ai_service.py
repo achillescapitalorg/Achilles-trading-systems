@@ -18,9 +18,25 @@ SENTIMENT_CACHE_TTL = 300
 
 
 class FinBERTSentiment:
-    """FinBERT-based sentiment analysis for financial news."""
-    
+    """Financial news sentiment analyzer.
+
+    Loads ``mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis``
+    by default — 82M params, ~98% headline accuracy on benchmark, ~30% less
+    RAM than FinBERT. Falls back to ProsusAI/finbert if DistilRoBERTa cannot
+    be downloaded. Falls back further to a pure-Python keyword analyzer if no
+    transformer can be loaded at all.
+
+    Class name preserved for backwards compatibility with existing imports.
+    """
+
+    # Primary then fallback model identifiers. Each is tried in order.
+    MODEL_CANDIDATES = [
+        "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis",
+        "ProsusAI/finbert",
+    ]
+
     _model = None
+    _model_name: Optional[str] = None
     _loading = False
     _lock = threading.Lock()
     
@@ -35,36 +51,63 @@ class FinBERTSentiment:
     
     @classmethod
     def _load_model(cls):
-        """Load FinBERT model (singleton)."""
+        """Load the financial-sentiment model singleton.
+
+        Tries each entry in MODEL_CANDIDATES in order. The DistilRoBERTa model
+        has higher headline accuracy AND lower memory than FinBERT, so it is
+        first. If DistilRoBERTa fails (no network, HF rate-limit), falls back
+        to FinBERT. If both fail, leaves ``_model = None`` so the caller falls
+        back to the keyword analyzer.
+        """
         if cls._model is not None:
             return cls._model
-            
+
         with cls._lock:
             if cls._loading:
                 return None
             cls._loading = True
-            
+
             try:
-                # Pre-import PIL submodules before transformers loads them to avoid
-                # circular-import race when multiple threads call _load_model
+                # Pre-import PIL submodules before transformers loads them to
+                # avoid a known circular-import race when multiple threads
+                # call _load_model.
                 try:
                     import PIL.Image, PIL.ImageFile  # noqa: F401
                 except ImportError:
                     pass
                 import transformers
                 from transformers import pipeline
-                cls._model = pipeline(
-                    "sentiment-analysis",
-                    model="ProsusAI/finbert",
-                    device=-1,  # CPU
-                    truncation=True,
-                    max_length=512
-                )
+
+                last_err = None
+                for model_id in cls.MODEL_CANDIDATES:
+                    try:
+                        cls._model = pipeline(
+                            "sentiment-analysis",
+                            model=model_id,
+                            device=-1,             # CPU
+                            truncation=True,
+                            max_length=512,
+                        )
+                        cls._model_name = model_id
+                        cls._loading = False
+                        short = model_id.split("/")[-1]
+                        print(f"[Sentiment] Loaded {short}")
+                        return cls._model
+                    except Exception as e:
+                        last_err = e
+                        if not _SHUTTING_DOWN:
+                            print(f"[Sentiment] {model_id.split('/')[-1]} unavailable: "
+                                  f"{type(e).__name__}")
+                        continue
+
+                # All candidates failed
+                cls._model = None
                 cls._loading = False
-                print("[FinBERT] Model loaded successfully")
-                return cls._model
+                if not _SHUTTING_DOWN and last_err:
+                    print(f"[Sentiment] No model could be loaded: {last_err}")
+                return None
             except Exception as e:
-                print(f"[FinBERT] Failed to load: {e}")
+                print(f"[Sentiment] Failed to load: {e}")
                 cls._model = None
                 cls._loading = False
                 return None
