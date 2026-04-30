@@ -210,6 +210,14 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                                 "fontSize": "10px", "marginBottom": "3px"}),
                     dbc.Button("📊 Backtest", id="prec-backtest-btn",
                                 color="info", size="sm",
+                                style={"fontSize": "11px",
+                                        "marginRight": "5px"}),
+                ], width="auto"),
+                dbc.Col([
+                    html.Label(" ", style={"display": "block",
+                                "fontSize": "10px", "marginBottom": "3px"}),
+                    dbc.Button("🔁 Walk-Forward", id="prec-wfbacktest-btn",
+                                color="success", size="sm",
                                 style={"fontSize": "11px"}),
                 ], width="auto"),
             ], align="end"),
@@ -246,6 +254,13 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                         dbc.Col(_stat("VPIN",      "prec-vpin",      C["warn"]), width=3),
                         dbc.Col(_stat("REGIME",    "prec-regime",    C["purple"]), width=3),
                         dbc.Col(_stat("ATR",       "prec-atr",       C["text"]), width=3),
+                    ], className="mt-1"),
+                    dbc.Row([
+                        dbc.Col(_stat("MTF SCORE",   "prec-mtf-score",   C["info"]),   width=3),
+                        dbc.Col(_stat("CONFLUENCE",  "prec-mtf-conf",    C["accent"]), width=3),
+                        dbc.Col(_stat("CVD DIV",     "prec-cvd-div",     C["purple"]), width=2),
+                        dbc.Col(_stat("VAL AREA",    "prec-in-va",       C["text"]),   width=2),
+                        dbc.Col(_stat("SIZING",      "prec-sizing",      C["warn"]),   width=2),
                     ], className="mt-1"),
                 ], width=9),
             ], align="center"),
@@ -293,36 +308,101 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
         ]),
     ),
 
+    # ── Walk-Forward results ───────────────────────────────────────────────
+    _card(
+        "🔁 WALK-FORWARD  ·  rolling out-of-sample · intra-bar fills",
+        html.Div([
+            dbc.Row([
+                dbc.Col(_stat("FOLDS",          "prec-wf-folds",      C["text"]),    width=2),
+                dbc.Col(_stat("TOTAL TRADES",   "prec-wf-trades",     C["text"]),    width=2),
+                dbc.Col(_stat("WIN RATE",       "prec-wf-winrate",    C["accent"]),  width=2),
+                dbc.Col(_stat("PRECISION L",    "prec-wf-prec-long",  C["accent"]),  width=2),
+                dbc.Col(_stat("PRECISION S",    "prec-wf-prec-short", C["danger"]),  width=2),
+                dbc.Col(_stat("SHARPE",         "prec-wf-sharpe",     C["info"]),    width=2),
+            ]),
+            dbc.Row([
+                dbc.Col(_stat("PROFIT FACTOR",  "prec-wf-pf",         C["info"]),    width=2),
+                dbc.Col(_stat("MAX DD",         "prec-wf-mdd",        C["warn"]),    width=2),
+                dbc.Col(_stat("ECE",            "prec-wf-ece",        C["purple"],
+                                sub="lower=better, <0.05=calibrated"),               width=3),
+                dbc.Col(_stat("p-VALUE",        "prec-wf-pvalue",     C["purple"],
+                                sub="<0.05 = stat. significant"),                    width=3),
+                dbc.Col(_stat("TOTAL RETURN",   "prec-wf-return",     C["accent"]),  width=2),
+            ], className="mt-1"),
+            html.Div(id="prec-wf-status",
+                        children="No walk-forward run yet. Click 'Walk-Forward' for rigorous OOS metrics.",
+                        style={"color": C["muted"], "fontSize": "10px",
+                                "marginTop": "8px",
+                                "textAlign": "center"}),
+            dcc.Graph(id="prec-wf-equity-chart",
+                        figure=go.Figure(layout=dict(
+                            paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
+                            font=dict(color=C["text"], size=9),
+                            height=240,
+                            margin=dict(l=8, r=8, t=18, b=8),
+                            annotations=[dict(text="Walk-forward equity curve will appear here",
+                                                x=0.5, y=0.5, showarrow=False,
+                                                font=dict(color=C["muted"], size=11))],
+                            xaxis=dict(visible=False), yaxis=dict(visible=False),
+                        )),
+                        config={"displayModeBar": False},
+                        style={"height": "240px"}),
+            html.Div(id="prec-wf-fold-table",
+                        style={"marginTop": "8px",
+                                "fontSize": "10px",
+                                "color": C["muted"]}),
+        ]),
+    ),
+
     # ── Architecture description (collapsible reference) ───────────────────
     dbc.Accordion([
         dbc.AccordionItem(
             html.Div([
                 html.P([
                     html.Strong("Layer 1 — Microstructure cleaning:  "),
-                    "Smart Price (volume-weighted mid), Kalman filter (extracts "
-                    "latent price), Spread filter (block when spread > 30% ATR)."
+                    "Smart Price (volume-weighted mid), Kalman filter, "
+                    "Spread filter (block when spread > 30% ATR)."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Layer 2 — Flow & toxicity:  "),
-                    "VPIN (1-50-50 standard, 50 buckets); per-asset thresholds "
-                    "(XAU 0.90, BTC 0.80, EUR 0.90, GBP 0.85). Bulk Volume "
-                    "Classification + 5-bar momentum + realized volatility (5/20m)."
+                    html.Strong("Layer 2 — Market structure (v3):  "),
+                    "Lightweight FVG (Fair-Value Gap) detection; nearer FVG edge "
+                    "is used as a tighter stop when present and aligned with the "
+                    "trade direction."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Layer 3 — ML signal:  "),
-                    "XGBoost (lr=0.05, depth=5, λ=1.0, min_child=10) on 30+ "
-                    "microstructure features OR Lorentzian KNN (vectorized; "
-                    "log(1+|x-y|) less sensitive to gold spikes than Euclidean). "
-                    "HMM regime detector adapts strategy in trending/MR regimes."
+                    html.Strong("Layer 3 — Flow & toxicity (v3):  "),
+                    "VPIN (1-50-50 standard) + CVD with bullish/bearish divergence "
+                    "+ Volume Profile (POC, Value Area, distance-to-POC) + "
+                    "absorption detector + signed volume + realized volatility."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Layer 4 — Risk:  "),
-                    "ATR-based stops (2.0× XAU, 2.5× BTC, 1.5× FX) + 3-tier TP "
-                    "(1×/2×/3× ATR) + 1% equity risk per trade + "
-                    "London/NY session filter for FX/gold."
+                    html.Strong("Layer 4 — MTF confluence (v3):  "),
+                    "1m / 5m / 15m EMA trend alignment, weighted 0.5/0.3/0.2 "
+                    "into a confluence score in [-1, 1]. Strongly opposing MTF "
+                    "(±0.6) gates trades."
+                ], style={"fontSize": "11px", "color": C["text"]}),
+                html.P([
+                    html.Strong("Layer 5 — ML signal (v3):  "),
+                    "XGBoost on 35+ microstructure features OR Lorentzian KNN. "
+                    "Probabilities calibrated via Isotonic Regression with "
+                    "TimeSeriesSplit (out-of-sample) — fixes XGBoost overconfidence. "
+                    "HMM regime adapts strategy in trending/MR regimes."
+                ], style={"fontSize": "11px", "color": C["text"]}),
+                html.P([
+                    html.Strong("Layer 6 — Risk + execution (v3):  "),
+                    "ATR-based stops (refined by FVG when tighter) + 3-tier TP. "
+                    "Quarter-Kelly position sizing kicks in after ≥20 closed "
+                    "trades; until then, fixed 1% risk. London/NY session filter."
+                ], style={"fontSize": "11px", "color": C["text"]}),
+                html.P([
+                    html.Strong("Walk-forward backtest (v3):  "),
+                    "5-fold anchored walk-forward with intra-bar OHLC-ordered "
+                    "fill simulation (worst-case path per direction). Reports "
+                    "ECE (calibration error), p-value (one-sample t-test of "
+                    "trade PnL), per-direction precision."
                 ], style={"fontSize": "11px", "color": C["text"]}),
             ]),
-            title="ℹ️  Architecture (4 layers)", item_id="arch",
+            title="ℹ️  Architecture (6 layers · v3)", item_id="arch",
         )
     ], start_collapsed=True, flush=True,
         style={"backgroundColor": C["surface"], "marginTop": "10px"}),
@@ -330,8 +410,10 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
     # ── Stores + interval ─────────────────────────────────────────────────
     dcc.Store(id="prec-train-trigger", data=0),
     dcc.Store(id="prec-bt-trigger", data=0),
+    dcc.Store(id="prec-wfbt-trigger", data=0),
     html.Div(id="prec-train-output", style={"display": "none"}),
     html.Div(id="prec-bt-output", style={"display": "none"}),
+    html.Div(id="prec-wfbt-output", style={"display": "none"}),
     dcc.Interval(id="prec-interval", interval=15_000, n_intervals=0),
 ])
 
@@ -388,6 +470,11 @@ def _fetch_training_data(symbol: str) -> pd.DataFrame:
     Output("prec-vpin",             "children"),
     Output("prec-regime",           "children"),
     Output("prec-atr",              "children"),
+    Output("prec-mtf-score",        "children"),
+    Output("prec-mtf-conf",         "children"),
+    Output("prec-cvd-div",          "children"),
+    Output("prec-in-va",            "children"),
+    Output("prec-sizing",           "children"),
     Output("prec-signal-status",    "children"),
     Output("prec-progress",         "value"),
     Input("prec-interval",          "n_intervals"),
@@ -397,10 +484,11 @@ def _fetch_training_data(symbol: str) -> pd.DataFrame:
     prevent_initial_call=False,
 )
 def update_live_signal(_n, symbol, model, _trig):
+    DASH_DASH = "--"
+    n_dashes_v3 = 17  # 12 base + 5 v3
     if not symbol or not model:
         return ("---", {"fontSize": "32px", "color": C["muted"], "fontWeight": "bold", "lineHeight": "1"},
-                "Select symbol", "--","--","--","--","--","--","--","--","--",
-                "Pick a symbol + model", 0)
+                "Select symbol",) + (DASH_DASH,) * n_dashes_v3 + ("Pick a symbol + model", 0)
 
     sys = _get_system(symbol, model)
     key = f"{symbol}_{model}"
@@ -410,25 +498,22 @@ def update_live_signal(_n, symbol, model, _trig):
     if state.get("status") == "training":
         prog = int(state.get("progress", 0))
         return ("⏳", {"fontSize": "32px", "color": C["warn"], "fontWeight": "bold", "lineHeight": "1"},
-                f"Training {symbol}/{model}…", "--","--","--","--","--","--","--","--","--",
-                state.get("message", "Training…"), prog)
+                f"Training {symbol}/{model}…",) + (DASH_DASH,) * n_dashes_v3 + (state.get("message", "Training…"), prog)
 
     # Untrained?
     if not sys.is_trained:
         return ("---", {"fontSize": "32px", "color": C["muted"], "fontWeight": "bold", "lineHeight": "1"},
-                "Model not trained", "--","--","--","--","--","--","--","--","--",
-                "Click 'Train' to begin (~30-60 s)", 0)
+                "Model not trained",) + (DASH_DASH,) * n_dashes_v3 + ("Click 'Train' to begin (~30-60 s)", 0)
 
     # Generate live signal
     try:
         df = _fetch_recent_data(symbol)
         if df is None or df.empty or len(df) < 100:
-            return (no_update,)*12 + ("Waiting for data…", no_update)
+            return (no_update,) * (3 + n_dashes_v3) + ("Waiting for data…", no_update)
         sig = sys.generate_live_signal(df)
     except Exception as e:
         return ("ERR", {"fontSize": "32px", "color": C["danger"], "fontWeight": "bold", "lineHeight": "1"},
-                str(e)[:60], "--","--","--","--","--","--","--","--","--",
-                f"Signal error: {type(e).__name__}", 0)
+                str(e)[:60],) + (DASH_DASH,) * n_dashes_v3 + (f"Signal error: {type(e).__name__}", 0)
 
     action = sig["action"]
     # Color the badge by direction
@@ -445,6 +530,14 @@ def update_live_signal(_n, symbol, model, _trig):
     badge_style = {"fontSize": "30px", "color": col, "fontWeight": "bold", "lineHeight": "1"}
     conf_text = f"Confidence: {sig['confidence']:.1%}"
 
+    # Pretty-print v3 fields
+    mtf_score_str = f"{sig.get('mtf_score', 0):+.2f}"
+    mtf_conf_str = sig.get("mtf_confluence", "neutral").upper().replace("_", " ")
+    cvd_d = sig.get("cvd_div", 0)
+    cvd_div_str = "BULL ↑" if cvd_d > 0 else "BEAR ↓" if cvd_d < 0 else "—"
+    in_va_str = "INSIDE" if sig.get("in_value_area", True) else "OUTSIDE"
+    sizing_str = sig.get("sizing_method", "fixed").upper()
+
     return (
         action, badge_style, conf_text,
         f"{sig['entry']:,.5f}",
@@ -456,6 +549,11 @@ def update_live_signal(_n, symbol, model, _trig):
         f"{sig['vpin']:.2f}",
         sig["regime"].upper(),
         f"{sig['atr']:,.5f}",
+        mtf_score_str,
+        mtf_conf_str,
+        cvd_div_str,
+        in_va_str,
+        sizing_str,
         f"Live ✓  •  Last update: {datetime.now().strftime('%H:%M:%S')}",
         100,
     )
@@ -629,3 +727,174 @@ def run_backtest(n_clicks, symbol, model, trig):
                                             height=240))
         return ("err", trig or 0, "0", "--", "--", "--", "--", "--",
                 f"❌ {type(e).__name__}: {e}", empty_fig)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback 4: Walk-Forward backtest button
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _empty_wf_fig(msg: str, color: Optional[str] = None) -> go.Figure:
+    return go.Figure(layout=dict(
+        paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
+        font=dict(color=C["text"]), height=240,
+        margin=dict(l=8, r=8, t=18, b=8),
+        annotations=[dict(text=msg, x=0.5, y=0.5, showarrow=False,
+                            font=dict(color=color or C["muted"], size=11))],
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+    ))
+
+
+def _format_pf(pf) -> str:
+    try:
+        return "∞" if pf == float("inf") else f"{float(pf):.2f}"
+    except Exception:
+        return "--"
+
+
+def _build_fold_table(per_fold):
+    """Compact per-fold breakdown for walk-forward results."""
+    if not per_fold:
+        return html.Div("No folds completed.",
+                        style={"color": C["muted"], "fontSize": "10px",
+                                "textAlign": "center"})
+    header = html.Tr([
+        html.Th(h, style={"padding": "4px 8px", "color": C["muted"],
+                            "borderBottom": f"1px solid {C['border']}",
+                            "textTransform": "uppercase", "fontSize": "9px"})
+        for h in ("Fold", "Train", "Test", "Trades", "Win %",
+                    "Sharpe", "PF", "Return")
+    ])
+    rows = []
+    for f in per_fold:
+        ret = f.get("total_return", 0)
+        ret_color = C["accent"] if ret >= 0 else C["danger"]
+        rows.append(html.Tr([
+            html.Td(f.get("fold", 0),         style={"padding": "3px 8px"}),
+            html.Td(f"{f.get('train_bars', 0):,}", style={"padding": "3px 8px"}),
+            html.Td(f"{f.get('test_bars', 0):,}",  style={"padding": "3px 8px"}),
+            html.Td(f.get("trades", 0),       style={"padding": "3px 8px"}),
+            html.Td(f"{f.get('win_rate', 0):.1%}",   style={"padding": "3px 8px"}),
+            html.Td(f"{f.get('sharpe', 0):.2f}",     style={"padding": "3px 8px"}),
+            html.Td(_format_pf(f.get("profit_factor", 0)),
+                    style={"padding": "3px 8px"}),
+            html.Td(f"{ret:+.2%}",            style={"padding": "3px 8px",
+                                                        "color": ret_color,
+                                                        "fontWeight": "bold"}),
+        ]))
+    return html.Table(
+        [html.Thead(header), html.Tbody(rows)],
+        style={"width": "100%", "color": C["text"], "fontSize": "10px",
+                "fontFamily": "monospace",
+                "borderCollapse": "collapse", "marginTop": "6px"},
+    )
+
+
+@callback(
+    Output("prec-wfbt-output",        "children"),
+    Output("prec-wfbt-trigger",       "data"),
+    Output("prec-wf-folds",           "children"),
+    Output("prec-wf-trades",          "children"),
+    Output("prec-wf-winrate",         "children"),
+    Output("prec-wf-prec-long",       "children"),
+    Output("prec-wf-prec-short",      "children"),
+    Output("prec-wf-sharpe",          "children"),
+    Output("prec-wf-pf",              "children"),
+    Output("prec-wf-mdd",             "children"),
+    Output("prec-wf-ece",             "children"),
+    Output("prec-wf-pvalue",          "children"),
+    Output("prec-wf-return",          "children"),
+    Output("prec-wf-status",          "children"),
+    Output("prec-wf-equity-chart",    "figure"),
+    Output("prec-wf-fold-table",      "children"),
+    Input("prec-wfbacktest-btn",      "n_clicks"),
+    State("prec-symbol",              "value"),
+    State("prec-model",               "value"),
+    State("prec-wfbt-trigger",        "data"),
+    prevent_initial_call=True,
+)
+def run_walk_forward(n_clicks, symbol, model, trig):
+    if not n_clicks:
+        return (no_update,) * 16
+    sys = _get_system(symbol, model)
+    try:
+        df = _fetch_training_data(symbol)
+        if df is None or df.empty or len(df) < 1000:
+            n = 0 if df is None else len(df)
+            empty = _empty_wf_fig(f"Walk-forward needs ≥ 1000 bars (got {n})",
+                                   C["danger"])
+            return ("err", trig or 0,
+                    "0","0","--","--","--","--","--","--","--","--","--",
+                    f"❌ Insufficient data ({n} bars)",
+                    empty, "")
+
+        result = sys.walk_forward_backtest(df, n_splits=5,
+                                            test_size_pct=0.10,
+                                            intra_bar_fills=True)
+        if "error" in result:
+            empty = _empty_wf_fig(result["error"], C["danger"])
+            return ("err", trig or 0,
+                    "0","0","--","--","--","--","--","--","--","--","--",
+                    f"❌ {result['error']}",
+                    empty, "")
+
+        eq = result.get("equity_curve") or []
+        ts = result.get("timestamps") or list(range(len(eq)))
+        fig = go.Figure()
+        if eq:
+            initial = result.get("initial_equity", 10_000)
+            fig.add_trace(go.Scatter(
+                x=ts, y=eq, mode="lines",
+                line=dict(color=C["accent"], width=2),
+                fill="tozeroy",
+                fillcolor="rgba(0,255,136,0.07)",
+                name="Equity",
+            ))
+            fig.add_hline(y=initial, line=dict(color=C["muted"], width=1, dash="dot"),
+                            annotation_text=f"start ${initial:,.0f}",
+                            annotation_font=dict(color=C["muted"], size=9))
+        fig.update_layout(
+            paper_bgcolor=C["bg"], plot_bgcolor=C["surface"],
+            font=dict(color=C["text"], size=9),
+            height=240,
+            margin=dict(l=8, r=8, t=18, b=8),
+            xaxis=dict(gridcolor=C["border"], zerolinecolor=C["border"]),
+            yaxis=dict(gridcolor=C["border"], zerolinecolor=C["border"],
+                        side="right",
+                        title=dict(text="Equity ($)", font=dict(size=9))),
+            showlegend=False,
+        )
+
+        ece = result.get("ece", 0)
+        pval = result.get("p_value")
+        pval_str = f"{pval:.4f}" if pval is not None else "n/a"
+        sig_marker = " ✓" if pval is not None and pval < 0.05 else ""
+
+        return (
+            "done",
+            (trig or 0) + 1,
+            f"{result.get('n_splits', 0)}",
+            f"{result.get('total_trades', 0)}",
+            f"{result.get('win_rate', 0):.1%}",
+            f"{result.get('precision_long', 0):.1%}",
+            f"{result.get('precision_short', 0):.1%}",
+            f"{result.get('sharpe', 0):.2f}",
+            _format_pf(result.get("profit_factor", 0)),
+            f"${result.get('max_drawdown', 0):,.0f}",
+            f"{ece:.4f}",
+            pval_str + sig_marker,
+            f"{result.get('total_return', 0):+.2%}",
+            (f"✅ Walk-forward complete  •  {result.get('n_splits', 0)} folds  "
+                f"•  trained up to {result.get('train_bars', 0):,} bars  "
+                f"•  total OOS test bars: {result.get('test_bars', 0):,}"
+                + (f"  •  statistically significant at p<0.05" if sig_marker else "")),
+            fig,
+            _build_fold_table(result.get("per_fold", [])),
+        )
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        empty = _empty_wf_fig(f"❌ {type(e).__name__}: {e}", C["danger"])
+        return ("err", trig or 0,
+                "0","0","--","--","--","--","--","--","--","--","--",
+                f"❌ {type(e).__name__}: {e}",
+                empty, "")
+

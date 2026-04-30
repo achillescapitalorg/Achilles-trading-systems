@@ -94,3 +94,19 @@ if sell_mask.sum() > 0:
     print(f"  SELL precision : {sell_correct:.2%}  ({int(sell_mask.sum())} signals)")
 print(f"  Overall directional accuracy on actionable signals: "
       f"{result.direction_accuracy:.2%}")
+
+# Capture backtest to trading memory
+try:
+    from services.trading_memory import get_memory
+    memory = get_memory()
+    if memory._enabled:
+        memory.capture_backtest({
+            "strategy": "Gold RL Sequence",
+            "asset": "XAUUSD",
+            "period": f"{len(train_df)} train / {len(held_out_feat)} test bars",
+            "sharpe": round(result.sharpe, 2) if result.sharpe else "N/A",
+            "max_drawdown": round(result.max_drawdown, 2) if result.max_drawdown else 0,
+            "win_rate": round(result.win_rate * 100, 1) if result.win_rate else 0
+        })
+except Exception:
+    pass

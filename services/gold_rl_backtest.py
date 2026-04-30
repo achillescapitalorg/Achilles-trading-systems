@@ -427,3 +427,22 @@ def walk_forward_backtest(
         "avg_total_return": fold_df["total_return"].mean(),
         "consistency":      fold_df["total_return"].apply(lambda x: x > 0).mean(),
     }
+
+
+def _capture_backtest_to_memory(results: dict, strategy: str = "Gold RL"):
+    """Capture backtest results to trading memory."""
+    try:
+        from services.trading_memory import get_memory
+        memory = get_memory()
+        if not memory._enabled:
+            return
+        memory.capture_backtest({
+            "strategy": strategy,
+            "asset": "XAUUSD",
+            "period": f"{results.get('n_folds_run', 0)} folds",
+            "sharpe": results.get("avg_sharpe", "N/A"),
+            "max_drawdown": results.get("avg_max_dd", 0),
+            "win_rate": results.get("avg_win_rate", 0)
+        })
+    except Exception:
+        pass
