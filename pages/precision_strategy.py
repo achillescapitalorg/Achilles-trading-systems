@@ -485,7 +485,7 @@ def _fetch_training_data(symbol: str) -> pd.DataFrame:
 )
 def update_live_signal(_n, symbol, model, _trig):
     DASH_DASH = "--"
-    n_dashes_v3 = 17  # 12 base + 5 v3
+    n_dashes_v3 = 14  # 9 base stats + 5 v3 stats
     if not symbol or not model:
         return ("---", {"fontSize": "32px", "color": C["muted"], "fontWeight": "bold", "lineHeight": "1"},
                 "Select symbol",) + (DASH_DASH,) * n_dashes_v3 + ("Pick a symbol + model", 0)
