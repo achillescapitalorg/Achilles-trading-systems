@@ -17,6 +17,15 @@ except ImportError:
 import os
 import sys
 
+# Load .env BEFORE any service imports so ENABLE_TRADING_MEMORY,
+# MARKETAUX_API_KEY, etc. are visible to singletons that read os.getenv()
+# at module-import time.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass
+
 # Alias this module under the name "app" so that page modules doing
 # `from app import ...` find it in sys.modules and reuse it, instead of
 # triggering a SECOND import of this file under the canonical name (which

@@ -723,13 +723,17 @@ class LorentzianClassifier:
             target_horizon: int = 3):
         feats = self._compute_features(df).dropna()
         if labels is None:
-            # Auto-generate labels from forward returns
+            # Volatility-scaled labels: thresholds in units of rolling return
+            # std (so they self-calibrate per asset, time-of-day, and regime).
             fwd = df["close"].shift(-target_horizon) / df["close"] - 1
+            roll_std = df["close"].pct_change().rolling(50, min_periods=10).std().fillna(method="bfill")
+            roll_std = roll_std.clip(lower=1e-6) * np.sqrt(target_horizon)
+            z = fwd / roll_std
             labels = pd.Series(0, index=df.index, dtype=int)
-            labels[fwd >  0.001]  = 2
-            labels[(fwd <=  0.001) & (fwd >  0.0003)] = 1
-            labels[(fwd >= -0.001) & (fwd < -0.0003)] = -1
-            labels[fwd < -0.001]  = -2
+            labels[z >  1.0]  = 2
+            labels[(z <=  1.0) & (z >  0.3)] = 1
+            labels[(z >= -1.0) & (z < -0.3)] = -1
+            labels[z < -1.0]  = -2
         else:
             labels = pd.Series(labels, index=df.index)
 
@@ -896,12 +900,18 @@ class XGBoostSignalModel:
 
     def fit(self, df: pd.DataFrame, target_horizon: int = 3):
         feats = self._engineer(df)
+        # Volatility-scaled labels — thresholds in units of rolling-std × √h.
+        # Without this, on 1m FX/gold most bars are labelled 0 and the model
+        # collapses to predicting HOLD almost always.
         fwd = df["close"].shift(-target_horizon) / df["close"] - 1
+        roll_std = df["close"].pct_change().rolling(50, min_periods=10).std().bfill()
+        roll_std = roll_std.clip(lower=1e-6) * np.sqrt(target_horizon)
+        z = fwd / roll_std
         target = pd.Series(0, index=df.index, dtype=int)
-        target[fwd >  0.001]  = 2
-        target[(fwd <=  0.001) & (fwd >  0.0003)] = 1
-        target[(fwd >= -0.001) & (fwd < -0.0003)] = -1
-        target[fwd < -0.001]  = -2
+        target[z >  1.0]  = 2
+        target[(z <=  1.0) & (z >  0.3)] = 1
+        target[(z >= -1.0) & (z < -0.3)] = -1
+        target[z < -1.0]  = -2
 
         af = feats.loc[target.index].dropna()
         ay = target.loc[af.index]
@@ -1048,15 +1058,26 @@ class HMMRegimeDetector:
             print(f"[HMM] scaler fit failed: {e}")
             self.model = None
             return
+        # Use diagonal covariance + regularization floor — full covariance
+        # frequently fails on financial data with near-collinear features
+        # ("covars must be symmetric, positive-definite").
         self.model = GaussianHMM(
-            n_components=self.n_regimes, covariance_type="full",
-            n_iter=100, random_state=42,
+            n_components=self.n_regimes, covariance_type="diag",
+            n_iter=100, random_state=42, min_covar=1e-3,
         )
         try:
             self.model.fit(Xs)
         except Exception as e:
-            print(f"[HMM] fit failed: {e}")
-            self.model = None
+            print(f"[HMM] fit failed (diag): {e}; trying spherical fallback")
+            try:
+                self.model = GaussianHMM(
+                    n_components=self.n_regimes, covariance_type="spherical",
+                    n_iter=100, random_state=42, min_covar=1e-3,
+                )
+                self.model.fit(Xs)
+            except Exception as e2:
+                print(f"[HMM] spherical fallback also failed: {e2}")
+                self.model = None
 
     def predict_regime(self, df: pd.DataFrame) -> pd.Series:
         if self.model is None or self.scaler is None:
@@ -1117,13 +1138,32 @@ class RiskManager:
         self.equity_curve = [float(equity)]
 
     # ── Sizing ────────────────────────────────────────────────────────────
+    def _size_in_lots(self, risk_amt: float, entry: float, stop: float) -> float:
+        """Convert a risk-amount + stop distance to a position size in *lots*.
+
+        Standard fixed-fractional sizing:
+            units_to_lose_risk_amt = risk_amt / risk_per_unit
+            lots = units / contract_size
+        Then enforce a margin cap so notional ≤ equity × leverage (otherwise
+        the broker would reject the order).
+        """
+        risk_per_unit = abs(entry - stop)
+        if risk_per_unit <= 0 or entry <= 0:
+            return 0.0
+        units = risk_amt / risk_per_unit
+        contract_size = max(self.config.contract_size, 1e-9)
+        lots = units / contract_size
+        # Margin cap — never exceed equity × leverage in notional value
+        max_notional = self.equity * max(self.config.leverage, 1.0)
+        notional = lots * contract_size * entry
+        if notional > max_notional and notional > 0:
+            lots *= max_notional / notional
+        return max(0.0, lots)
+
     def calculate_position_size(self, entry: float, stop: float) -> float:
         """Fixed fractional sizing: risk max_risk_per_trade_pct of equity."""
-        risk_amt = self.equity * self.config.max_risk_per_trade_pct
-        risk_per_unit = abs(entry - stop)
-        if risk_per_unit == 0:
-            return 0
-        return risk_amt / (risk_per_unit * self.config.contract_size / self.config.leverage)
+        return self._size_in_lots(
+            self.equity * self.config.max_risk_per_trade_pct, entry, stop)
 
     def kelly_position_size(self, win_rate: float, avg_win: float, avg_loss: float,
                             entry: float, stop: float) -> float:
@@ -1131,21 +1171,17 @@ class RiskManager:
 
         Kelly fraction f* = (W*B − (1−W)) / B   where B = avg_win/avg_loss.
         We multiply by config.kelly_fraction (default 0.25 — Quarter-Kelly)
-        and floor at zero. The fixed-fractional risk is then *scaled* by
-        (1 + f*kelly_fraction*4) so we never go below the minimum 1% risk
-        baseline but can scale up to ~3× when the edge is strong and verified.
+        and scale the base 1% risk by (1 + f*kelly_fraction*4) so size grows
+        modestly with proven edge but is bounded by margin.
         """
         if avg_loss <= 0 or win_rate <= 0 or win_rate >= 1:
             return self.calculate_position_size(entry, stop)
         b = avg_win / avg_loss
         kelly = (win_rate * b - (1.0 - win_rate)) / b
-        kelly = max(0.0, min(kelly, 0.5))     # cap raw Kelly at 50% (sanity)
+        kelly = max(0.0, min(kelly, 0.5))   # cap raw Kelly at 50% (sanity)
         scale = 1.0 + (kelly * self.config.kelly_fraction * 4.0)
-        risk_amt = self.equity * self.config.max_risk_per_trade_pct * scale
-        risk_per_unit = abs(entry - stop)
-        if risk_per_unit == 0:
-            return 0
-        return risk_amt / (risk_per_unit * self.config.contract_size / self.config.leverage)
+        return self._size_in_lots(
+            self.equity * self.config.max_risk_per_trade_pct * scale, entry, stop)
 
     def _kelly_stats(self) -> Optional[Tuple[float, float, float]]:
         """Return (win_rate, avg_win, avg_loss) from history, or None."""
@@ -1416,7 +1452,10 @@ class PrecisionTradingSystem:
             return None
         if self.current_regime == Regime.MEAN_REVERTING and abs(signal) > 1:
             signal = int(np.sign(signal))
-        if confidence < 0.30:
+        # 5-class softmax: random baseline is 0.20. Require a meaningful margin
+        # above that, but don't be so strict that nothing passes after isotonic
+        # calibration (which compresses tails).
+        if confidence < 0.22:
             return None
         # Session filter (FX + gold)
         hour = pd.Timestamp(ts).hour
