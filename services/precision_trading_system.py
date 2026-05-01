@@ -1001,7 +1001,13 @@ class XGBoostSignalModel:
                 feats[c] = 0
         feats = feats[self.feature_cols]
         X = self.scaler.transform(feats) if self.scaler is not None else feats.values
-        encoded = self.model.predict(X)
+        try:
+            encoded = self.model.predict(X)
+        except Exception as e:
+            # NotFittedError when a stale pickle had self.model created but not
+            # actually fit (e.g. mid-fit crash). Caller treats 0 as HOLD.
+            print(f"[XGBoost] predict failed ({type(e).__name__}: {e}); returning HOLD")
+            return pd.Series(0, index=df.index)
         # Map encoded indices back to original {-2..2} labels
         decoded = np.array([self._idx_to_class.get(int(i), 0) for i in encoded], dtype=int)
         return pd.Series(decoded, index=df.index)
@@ -1020,8 +1026,14 @@ class XGBoostSignalModel:
         model = self.calibrated_model if self.calibrated_model is not None else self.model
         try:
             proba = model.predict_proba(X)
-        except Exception:
-            proba = self.model.predict_proba(X)
+        except Exception as e:
+            try:
+                proba = self.model.predict_proba(X)
+            except Exception as e2:
+                # Both unfit (stale pickle / mid-fit crash) — uniform fallback
+                print(f"[XGBoost] predict_proba failed ({type(e2).__name__}: {e2}); using uniform")
+                proba = np.full((X.shape[0], len(cols)), 1.0 / len(cols))
+                return pd.DataFrame(proba, index=df.index, columns=cols)
         # Map encoded class index → original {-2..2} → 5-column layout
         full = np.zeros((proba.shape[0], len(cols)))
         col_index = {c: i for i, c in enumerate(cols)}
@@ -1390,7 +1402,16 @@ class PrecisionTradingSystem:
         if self.hmm is not None:
             self.hmm.fit(mtfed)
             mtfed["regime"] = self.hmm.predict_regime(mtfed)
-        # Both Lorentzian and XGBoost auto-derive labels from forward returns
+        # Force a fresh signal_model so we don't inherit a half-fit pickle
+        # (the prior model might have a non-None self.model whose underlying
+        # booster was never created — predict would then NotFittedError).
+        if isinstance(self.signal_model, XGBoostSignalModel):
+            self.signal_model = XGBoostSignalModel(
+                calibration_method=self.config.calibration_method,
+                calibration_cv_splits=self.config.calibration_cv_splits,
+            )
+        elif isinstance(self.signal_model, LorentzianClassifier):
+            self.signal_model = LorentzianClassifier(n_neighbors=5)
         self.signal_model.fit(mtfed)
         self.data_buffer = mtfed.tail(500)
         self.is_trained = True
