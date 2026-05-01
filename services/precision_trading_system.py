@@ -800,6 +800,22 @@ class XGBoostSignalModel:
         self._class_to_idx: Dict[int, int] = {}
         self._idx_to_class: Dict[int, int] = {}
 
+    def __setstate__(self, state):
+        """Backward-compat for old pickles missing v3 attributes."""
+        self.__dict__.update(state)
+        self.calibration_method = state.get("calibration_method", "isotonic")
+        self.calibration_cv_splits = state.get("calibration_cv_splits", 3)
+        self.calibrated_model = state.get("calibrated_model", None)
+        self._class_to_idx = state.get("_class_to_idx", {})
+        self._idx_to_class = state.get("_idx_to_class", {})
+        # If old pickle has no encoder, infer from sklearn classes_ if present
+        if not self._class_to_idx and self.model is not None:
+            classes = getattr(self.model, "classes_", None)
+            if classes is not None:
+                # Old code used y = label + 2 → encoded 0..4 mapped to {-2..2}
+                self._idx_to_class = {int(i): int(c) - 2 for i, c in enumerate(classes)}
+                self._class_to_idx = {v: k for k, v in self._idx_to_class.items()}
+
     @staticmethod
     def _rsi(p: pd.Series, period: int = 14) -> pd.Series:
         delta = p.diff()
@@ -1046,6 +1062,10 @@ class HMMRegimeDetector:
         if self.model is None or self.scaler is None:
             return pd.Series(0, index=df.index)
         try:
+            # Check if model has required attributes (handles loaded pickles)
+            if not hasattr(self.model, 'means_'):
+                self.model = None
+                return pd.Series(0, index=df.index)
             rets = df["close"].pct_change().fillna(0).values.reshape(-1, 1).astype(np.float64)
             vol = pd.Series(rets.flatten()).rolling(10).std().fillna(0).values.reshape(-1, 1).astype(np.float64)
             feats = np.hstack([rets, vol]).astype(np.float64)
@@ -1887,10 +1907,26 @@ class PrecisionTradingSystem:
             with open(path, "rb") as f:
                 s = pickle.load(f)
             self.signal_model = s["signal_model"]
+
+            # Fix: ensure signal_model has calibration_method attribute (for older pickles)
+            if hasattr(self.signal_model, 'model') and not hasattr(self.signal_model, 'calibration_method'):
+                self.signal_model.calibration_method = "isotonic"
+                self.signal_model.calibration_cv_splits = 3
+
             self.hmm          = s.get("hmm", self.hmm)
             self.is_trained   = s.get("is_trained", True)
             self.data_buffer  = s.get("data_buffer", pd.DataFrame())
             self._last_metrics = s.get("last_metrics", {})
+
+            # Fix: ensure HMM model is re-fitted if loaded from old pickle
+            if self.hmm is not None and hasattr(self.hmm, 'model'):
+                try:
+                    # Test if model works - if not, reset it
+                    if self.hmm.model is not None:
+                        _ = self.hmm.model.means_
+                except AttributeError:
+                    self.hmm.model = None
+
             return True
         except Exception as e:
             print(f"[Precision] load failed: {e}")
