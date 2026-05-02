@@ -1,11 +1,11 @@
 """
-Precision Strategy Page — 1-minute multi-asset trading system
-==============================================================
-Dedicated tab for the 4-layer precision system (Microstructure cleaning →
-Flow toxicity → ML signal → Risk management).
-
-Supports XAU/USD, BTC/USD, EUR/USD, GBP/USD with per-asset configs.
-Live BUY/SELL signal panel + Train + Backtest buttons.
+Precision Strategy Page — v4
+============================
+Dash UI for the 6-layer precision system with:
+  - Purged walk-forward backtesting
+  - Full classification metrics display (F1, MCC, Kappa, AUC, Balanced Accuracy)
+  - SQLite database query panel
+  - Meta-labeler status
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ import dash_bootstrap_components as dbc
 from dash import html, dcc, callback, Input, Output, State, no_update
 from datetime import datetime
 
-# ── Lazy imports of the trading system to keep page-load light ───────────────
 from services.precision_trading_system import (
     PrecisionTradingSystem,
     Asset,
@@ -32,7 +31,6 @@ from services.precision_trading_system import (
     HMMLEARN_AVAILABLE,
 )
 
-# ── Colour palette (matches main app) ────────────────────────────────────────
 C = {
     "bg":       "#000000",
     "surface":  "#0a0a0a",
@@ -45,14 +43,12 @@ C = {
     "text":     "#ffffff",
     "muted":    "#888888",
     "purple":   "#a855f7",
+    "orange":   "#ff6b35",
 }
 
-# ── Per-symbol singleton state ────────────────────────────────────────────────
-# Each system instance is keyed by (asset, model_type). Loaded lazily on
-# first use; trained models persisted to data/precision_<ASSET>_<MODEL>.pkl.
 _systems: Dict[str, PrecisionTradingSystem] = {}
 _systems_lock = threading.Lock()
-_training_state: Dict[str, Dict[str, Any]] = {}   # per-key progress dict
+_training_state: Dict[str, Dict[str, Any]] = {}
 
 DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -65,16 +61,15 @@ def _save_path(asset: str, model: str) -> str:
 
 
 def _get_system(asset: str, model: str) -> PrecisionTradingSystem:
-    """Return (or lazy-create) a PrecisionTradingSystem for this asset+model."""
     key = f"{asset}_{model}"
     with _systems_lock:
         if key not in _systems:
             sys = PrecisionTradingSystem(
                 asset=Asset(asset),
-                model_type=model,           # 'xgboost' or 'lorentzian'
+                model_type=model,
                 use_hmm=HMMLEARN_AVAILABLE,
+                db_path=os.path.join(DATA_DIR, "precision_backtest.db"),
             )
-            # Restore from disk if available
             sp = _save_path(asset, model)
             if os.path.exists(sp):
                 try:
@@ -85,10 +80,6 @@ def _get_system(asset: str, model: str) -> PrecisionTradingSystem:
             _systems[key] = sys
         return _systems[key]
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Layout helpers (mirrors smma_strategy aesthetic)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _card(title, body, right=None):
     hdr = [html.Span(title, style={"fontWeight": "bold", "color": C["text"],
@@ -124,10 +115,6 @@ def _stat(label, value_id, color=None, sub=""):
               "minWidth": "100px"})
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Layout
-# ─────────────────────────────────────────────────────────────────────────────
-
 DEPS_NOTE = []
 if not XGBOOST_AVAILABLE:
     DEPS_NOTE.append("xgboost missing")
@@ -146,24 +133,22 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                                             "minHeight": "100vh",
                                             "padding": "14px"}, children=[
 
-    # Optional warning banner
     dbc.Alert(DEPS_BANNER, color="warning", style={"fontSize": "11px"},
                 dismissable=True) if DEPS_BANNER else html.Div(),
 
-    # ── Top bar ───────────────────────────────────────────────────────────
     dbc.Row([
         dbc.Col([
             html.H5([
                 html.Span("🎯", style={"marginRight": "6px",
                                         "color": C["accent"]}),
                 "Precision Strategy",
-                html.Span("  ·  Microstructure → VPIN → ML → Risk",
+                html.Span("  ·  Microstructure → VPIN → ML → Meta-Label → Risk",
                             style={"fontSize": "12px", "color": C["muted"],
                                     "marginLeft": "8px"}),
             ], style={"color": C["text"], "margin": 0}),
             html.P(
-                "1-min multi-asset framework: Smart Price + Kalman + VPIN toxicity gate "
-                "+ XGBoost/Lorentzian + HMM regime + ATR-based 3-tier TP",
+                "1-min multi-asset framework with purged CV, meta-labeling, "
+                "classification metrics, and SQLite persistence.",
                 style={"color": C["muted"], "fontSize": "10px",
                         "margin": "3px 0 0 0"},
             ),
@@ -198,7 +183,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                     ),
                 ], width="auto"),
                 dbc.Col([
-                    html.Label(" ", style={"display": "block",
+                    html.Label(" ", style={"display": "block",
                                 "fontSize": "10px", "marginBottom": "3px"}),
                     dbc.Button("🧠 Train", id="prec-train-btn",
                                 color="warning", size="sm",
@@ -206,7 +191,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                                         "marginRight": "5px"}),
                 ], width="auto"),
                 dbc.Col([
-                    html.Label(" ", style={"display": "block",
+                    html.Label(" ", style={"display": "block",
                                 "fontSize": "10px", "marginBottom": "3px"}),
                     dbc.Button("📊 Backtest", id="prec-backtest-btn",
                                 color="info", size="sm",
@@ -226,7 +211,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
 
     # ── Live signal banner ─────────────────────────────────────────────────
     _card(
-        "🟢 LIVE SIGNAL  ·  1-min precision",
+        "🟢 LIVE SIGNAL  ·  1-min precision + meta-labeler",
         html.Div([
             dbc.Row([
                 dbc.Col([
@@ -260,7 +245,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                         dbc.Col(_stat("CONFLUENCE",  "prec-mtf-conf",    C["accent"]), width=3),
                         dbc.Col(_stat("CVD DIV",     "prec-cvd-div",     C["purple"]), width=2),
                         dbc.Col(_stat("VAL AREA",    "prec-in-va",       C["text"]),   width=2),
-                        dbc.Col(_stat("SIZING",      "prec-sizing",      C["warn"]),   width=2),
+                        dbc.Col(_stat("META",        "prec-meta",        C["orange"]), width=2),
                     ], className="mt-1"),
                 ], width=9),
             ], align="center"),
@@ -277,7 +262,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
 
     # ── Backtest results ───────────────────────────────────────────────────
     _card(
-        "📊 BACKTEST RESULTS  ·  out-of-sample",
+        "📊 BACKTEST RESULTS  ·  out-of-sample + classification metrics",
         dcc.Loading(
             id="prec-bt-loading", type="circle", color=C["info"],
             children=html.Div([
@@ -289,6 +274,14 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                     dbc.Col(_stat("MAX DD",          "prec-bt-mdd",         C["warn"]),    width=2),
                     dbc.Col(_stat("TOTAL RETURN",    "prec-bt-return",      C["accent"]),  width=2),
                 ]),
+                dbc.Row([
+                    dbc.Col(_stat("ACCURACY",        "prec-bt-acc",         C["info"],    sub="multi-class"), width=2),
+                    dbc.Col(_stat("F1 (macro)",      "prec-bt-f1",          C["accent"],  sub="harmonic mean"), width=2),
+                    dbc.Col(_stat("MCC",             "prec-bt-mcc",         C["purple"],  sub="-1 to +1"), width=2),
+                    dbc.Col(_stat("KAPPA",           "prec-bt-kappa",       C["purple"],  sub="agreement"), width=2),
+                    dbc.Col(_stat("BAL ACC",         "prec-bt-balacc",      C["info"],    sub="imbalance-aware"), width=2),
+                    dbc.Col(_stat("AUC-PR",          "prec-bt-aucpr",       C["warn"],    sub="positive class"), width=2),
+                ], className="mt-1"),
                 html.Div(id="prec-bt-status",
                             children="No backtest run yet. Click 'Backtest' after training.",
                             style={"color": C["muted"], "fontSize": "10px",
@@ -313,7 +306,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
 
     # ── Walk-Forward results ───────────────────────────────────────────────
     _card(
-        "🔁 WALK-FORWARD  ·  rolling out-of-sample · intra-bar fills",
+        "🔁 WALK-FORWARD  ·  purged CV + embargo + intra-bar fills",
         dcc.Loading(
             id="prec-wf-loading", type="circle", color=C["accent"],
             children=html.Div([
@@ -329,9 +322,25 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                     dbc.Col(_stat("PROFIT FACTOR",  "prec-wf-pf",         C["info"]),    width=2),
                     dbc.Col(_stat("MAX DD",         "prec-wf-mdd",        C["warn"]),    width=2),
                     dbc.Col(_stat("ECE",            "prec-wf-ece",        C["purple"],
-                                    sub="lower=better, <0.05=calibrated"),               width=3),
+                                    sub="lower=better, <0.05=calibrated"),               width=2),
                     dbc.Col(_stat("p-VALUE",        "prec-wf-pvalue",     C["purple"],
-                                    sub="<0.05 = stat. significant"),                    width=3),
+                                    sub="<0.05 = stat. significant"),                    width=2),
+                    dbc.Col(_stat("ACCURACY",       "prec-wf-acc",        C["info"],
+                                    sub="multi-class"),                                  width=2),
+                    dbc.Col(_stat("F1 MACRO",       "prec-wf-f1",         C["accent"],
+                                    sub="harmonic mean"),                                width=2),
+                ], className="mt-1"),
+                dbc.Row([
+                    dbc.Col(_stat("MCC",            "prec-wf-mcc",        C["orange"],
+                                    sub="quality"),                                      width=2),
+                    dbc.Col(_stat("KAPPA",          "prec-wf-kappa",      C["orange"],
+                                    sub="agreement"),                                    width=2),
+                    dbc.Col(_stat("BAL ACC",        "prec-wf-balacc",     C["info"],
+                                    sub="imbalance-aware"),                              width=2),
+                    dbc.Col(_stat("AUC-ROC",        "prec-wf-aucroc",     C["warn"],
+                                    sub="discrimination"),                               width=2),
+                    dbc.Col(_stat("AUC-PR",         "prec-wf-aucpr",      C["warn"],
+                                    sub="positive class"),                               width=2),
                     dbc.Col(_stat("TOTAL RETURN",   "prec-wf-return",     C["accent"]),  width=2),
                 ], className="mt-1"),
                 html.Div(id="prec-wf-status",
@@ -360,60 +369,67 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
         ),
     ),
 
-    # ── Architecture description (collapsible reference) ───────────────────
+    # ── SQLite Database Panel ──────────────────────────────────────────────
+    _card(
+        "🗄️  SQLITE DATABASE  ·  walk-forward history",
+        html.Div([
+            dbc.Row([
+                dbc.Col([
+                    dbc.Button("🔄 Load Runs", id="prec-db-load-btn",
+                                color="secondary", size="sm", style={"fontSize": "11px"}),
+                ], width="auto"),
+                dbc.Col([
+                    html.Div(id="prec-db-status",
+                                children="Click 'Load Runs' to query SQLite.",
+                                style={"color": C["muted"], "fontSize": "10px"}),
+                ], width=True),
+            ], className="mb-2"),
+            html.Div(id="prec-db-table",
+                        style={"maxHeight": "300px", "overflowY": "auto",
+                                "fontSize": "10px", "color": C["text"]}),
+        ]),
+    ),
+
+    # ── Architecture description ───────────────────────────────────────────
     dbc.Accordion([
         dbc.AccordionItem(
             html.Div([
                 html.P([
                     html.Strong("Layer 1 — Microstructure cleaning:  "),
-                    "Smart Price (volume-weighted mid), Kalman filter, "
-                    "Spread filter (block when spread > 30% ATR)."
+                    "Smart Price, Kalman filter, Spread filter, Roll's effective spread estimator."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Layer 2 — Market structure (v3):  "),
-                    "Lightweight FVG (Fair-Value Gap) detection; nearer FVG edge "
-                    "is used as a tighter stop when present and aligned with the "
-                    "trade direction."
+                    html.Strong("Layer 2 — Market structure:  "),
+                    "Lightweight FVG detection for stop refinement."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Layer 3 — Flow & toxicity (v3):  "),
-                    "VPIN (1-50-50 standard) + CVD with bullish/bearish divergence "
-                    "+ Volume Profile (POC, Value Area, distance-to-POC) + "
-                    "absorption detector + signed volume + realized volatility."
+                    html.Strong("Layer 3 — Flow & toxicity:  "),
+                    "VPIN (1-50-50), CVD divergence, Volume Profile, absorption, tick imbalance."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Layer 4 — MTF confluence (v3):  "),
-                    "1m / 5m / 15m EMA trend alignment, weighted 0.5/0.3/0.2 "
-                    "into a confluence score in [-1, 1]. Strongly opposing MTF "
-                    "(±0.6) gates trades."
+                    html.Strong("Layer 4 — MTF confluence:  "),
+                    "1m/5m/15m EMA alignment with time-of-day seasonality features."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Layer 5 — ML signal (v3):  "),
-                    "XGBoost on 35+ microstructure features OR Lorentzian KNN. "
-                    "Probabilities calibrated via Isotonic Regression with "
-                    "TimeSeriesSplit (out-of-sample) — fixes XGBoost overconfidence. "
-                    "HMM regime adapts strategy in trending/MR regimes."
+                    html.Strong("Layer 5 — ML signal + Meta-labeling:  "),
+                    "XGBoost with class weights, isotonic calibration, threshold tuning for F1. "
+                    "Meta-labeler filters false positives by predicting trade profitability."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Layer 6 — Risk + execution (v3):  "),
-                    "ATR-based stops (refined by FVG when tighter) + 3-tier TP. "
-                    "Quarter-Kelly position sizing kicks in after ≥20 closed "
-                    "trades; until then, fixed 1% risk. London/NY session filter."
+                    html.Strong("Layer 6 — Risk + execution:  "),
+                    "Quarter-Kelly sizing, ATR/FVG stops, 3-tier TP, London/NY session filter."
                 ], style={"fontSize": "11px", "color": C["text"]}),
                 html.P([
-                    html.Strong("Walk-forward backtest (v3):  "),
-                    "5-fold anchored walk-forward with intra-bar OHLC-ordered "
-                    "fill simulation (worst-case path per direction). Reports "
-                    "ECE (calibration error), p-value (one-sample t-test of "
-                    "trade PnL), per-direction precision."
+                    html.Strong("Validation — Purged Walk-Forward:  "),
+                    "Expanding window with purging (removes overlapping label horizons) and "
+                    "embargo (excludes post-test serial-correlated bars). Stores all results to SQLite."
                 ], style={"fontSize": "11px", "color": C["text"]}),
             ]),
-            title="ℹ️  Architecture (6 layers · v3)", item_id="arch",
+            title="ℹ️  Architecture (6 layers · v4 · purged CV · meta-labeling)", item_id="arch",
         )
     ], start_collapsed=True, flush=True,
         style={"backgroundColor": C["surface"], "marginTop": "10px"}),
 
-    # ── Stores + interval ─────────────────────────────────────────────────
     dcc.Store(id="prec-train-trigger", data=0),
     dcc.Store(id="prec-bt-trigger", data=0),
     dcc.Store(id="prec-wfbt-trigger", data=0),
@@ -424,12 +440,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
 ])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _fetch_recent_data(symbol: str, period: str = "5d", interval: str = "1m") -> pd.DataFrame:
-    """Fetch recent 1-min OHLCV data via app.py's existing helper."""
     from app import fetch_yahoo_finance_data
     df = fetch_yahoo_finance_data(symbol, period=period, interval=interval)
     if df is None or df.empty:
@@ -441,15 +452,9 @@ def _fetch_recent_data(symbol: str, period: str = "5d", interval: str = "1m") ->
 
 
 def _fetch_training_data(symbol: str) -> pd.DataFrame:
-    """Fetch ~30 days of 1-min data for training (yfinance hard limit)."""
     from app import fetch_yahoo_finance_data
-    # yfinance allows max 7 days at 1m granularity per request, so use 7d / 1m
-    # for the training set. Caller (training thread) can stitch chunks if it
-    # wants more — for now 7 days = ~7×1440 = ~10k bars which is enough for
-    # the XGBoost classifier + a 70/30 split.
     df = fetch_yahoo_finance_data(symbol, period="7d", interval="1m")
     if df is None or df.empty:
-        # Fall back to 15-min if 1m unavailable (weekend / illiquid hour)
         df = fetch_yahoo_finance_data(symbol, period="60d", interval="15m")
     if df is None or df.empty:
         return pd.DataFrame()
@@ -459,9 +464,7 @@ def _fetch_training_data(symbol: str) -> pd.DataFrame:
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Callback 1: Live signal — runs every 15s
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Callback 1: Live signal ─────────────────────────────────────────────
 
 @callback(
     Output("prec-signal-badge",     "children"),
@@ -480,7 +483,7 @@ def _fetch_training_data(symbol: str) -> pd.DataFrame:
     Output("prec-mtf-conf",         "children"),
     Output("prec-cvd-div",          "children"),
     Output("prec-in-va",            "children"),
-    Output("prec-sizing",           "children"),
+    Output("prec-meta",             "children"),
     Output("prec-signal-status",    "children"),
     Output("prec-progress",         "value"),
     Input("prec-interval",          "n_intervals"),
@@ -491,58 +494,52 @@ def _fetch_training_data(symbol: str) -> pd.DataFrame:
 )
 def update_live_signal(_n, symbol, model, _trig):
     DASH_DASH = "--"
-    n_dashes_v3 = 14  # 9 base stats + 5 v3 stats
+    n_dashes = 14  # 16 stats after first 3 outputs = 19 total outputs - 3 = 16, but using 14 to match
     if not symbol or not model:
         return ("---", {"fontSize": "32px", "color": C["muted"], "fontWeight": "bold", "lineHeight": "1"},
-                "Select symbol",) + (DASH_DASH,) * n_dashes_v3 + ("Pick a symbol + model", 0)
+                "Select symbol",) + (DASH_DASH,) * n_dashes + ("Pick a symbol + model", 0)
 
     sys = _get_system(symbol, model)
     key = f"{symbol}_{model}"
     state = _training_state.get(key, {})
 
-    # Training in progress?
     if state.get("status") == "training":
         prog = int(state.get("progress", 0))
         return ("⏳", {"fontSize": "32px", "color": C["warn"], "fontWeight": "bold", "lineHeight": "1"},
-                f"Training {symbol}/{model}…",) + (DASH_DASH,) * n_dashes_v3 + (state.get("message", "Training…"), prog)
+                f"Training {symbol}/{model}…",) + (DASH_DASH,) * n_dashes + (state.get("message", "Training…"), prog)
 
-    # Untrained?
     if not sys.is_trained:
         return ("---", {"fontSize": "32px", "color": C["muted"], "fontWeight": "bold", "lineHeight": "1"},
-                "Model not trained",) + (DASH_DASH,) * n_dashes_v3 + ("Click 'Train' to begin (~30-60 s)", 0)
+                "Model not trained",) + (DASH_DASH,) * n_dashes + ("Click 'Train' to begin (~30-60 s)", 0)
 
-    # Generate live signal
     try:
         df = _fetch_recent_data(symbol)
         if df is None or df.empty or len(df) < 100:
-            return (no_update,) * (3 + n_dashes_v3) + ("Waiting for data…", no_update)
+            return (no_update,) * (3 + n_dashes) + ("Waiting for data…", no_update)
         sig = sys.generate_live_signal(df)
     except Exception as e:
         return ("ERR", {"fontSize": "32px", "color": C["danger"], "fontWeight": "bold", "lineHeight": "1"},
-                str(e)[:60],) + (DASH_DASH,) * n_dashes_v3 + (f"Signal error: {type(e).__name__}", 0)
+                str(e)[:60],) + (DASH_DASH,) * n_dashes + (f"Signal error: {type(e).__name__}", 0)
 
     action = sig["action"]
-    # Color the badge by direction
     if "BUY" in action.upper():
         col = C["accent"] if action.startswith("BUY") else "#7fff7f"
     elif "SELL" in action.upper():
         col = C["danger"] if action.startswith("SELL") else "#ff7575"
     else:
         col = C["warn"]
-    # Mute the colour when blocked
-    if "BLOCK" in action.upper() or "SPREAD" in action.upper():
+    if "BLOCK" in action.upper() or "SPREAD" in action.upper() or "REJECT" in action.upper():
         col = C["muted"]
 
     badge_style = {"fontSize": "30px", "color": col, "fontWeight": "bold", "lineHeight": "1"}
     conf_text = f"Confidence: {sig['confidence']:.1%}"
 
-    # Pretty-print v3 fields
     mtf_score_str = f"{sig.get('mtf_score', 0):+.2f}"
     mtf_conf_str = sig.get("mtf_confluence", "neutral").upper().replace("_", " ")
     cvd_d = sig.get("cvd_div", 0)
     cvd_div_str = "BULL ↑" if cvd_d > 0 else "BEAR ↓" if cvd_d < 0 else "—"
     in_va_str = "INSIDE" if sig.get("in_value_area", True) else "OUTSIDE"
-    sizing_str = sig.get("sizing_method", "fixed").upper()
+    meta_str = "PASS ✓" if sig.get("meta_label", 1) == 1 else "REJECT ✗"
 
     return (
         action, badge_style, conf_text,
@@ -559,15 +556,13 @@ def update_live_signal(_n, symbol, model, _trig):
         mtf_conf_str,
         cvd_div_str,
         in_va_str,
-        sizing_str,
+        meta_str,
         f"Live ✓  •  Last update: {datetime.now().strftime('%H:%M:%S')}",
         100,
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Callback 2: Train button → daemon thread
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Callback 2: Train ───────────────────────────────────────────────────
 
 @callback(
     Output("prec-train-output", "children"),
@@ -627,9 +622,7 @@ def start_training(n_clicks, symbol, model, trig):
     return f"Training started for {symbol}/{model}", (trig or 0) + 1
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Callback 3: Backtest button → daemon thread
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Callback 3: Backtest ────────────────────────────────────────────────
 
 @callback(
     Output("prec-bt-output",      "children"),
@@ -640,6 +633,12 @@ def start_training(n_clicks, symbol, model, trig):
     Output("prec-bt-sharpe",      "children"),
     Output("prec-bt-mdd",         "children"),
     Output("prec-bt-return",      "children"),
+    Output("prec-bt-acc",         "children"),
+    Output("prec-bt-f1",          "children"),
+    Output("prec-bt-mcc",         "children"),
+    Output("prec-bt-kappa",       "children"),
+    Output("prec-bt-balacc",      "children"),
+    Output("prec-bt-aucpr",       "children"),
     Output("prec-bt-status",      "children"),
     Output("prec-equity-chart",   "figure"),
     Input("prec-backtest-btn",    "n_clicks"),
@@ -650,11 +649,10 @@ def start_training(n_clicks, symbol, model, trig):
 )
 def run_backtest(n_clicks, symbol, model, trig):
     if not n_clicks:
-        return (no_update,)*10
+        return (no_update,) * 16
     sys = _get_system(symbol, model)
 
     try:
-        # Fetch fresh data and backtest
         df = _fetch_training_data(symbol)
         if df is None or df.empty or len(df) < 500:
             empty_fig = go.Figure(layout=dict(
@@ -666,6 +664,7 @@ def run_backtest(n_clicks, symbol, model, trig):
                 xaxis=dict(visible=False), yaxis=dict(visible=False),
             ))
             return ("err", trig or 0, "0", "--", "--", "--", "--", "--",
+                    "--", "--", "--", "--", "--",
                     f"❌ Insufficient data ({0 if df is None else len(df)} bars)",
                     empty_fig)
 
@@ -680,16 +679,14 @@ def run_backtest(n_clicks, symbol, model, trig):
                                                                     font=dict(color=C["danger"],
                                                                                 size=11))]))
             return ("err", trig or 0, "0", "--", "--", "--", "--", "--",
+                    "--", "--", "--", "--", "--",
                     f"❌ {result['error']}", empty_fig)
 
-        # Build equity curve figure
         eq = result.get("equity_curve") or []
         ts = result.get("timestamps")  or list(range(len(eq)))
         fig = go.Figure()
         if eq:
             initial = result.get("initial_equity", 10_000)
-            colors = [C["accent"] if v >= initial else C["danger"] for v in eq]
-            # Single line + filled area
             fig.add_trace(go.Scatter(
                 x=ts, y=eq, mode="lines",
                 line=dict(color=C["accent"], width=2),
@@ -713,17 +710,36 @@ def run_backtest(n_clicks, symbol, model, trig):
             showlegend=False,
         )
 
+        def _fmt_pct(v):
+            try:
+                return f"{float(v):.1%}"
+            except Exception:
+                return "--"
+        def _fmt_num(v, d=2):
+            try:
+                return f"{float(v):.{d}f}"
+            except Exception:
+                return "--"
+
         return (
             "done",
             (trig or 0) + 1,
             f"{result.get('total_trades', 0)}",
-            f"{result.get('win_rate', 0):.1%}",
-            f"{result.get('profit_factor', 0):.2f}" if result.get("profit_factor", 0) != float("inf") else "∞",
-            f"{result.get('sharpe', 0):.2f}",
+            _fmt_pct(result.get('win_rate', 0)),
+            _fmt_num(result.get('profit_factor', 0)),
+            _fmt_num(result.get('sharpe', 0)),
             f"${result.get('max_drawdown', 0):,.0f}",
-            f"{result.get('total_return', 0):.2%}",
+            _fmt_pct(result.get('total_return', 0)),
+            _fmt_pct(result.get('accuracy', 0)),
+            _fmt_num(result.get('f1_macro', 0)),
+            _fmt_num(result.get('mcc', 0)),
+            _fmt_num(result.get('cohens_kappa', 0)),
+            _fmt_pct(result.get('balanced_accuracy', 0)),
+            _fmt_num(result.get('auc_pr', 0)),
             (f"✅ Backtest complete  •  train: {result.get('train_bars', 0):,} bars  "
-                f"•  test (unseen): {result.get('test_bars', 0):,} bars"),
+                f"•  test (unseen): {result.get('test_bars', 0):,} bars  "
+                f"•  Acc: {_fmt_pct(result.get('accuracy',0))}  "
+                f"•  F1: {_fmt_num(result.get('f1_macro',0))}"),
             fig,
         )
     except Exception as e:
@@ -732,12 +748,11 @@ def run_backtest(n_clicks, symbol, model, trig):
                                             plot_bgcolor=C["surface"],
                                             height=240))
         return ("err", trig or 0, "0", "--", "--", "--", "--", "--",
+                "--", "--", "--", "--", "--",
                 f"❌ {type(e).__name__}: {e}", empty_fig)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Callback 4: Walk-Forward backtest button
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Callback 4: Walk-Forward ────────────────────────────────────────────
 
 def _empty_wf_fig(msg: str, color: Optional[str] = None) -> go.Figure:
     return go.Figure(layout=dict(
@@ -758,7 +773,6 @@ def _format_pf(pf) -> str:
 
 
 def _build_fold_table(per_fold):
-    """Compact per-fold breakdown for walk-forward results."""
     if not per_fold:
         return html.Div("No folds completed.",
                         style={"color": C["muted"], "fontSize": "10px",
@@ -768,7 +782,7 @@ def _build_fold_table(per_fold):
                             "borderBottom": f"1px solid {C['border']}",
                             "textTransform": "uppercase", "fontSize": "9px"})
         for h in ("Fold", "Train", "Test", "Trades", "Win %",
-                    "Sharpe", "PF", "Return")
+                    "Sharpe", "PF", "Return", "Acc", "F1")
     ])
     rows = []
     for f in per_fold:
@@ -786,6 +800,8 @@ def _build_fold_table(per_fold):
             html.Td(f"{ret:+.2%}",            style={"padding": "3px 8px",
                                                         "color": ret_color,
                                                         "fontWeight": "bold"}),
+            html.Td(f"{f.get('accuracy', 0):.1%}", style={"padding": "3px 8px"}),
+            html.Td(f"{f.get('f1_macro', 0):.2f}", style={"padding": "3px 8px"}),
         ]))
     return html.Table(
         [html.Thead(header), html.Tbody(rows)],
@@ -808,6 +824,13 @@ def _build_fold_table(per_fold):
     Output("prec-wf-mdd",             "children"),
     Output("prec-wf-ece",             "children"),
     Output("prec-wf-pvalue",          "children"),
+    Output("prec-wf-acc",             "children"),
+    Output("prec-wf-f1",              "children"),
+    Output("prec-wf-mcc",             "children"),
+    Output("prec-wf-kappa",           "children"),
+    Output("prec-wf-balacc",          "children"),
+    Output("prec-wf-aucroc",          "children"),
+    Output("prec-wf-aucpr",           "children"),
     Output("prec-wf-return",          "children"),
     Output("prec-wf-status",          "children"),
     Output("prec-wf-equity-chart",    "figure"),
@@ -820,7 +843,7 @@ def _build_fold_table(per_fold):
 )
 def run_walk_forward(n_clicks, symbol, model, trig):
     if not n_clicks:
-        return (no_update,) * 16
+        return (no_update,) * 23
     sys = _get_system(symbol, model)
     try:
         df = _fetch_training_data(symbol)
@@ -829,7 +852,8 @@ def run_walk_forward(n_clicks, symbol, model, trig):
             empty = _empty_wf_fig(f"Walk-forward needs ≥ 1000 bars (got {n})",
                                    C["danger"])
             return ("err", trig or 0,
-                    "0","0","--","--","--","--","--","--","--","--","--",
+                    "0","0","--","--","--","--","--","--","--","--",
+                    "--","--","--","--","--","--","--",
                     f"❌ Insufficient data ({n} bars)",
                     empty, "")
 
@@ -839,7 +863,8 @@ def run_walk_forward(n_clicks, symbol, model, trig):
         if "error" in result:
             empty = _empty_wf_fig(result["error"], C["danger"])
             return ("err", trig or 0,
-                    "0","0","--","--","--","--","--","--","--","--","--",
+                    "0","0","--","--","--","--","--","--","--","--",
+                    "--","--","--","--","--","--","--",
                     f"❌ {result['error']}",
                     empty, "")
 
@@ -875,20 +900,35 @@ def run_walk_forward(n_clicks, symbol, model, trig):
         pval_str = f"{pval:.4f}" if pval is not None else "n/a"
         sig_marker = " ✓" if pval is not None and pval < 0.05 else ""
 
+        def _fmt(v, d=2, pct=False):
+            try:
+                if pct:
+                    return f"{float(v):.1%}"
+                return f"{float(v):.{d}f}"
+            except Exception:
+                return "--"
+
         return (
             "done",
             (trig or 0) + 1,
             f"{result.get('n_splits', 0)}",
             f"{result.get('total_trades', 0)}",
-            f"{result.get('win_rate', 0):.1%}",
-            f"{result.get('precision_long', 0):.1%}",
-            f"{result.get('precision_short', 0):.1%}",
-            f"{result.get('sharpe', 0):.2f}",
+            _fmt(result.get('win_rate', 0), pct=True),
+            _fmt(result.get('precision_long', 0), pct=True),
+            _fmt(result.get('precision_short', 0), pct=True),
+            _fmt(result.get('sharpe', 0)),
             _format_pf(result.get("profit_factor", 0)),
             f"${result.get('max_drawdown', 0):,.0f}",
             f"{ece:.4f}",
             pval_str + sig_marker,
-            f"{result.get('total_return', 0):+.2%}",
+            _fmt(result.get('accuracy', 0), pct=True),
+            _fmt(result.get('f1_macro', 0)),
+            _fmt(result.get('mcc', 0)),
+            _fmt(result.get('cohens_kappa', 0)),
+            _fmt(result.get('balanced_accuracy', 0), pct=True),
+            _fmt(result.get('auc_roc', 0)),
+            _fmt(result.get('auc_pr', 0)),
+            _fmt(result.get('total_return', 0), pct=True),
             (f"✅ Walk-forward complete  •  {result.get('n_splits', 0)} folds  "
                 f"•  trained up to {result.get('train_bars', 0):,} bars  "
                 f"•  total OOS test bars: {result.get('test_bars', 0):,}"
@@ -900,7 +940,51 @@ def run_walk_forward(n_clicks, symbol, model, trig):
         import traceback; traceback.print_exc()
         empty = _empty_wf_fig(f"❌ {type(e).__name__}: {e}", C["danger"])
         return ("err", trig or 0,
-                "0","0","--","--","--","--","--","--","--","--","--",
+                "0","0","--","--","--","--","--","--","--","--",
+                "--","--","--","--","--","--","--",
                 f"❌ {type(e).__name__}: {e}",
                 empty, "")
 
+
+# ── Callback 5: SQLite DB Loader ────────────────────────────────────────
+
+@callback(
+    Output("prec-db-table",   "children"),
+    Output("prec-db-status",  "children"),
+    Input("prec-db-load-btn", "n_clicks"),
+    State("prec-symbol",      "value"),
+    prevent_initial_call=True,
+)
+def load_db_runs(n_clicks, symbol):
+    if not n_clicks:
+        return no_update, no_update
+    try:
+        sys = _get_system(symbol, "xgboost")  # any model works for DB access
+        df = sys.get_db_runs(limit=20)
+        if df.empty:
+            return html.Div("No runs found in database.",
+                            style={"color": C["muted"], "textAlign": "center"}), \
+                   "No data."
+
+        # Format key columns
+        display_cols = [
+            "run_timestamp", "n_splits", "total_trades", "win_rate",
+            "sharpe", "max_drawdown", "total_return",
+            "accuracy", "f1_macro", "mcc", "balanced_accuracy"
+        ]
+        df = df[[c for c in display_cols if c in df.columns]]
+        for c in ["win_rate", "total_return", "accuracy", "balanced_accuracy"]:
+            if c in df.columns:
+                df[c] = df[c].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "--")
+        for c in ["sharpe", "f1_macro", "mcc", "max_drawdown"]:
+            if c in df.columns:
+                df[c] = df[c].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "--")
+
+        table = dbc.Table.from_dataframe(
+            df, striped=True, bordered=True, hover=True, size="sm",
+            style={"color": C["text"], "backgroundColor": C["surface"],
+                   "fontSize": "10px", "fontFamily": "monospace"}
+        )
+        return table, f"Loaded {len(df)} runs from SQLite."
+    except Exception as e:
+        return html.Div(f"DB Error: {e}", style={"color": C["danger"]}), f"Error: {e}"

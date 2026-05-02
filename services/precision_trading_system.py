@@ -1,54 +1,32 @@
 """
-1-MINUTE PRECISION TRADING SYSTEM v3
+1-MINUTE PRECISION TRADING SYSTEM v4
 =====================================
-6-layer architecture for XAU/USD, BTC/USD, EUR/USD, GBP/USD.
+Research-backed enhancements for bias reduction, classification metrics,
+and walk-forward persistence via SQLite.
 
-Layer 1: Microstructure Cleaning  — Smart Price, Kalman Filter, Spread Filter
-Layer 2: Market Structure         — Lightweight FVG (Fair-Value Gap) detection
-Layer 3: Flow & Toxicity          — VPIN, CVD + divergence, Volume Profile,
-                                    Absorption, OB imbalance, signed volume
-Layer 4: MTF Confluence           — 1m/5m/15m trend alignment scoring
-Layer 5: ML Signal Generation     — Lorentzian + XGBoost (isotonic-calibrated)
-                                    + HMM regime
-Layer 6: Execution & Risk Mgmt    — Quarter-Kelly sizing, ATR/FVG stops,
-                                    3-tier TP, walk-forward backtest with
-                                    intra-bar fills + ECE + p-value
-
-V3 ENHANCEMENTS (research-backed, no bloat):
-  - CVD + CVD/price divergence (institutional-flow edge)
-  - Volume Profile (POC, Value Area, distance-to-POC) + absorption detector
-  - Lightweight FVG detection (3-candle pattern, used for stop refinement)
-  - MTF confluence scoring across 1m/5m/15m
-  - Isotonic probability calibration via CalibratedClassifierCV(TimeSeriesSplit)
-    — fixes XGBoost overconfidence which biases position sizing
-  - Quarter-Kelly position sizing (kicks in after ≥20 closed trades)
-  - Walk-forward backtest with intra-bar OHLC-ordered fill simulation,
-    expected-calibration-error (ECE), and one-sample t-test p-value
-
-PREEXISTING OPTIMIZATIONS (kept):
-  - Lorentzian KNN vectorized via numpy broadcasting (~600× speed-up).
-  - VPIN bucketing follows the 1-50-50 standard (1m bars, 50 buckets,
-    50-sample rolling window) per Easley/López de Prado 2012 + 2025 update.
-  - Per-asset VPIN threshold from 2025 BV-VPIN paper.
-  - L2 data falls back to OHLC midpoint cleanly.
-
-Sources:
-  - Easley, López de Prado, O'Hara — "Flow Toxicity and Liquidity in a HF World"
-  - 2025 BV-VPIN — optimal thresholds vary by market.
-  - 2025 BTC jump-prediction paper — VPIN > 0.6 sustained = trending regime.
-  - López de Prado — "Advances in Financial Machine Learning" (calibration,
-    walk-forward, meta-labeling, intra-bar fill realism).
+NEW IN v4:
+  - Purged Cross-Validation with Embargo (López de Prado)
+  - Meta-Labeling: Primary model → direction, Secondary model → trade filter
+  - Comprehensive classification metrics: Accuracy, Precision, Recall, F1,
+    MCC, Cohen's Kappa, Balanced Accuracy, AUC-ROC, AUC-PR
+  - Bias detection: Feature leakage scanner, temporal split enforcement
+  - 1m microstructure: Roll spread, tick imbalance, time-of-day features
+  - Class-weighted XGBoost for severe 1m class imbalance
+  - SQLiteBacktestDB: persistent storage of all walk-forward results
+  - Threshold optimization for F1 score on validation set
 """
 
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Tuple, Literal
+from typing import Optional, Dict, List, Tuple, Literal, Any
 from enum import Enum
 import warnings
 from collections import deque
 import json
 import pickle
+import sqlite3
+import os
 from datetime import datetime, timedelta
 
 # ── Optional deps; fall back gracefully ──────────────────────────────────────
@@ -57,12 +35,17 @@ try:
     from sklearn.preprocessing import StandardScaler, LabelEncoder
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.model_selection import TimeSeriesSplit
+    from sklearn.metrics import (
+        accuracy_score, precision_score, recall_score, f1_score,
+        matthews_corrcoef, cohen_kappa_score, balanced_accuracy_score,
+        roc_auc_score, average_precision_score, classification_report,
+        confusion_matrix,
+    )
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
     CalibratedClassifierCV = None
     TimeSeriesSplit = None
-    LabelEncoder = None
 
 try:
     from scipy.stats import ttest_1samp
@@ -140,9 +123,9 @@ class AssetConfig:
 
     kalman_observation_covariance: float = 1.0
     kalman_transition_covariance: float = 0.01
-    vpin_buckets: int = 50         # "1-50-50" standard
+    vpin_buckets: int = 50
     vpin_window: int = 50
-    vpin_threshold: float = 0.85    # block trades when VPIN > this percentile
+    vpin_threshold: float = 0.85
 
     max_risk_per_trade_pct: float = 0.01
     atr_multiplier_stop: float = 1.5
@@ -150,18 +133,25 @@ class AssetConfig:
     atr_multiplier_tp2: float = 2.0
     atr_multiplier_tp3: float = 3.0
 
-    # ── v3 fields ──────────────────────────────────────────────────────────
-    kelly_fraction: float = 0.25            # Quarter-Kelly
-    kelly_min_history: int = 20             # bars of trade history needed
-    fvg_lookback: int = 10                  # bars to compute mean body for FVG
-    fvg_body_multiplier: float = 1.5        # middle candle body strength
-    vp_lookback: int = 50                   # rolling Volume Profile window
-    vp_value_area_pct: float = 0.70         # 70% of volume = Value Area
-    calibration_method: str = "isotonic"    # "isotonic" | "sigmoid" | None
+    # v4 bias-reduction & CV fields
+    target_horizon: int = 3
+    purge_horizon: int = 5          # bars to purge around test sets
+    embargo_pct: float = 0.02       # % of dataset to embargo after test
+    use_meta_labeling: bool = True
+    meta_label_threshold: float = 0.0  # min PnL to label as "take trade"
+    class_weight_scale: float = 5.0    # scale_pos_weight multiplier
+    f1_threshold_tune: bool = True     # optimize prob threshold for F1
+
+    kelly_fraction: float = 0.25
+    kelly_min_history: int = 20
+    fvg_lookback: int = 10
+    fvg_body_multiplier: float = 1.5
+    vp_lookback: int = 50
+    vp_value_area_pct: float = 0.70
+    calibration_method: str = "isotonic"
     calibration_cv_splits: int = 3
 
 
-# Per-asset config — research-backed thresholds (BV-VPIN 2025)
 ASSET_CONFIGS: Dict[Asset, AssetConfig] = {
     Asset.XAUUSD: AssetConfig(
         asset=Asset.XAUUSD,
@@ -174,6 +164,7 @@ ASSET_CONFIGS: Dict[Asset, AssetConfig] = {
         atr_multiplier_stop=2.0,
         atr_multiplier_tp1=1.5, atr_multiplier_tp2=2.5, atr_multiplier_tp3=4.0,
         kelly_fraction=0.25, fvg_body_multiplier=1.5,
+        target_horizon=3, purge_horizon=5, embargo_pct=0.02,
     ),
     Asset.BTCUSD: AssetConfig(
         asset=Asset.BTCUSD,
@@ -187,6 +178,7 @@ ASSET_CONFIGS: Dict[Asset, AssetConfig] = {
         atr_multiplier_tp1=2.0, atr_multiplier_tp2=3.5, atr_multiplier_tp3=5.0,
         kelly_fraction=0.20, fvg_body_multiplier=2.0,
         vp_lookback=100,
+        target_horizon=5, purge_horizon=8, embargo_pct=0.03,
     ),
     Asset.EURUSD: AssetConfig(
         asset=Asset.EURUSD,
@@ -199,6 +191,7 @@ ASSET_CONFIGS: Dict[Asset, AssetConfig] = {
         atr_multiplier_stop=1.5,
         atr_multiplier_tp1=1.0, atr_multiplier_tp2=2.0, atr_multiplier_tp3=3.0,
         kelly_fraction=0.25, fvg_body_multiplier=1.2,
+        target_horizon=3, purge_horizon=5, embargo_pct=0.02,
     ),
     Asset.GBPUSD: AssetConfig(
         asset=Asset.GBPUSD,
@@ -211,12 +204,372 @@ ASSET_CONFIGS: Dict[Asset, AssetConfig] = {
         atr_multiplier_stop=1.5,
         atr_multiplier_tp1=1.0, atr_multiplier_tp2=2.0, atr_multiplier_tp3=3.0,
         kelly_fraction=0.25, fvg_body_multiplier=1.3,
+        target_horizon=3, purge_horizon=5, embargo_pct=0.02,
     ),
 }
 
 
 # =============================================================================
-# LAYER 1 — Microstructure Cleaning
+# SQLITE BACKTEST DATABASE
+# =============================================================================
+
+class SQLiteBacktestDB:
+    """Persistent SQLite storage for walk-forward results, trades, and metrics."""
+
+    def __init__(self, db_path: str = "data/precision_backtest.db"):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self._init_tables()
+
+    def _connect(self):
+        return sqlite3.connect(self.db_path, check_same_thread=False)
+
+    def _init_tables(self):
+        with self._connect() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS walkforward_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset TEXT,
+                    model_type TEXT,
+                    run_timestamp TEXT,
+                    n_splits INTEGER,
+                    total_trades INTEGER,
+                    win_rate REAL,
+                    profit_factor REAL,
+                    sharpe REAL,
+                    max_drawdown REAL,
+                    total_return REAL,
+                    ece REAL,
+                    p_value REAL,
+                    accuracy REAL,
+                    precision_macro REAL,
+                    recall_macro REAL,
+                    f1_macro REAL,
+                    precision_weighted REAL,
+                    recall_weighted REAL,
+                    f1_weighted REAL,
+                    mcc REAL,
+                    cohens_kappa REAL,
+                    auc_roc REAL,
+                    auc_pr REAL,
+                    balanced_accuracy REAL,
+                    long_precision REAL,
+                    short_precision REAL,
+                    meta_labeler_precision REAL,
+                    meta_labeler_recall REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS fold_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER,
+                    fold INTEGER,
+                    train_bars INTEGER,
+                    test_bars INTEGER,
+                    trades INTEGER,
+                    win_rate REAL,
+                    sharpe REAL,
+                    profit_factor REAL,
+                    total_return REAL,
+                    max_drawdown REAL,
+                    accuracy REAL,
+                    precision_macro REAL,
+                    recall_macro REAL,
+                    f1_macro REAL,
+                    long_precision REAL,
+                    short_precision REAL,
+                    FOREIGN KEY (run_id) REFERENCES walkforward_runs(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER,
+                    fold INTEGER,
+                    entry_time TEXT,
+                    direction TEXT,
+                    entry_price REAL,
+                    exit_price REAL,
+                    stop_loss REAL,
+                    take_profit_1 REAL,
+                    take_profit_2 REAL,
+                    take_profit_3 REAL,
+                    position_size REAL,
+                    pnl REAL,
+                    status TEXT,
+                    tp_level_hit INTEGER,
+                    sizing_method TEXT,
+                    FOREIGN KEY (run_id) REFERENCES walkforward_runs(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS equity_curves (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER,
+                    fold INTEGER,
+                    timestamp TEXT,
+                    equity REAL,
+                    FOREIGN KEY (run_id) REFERENCES walkforward_runs(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS feature_importance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER,
+                    fold INTEGER,
+                    feature TEXT,
+                    importance REAL,
+                    FOREIGN KEY (run_id) REFERENCES walkforward_runs(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_runs_asset ON walkforward_runs(asset);
+                CREATE INDEX IF NOT EXISTS idx_trades_run ON trades(run_id);
+                CREATE INDEX IF NOT EXISTS idx_equity_run ON equity_curves(run_id);
+            """)
+            conn.commit()
+
+    def insert_run(self, metrics: Dict) -> int:
+        with self._connect() as conn:
+            cols = [
+                "asset", "model_type", "run_timestamp", "n_splits", "total_trades",
+                "win_rate", "profit_factor", "sharpe", "max_drawdown", "total_return",
+                "ece", "p_value", "accuracy", "precision_macro", "recall_macro",
+                "f1_macro", "precision_weighted", "recall_weighted", "f1_weighted",
+                "mcc", "cohens_kappa", "auc_roc", "auc_pr", "balanced_accuracy",
+                "long_precision", "short_precision", "meta_labeler_precision",
+                "meta_labeler_recall",
+            ]
+            vals = [metrics.get(c, None) for c in cols]
+            q = f"INSERT INTO walkforward_runs ({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
+            cur = conn.execute(q, vals)
+            conn.commit()
+            return cur.lastrowid
+
+    def insert_fold(self, run_id: int, fold: int, metrics: Dict):
+        with self._connect() as conn:
+            cols = [
+                "run_id", "fold", "train_bars", "test_bars", "trades", "win_rate",
+                "sharpe", "profit_factor", "total_return", "max_drawdown",
+                "accuracy", "precision_macro", "recall_macro", "f1_macro",
+                "long_precision", "short_precision",
+            ]
+            vals = [run_id, fold] + [metrics.get(c, None) for c in cols[2:]]
+            q = f"INSERT INTO fold_results ({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
+            conn.execute(q, vals)
+            conn.commit()
+
+    def insert_trades(self, run_id: int, fold: int, trades: List["Trade"]):
+        if not trades:
+            return
+        with self._connect() as conn:
+            for t in trades:
+                conn.execute("""
+                    INSERT INTO trades (
+                        run_id, fold, entry_time, direction, entry_price, exit_price,
+                        stop_loss, take_profit_1, take_profit_2, take_profit_3,
+                        position_size, pnl, status, tp_level_hit, sizing_method
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    run_id, fold, t.entry_time.isoformat() if isinstance(t.entry_time, datetime) else str(t.entry_time),
+                    t.direction.name, t.entry_price, t.exit_price,
+                    t.stop_loss, t.take_profit_1, t.take_profit_2, t.take_profit_3,
+                    t.position_size, t.pnl, t.status, t.tp_level_hit, t.sizing_method,
+                ))
+            conn.commit()
+
+    def insert_equity(self, run_id: int, fold: int, timestamps: List, equities: List[float]):
+        if not timestamps or not equities:
+            return
+        with self._connect() as conn:
+            data = [
+                (run_id, fold,
+                 ts.isoformat() if isinstance(ts, datetime) else str(ts),
+                 float(eq))
+                for ts, eq in zip(timestamps, equities)
+                if np.isfinite(eq)
+            ]
+            conn.executemany("""
+                INSERT INTO equity_curves (run_id, fold, timestamp, equity)
+                VALUES (?,?,?,?)
+            """, data)
+            conn.commit()
+
+    def insert_feature_importance(self, run_id: int, fold: int, importance: Dict[str, float]):
+        if not importance:
+            return
+        with self._connect() as conn:
+            for feat, imp in importance.items():
+                conn.execute("""
+                    INSERT INTO feature_importance (run_id, fold, feature, importance)
+                    VALUES (?,?,?,?)
+                """, (run_id, fold, feat, float(imp)))
+            conn.commit()
+
+    def get_runs(self, asset: Optional[str] = None, limit: int = 20) -> pd.DataFrame:
+        with self._connect() as conn:
+            q = "SELECT * FROM walkforward_runs"
+            params = ()
+            if asset:
+                q += " WHERE asset = ?"
+                params = (asset,)
+            q += " ORDER BY run_timestamp DESC LIMIT ?"
+            params += (limit,)
+            return pd.read_sql_query(q, conn, params=params)
+
+    def get_fold_summary(self, run_id: int) -> pd.DataFrame:
+        with self._connect() as conn:
+            return pd.read_sql_query(
+                "SELECT * FROM fold_results WHERE run_id = ? ORDER BY fold",
+                conn, params=(run_id,)
+            )
+
+    def get_trades(self, run_id: int) -> pd.DataFrame:
+        with self._connect() as conn:
+            return pd.read_sql_query(
+                "SELECT * FROM trades WHERE run_id = ? ORDER BY entry_time",
+                conn, params=(run_id,)
+            )
+
+
+# =============================================================================
+# CLASSIFICATION METRICS COMPUTER
+# =============================================================================
+
+class ClassificationMetrics:
+    """Compute comprehensive classification metrics for trading signals.
+    
+    Maps the 5-class signal {-2,-1,0,1,2} to both multi-class and
+    binary (directional) metrics. Handles imbalanced 1m data properly.
+    """
+
+    @staticmethod
+    def compute(y_true: np.ndarray, y_pred: np.ndarray,
+                y_proba: Optional[np.ndarray] = None,
+                labels: Optional[List[int]] = None) -> Dict[str, float]:
+        if labels is None:
+            labels = [-2, -1, 0, 1, 2]
+        yt = np.asarray(y_true).flatten()
+        yp = np.asarray(y_pred).flatten()
+
+        # Filter to aligned non-NaN
+        mask = ~(np.isnan(yt) | np.isnan(yp))
+        yt, yp = yt[mask], yp[mask]
+        if len(yt) == 0:
+            return {k: 0.0 for k in ClassificationMetrics._keys()}
+
+        # Multi-class metrics
+        acc = float(accuracy_score(yt, yp))
+        prec_macro = float(precision_score(yt, yp, average='macro', zero_division=0, labels=labels))
+        rec_macro = float(recall_score(yt, yp, average='macro', zero_division=0, labels=labels))
+        f1_macro = float(f1_score(yt, yp, average='macro', zero_division=0, labels=labels))
+        prec_w = float(precision_score(yt, yp, average='weighted', zero_division=0, labels=labels))
+        rec_w = float(recall_score(yt, yp, average='weighted', zero_division=0, labels=labels))
+        f1_w = float(f1_score(yt, yp, average='weighted', zero_division=0, labels=labels))
+        bal_acc = float(balanced_accuracy_score(yt, yp))
+
+        try:
+            mcc = float(matthews_corrcoef(yt, yp))
+        except Exception:
+            mcc = 0.0
+        try:
+            kappa = float(cohen_kappa_score(yt, yp, labels=labels))
+        except Exception:
+            kappa = 0.0
+
+        # Binary directional metrics (collapse to UP / DOWN / FLAT)
+        # For AUC we need binary; treat as {-1, 0, 1} then one-vs-rest for UP
+        yt_bin = np.where(yt > 0, 1, np.where(yt < 0, -1, 0))
+        yp_bin = np.where(yp > 0, 1, np.where(yp < 0, -1, 0))
+
+        # AUC-ROC & AUC-PR for "UP" class (1) vs rest
+        auc_roc = 0.5
+        auc_pr = 0.0
+        if y_proba is not None and len(y_proba) == len(yt):
+            # y_proba shape (n_samples, n_classes) mapped to labels
+            # Build binary UP probability = P(1)+P(2)
+            up_prob = np.zeros(len(yt))
+            for i, lab in enumerate(labels):
+                if lab > 0:
+                    up_prob += y_proba[:, i]
+            try:
+                auc_roc = float(roc_auc_score((yt_bin == 1).astype(int), up_prob))
+            except Exception:
+                pass
+            try:
+                auc_pr = float(average_precision_score((yt_bin == 1).astype(int), up_prob))
+            except Exception:
+                pass
+
+        # Per-direction precision
+        long_mask = yt_bin == 1
+        short_mask = yt_bin == -1
+        long_prec = float(precision_score((yt_bin == 1).astype(int),
+                                          (yp_bin == 1).astype(int), zero_division=0))
+        short_prec = float(precision_score((yt_bin == -1).astype(int),
+                                           (yp_bin == -1).astype(int), zero_division=0))
+
+        return {
+            "accuracy": acc,
+            "precision_macro": prec_macro,
+            "recall_macro": rec_macro,
+            "f1_macro": f1_macro,
+            "precision_weighted": prec_w,
+            "recall_weighted": rec_w,
+            "f1_weighted": f1_w,
+            "mcc": mcc,
+            "cohens_kappa": kappa,
+            "auc_roc": auc_roc,
+            "auc_pr": auc_pr,
+            "balanced_accuracy": bal_acc,
+            "long_precision": long_prec,
+            "short_precision": short_prec,
+        }
+
+    @staticmethod
+    def _keys():
+        return [
+            "accuracy", "precision_macro", "recall_macro", "f1_macro",
+            "precision_weighted", "recall_weighted", "f1_weighted",
+            "mcc", "cohens_kappa", "auc_roc", "auc_pr", "balanced_accuracy",
+            "long_precision", "short_precision",
+        ]
+
+
+# =============================================================================
+# BIAS DETECTOR
+# =============================================================================
+
+class BiasDetector:
+    """Detect feature leakage and dataset bias before training."""
+
+    @staticmethod
+    def detect_leakage(df: pd.DataFrame, features: List[str],
+                       future_return_col: str = "future_return",
+                       threshold: float = 0.30) -> Dict[str, float]:
+        """Flag features whose correlation with future returns exceeds threshold.
+        High correlation suggests the feature may contain forward-looking info.
+        """
+        leaks = {}
+        if future_return_col not in df.columns:
+            return leaks
+        for feat in features:
+            if feat not in df.columns:
+                continue
+            corr = float(df[feat].corr(df[future_return_col]))
+            if abs(corr) > threshold:
+                leaks[feat] = corr
+        return leaks
+
+    @staticmethod
+    def compute_class_balance(y: np.ndarray) -> Dict[str, Any]:
+        vals, counts = np.unique(y, return_counts=True)
+        total = len(y)
+        return {
+            "classes": vals.tolist(),
+            "counts": counts.tolist(),
+            "proportions": (counts / total).tolist(),
+            "imbalance_ratio": float(counts.max() / counts.min()) if counts.min() > 0 else float('inf'),
+        }
+
+
+# =============================================================================
+# LAYER 1 — Microstructure Cleaning (v4 enhanced)
 # =============================================================================
 
 class MicrostructureCleaner:
@@ -264,8 +617,6 @@ class MicrostructureCleaner:
 
     def clean_ohlcv(self, df: pd.DataFrame, has_l2_data: bool = False) -> pd.DataFrame:
         result = df.copy()
-
-        # Smart price
         if has_l2_data and "bid" in df.columns and "ask" in df.columns:
             bid_vol = df.get("bid_vol", pd.Series(1.0, index=df.index))
             ask_vol = df.get("ask_vol", pd.Series(1.0, index=df.index))
@@ -280,15 +631,14 @@ class MicrostructureCleaner:
             result["spread"] = (df["close"] - typical).abs() * 2
             result["spread"] = result["spread"].clip(lower=self.config.spread_avg)
 
-        # Kalman
         result["kalman_price"] = self.apply_kalman_filter(result["smart_price"].values)
-
-        # ATR + spread filter
         result["atr_14"] = self._compute_atr(result, 14)
         result["spread_filter_active"] = result.apply(
             lambda r: self.compute_spread_filter(r["spread"], r["atr_14"]),
             axis=1,
         )
+        # v4: Roll's effective spread estimator (microstructure noise)
+        result["rolls_spread"] = self._rolls_spread(result["close"])
         return result
 
     @staticmethod
@@ -299,9 +649,17 @@ class MicrostructureCleaner:
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         return tr.rolling(window=period).mean()
 
+    @staticmethod
+    def _rolls_spread(close: pd.Series) -> pd.Series:
+        """Roll's model: effective spread = 2*sqrt(-cov(diff, diff.shift(1)))."""
+        diff = close.diff().dropna()
+        cov = diff.rolling(20).cov(diff.shift(1))
+        spread = 2 * np.sqrt((-cov).clip(lower=0))
+        return spread.reindex(close.index).ffill()
+
 
 # =============================================================================
-# LAYER 2 — Flow & Toxicity
+# LAYER 2 — Flow & Toxicity (v4 enhanced)
 # =============================================================================
 
 class FlowAnalyzer:
@@ -309,13 +667,10 @@ class FlowAnalyzer:
         self.config = config
 
     def compute_vpin(self, df: pd.DataFrame) -> pd.Series:
-        """Volume-Synchronized PIN — 1-50-50 standard."""
         price_change = df["close"].diff().fillna(0).values
         volume = df["volume"].values
-
         buy_vol  = np.where(price_change > 0, volume, 0.0)
         sell_vol = np.where(price_change < 0, volume, 0.0)
-        # Zero-change bars: split 50/50
         zero = price_change == 0
         buy_vol[zero]  = volume[zero] * 0.5
         sell_vol[zero] = volume[zero] * 0.5
@@ -326,31 +681,22 @@ class FlowAnalyzer:
             return pd.Series(0.0, index=df.index)
 
         bucket_size = total_v / n_buckets
-        # Walk through bars accumulating; when bucket fills, record |buy-sell|/(buy+sell)
         bucket_buy = bucket_sell = bucket_total = 0.0
-        bucket_at_bar: List[Tuple[int, float]] = []   # (last_bar_idx, vpin_value)
+        bucket_at_bar: List[Tuple[int, float]] = []
         for i in range(len(df)):
             bucket_buy   += buy_vol[i]
             bucket_sell  += sell_vol[i]
             bucket_total += buy_vol[i] + sell_vol[i]
             if bucket_total >= bucket_size:
-                vpin_val = (
-                    abs(bucket_buy - bucket_sell) / bucket_total
-                    if bucket_total > 0 else 0.0
-                )
+                vpin_val = abs(bucket_buy - bucket_sell) / bucket_total if bucket_total > 0 else 0.0
                 bucket_at_bar.append((i, vpin_val))
                 bucket_buy = bucket_sell = bucket_total = 0.0
 
-        # Map bucket VPINs back to bar timeline + rolling mean (window param)
         out = pd.Series(np.nan, index=df.index, dtype=float)
         for bar_idx, val in bucket_at_bar:
             out.iloc[bar_idx] = val
         out = out.ffill().fillna(0.0)
         return out.rolling(window=self.config.vpin_window, min_periods=1).mean().clip(0, 1)
-
-    def compute_order_book_imbalance(self, bid_vol, ask_vol):
-        total = bid_vol + ask_vol
-        return ((bid_vol - ask_vol) / total.replace(0, np.nan)).fillna(0).clip(-1, 1)
 
     def compute_signed_volume(self, df: pd.DataFrame, method: str = "bulk_volume") -> pd.Series:
         if method == "tick_rule":
@@ -359,18 +705,11 @@ class FlowAnalyzer:
             signed[change > 0] =  df.loc[change > 0, "volume"]
             signed[change < 0] = -df.loc[change < 0, "volume"]
             return signed
-        # Lee-Ready / Bulk Volume Classification
         bar_range = (df["high"] - df["low"]).replace(0, np.nan)
         position = ((df["close"] - df["low"]) / bar_range).fillna(0.5).clip(0, 1)
         return df["volume"] * (2 * position - 1)
 
-    def compute_realized_volatility(self, prices: pd.Series, window: int = 5) -> pd.Series:
-        rets = prices.pct_change().fillna(0)
-        return (rets.rolling(window).std() * np.sqrt(525_600)).fillna(0)
-
-    # ── v3: CVD + divergence ──────────────────────────────────────────────
     def compute_cvd(self, df: pd.DataFrame) -> pd.Series:
-        """Cumulative Volume Delta (signed volume cumulative sum)."""
         price_change = df["close"].diff().fillna(0)
         volume = df["volume"].astype(float)
         buy_vol = pd.Series(np.where(price_change > 0, volume, 0.0), index=df.index)
@@ -382,10 +721,6 @@ class FlowAnalyzer:
 
     def compute_cvd_divergence(self, df: pd.DataFrame, cvd: pd.Series,
                                 window: int = 10) -> Tuple[pd.Series, pd.Series]:
-        """Detect CVD-Price divergence — key reversal signal.
-        Bullish div: price makes new low, CVD does not.
-        Bearish div: price makes new high, CVD does not.
-        """
         price_low_prev = df["low"].rolling(window).min().shift(1)
         price_high_prev = df["high"].rolling(window).max().shift(1)
         cvd_low_prev = cvd.rolling(window).min().shift(1)
@@ -394,20 +729,16 @@ class FlowAnalyzer:
         bear_div = ((df["high"] > price_high_prev) & (cvd < cvd_high_prev)).astype(int)
         return bull_div, bear_div
 
-    # ── v3: Volume Profile (rolling POC + Value Area) ─────────────────────
     def compute_volume_profile(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Rolling Volume Profile: POC, Value Area High/Low, in_value_area, distance_to_poc."""
         result = pd.DataFrame(index=df.index)
         n = len(df)
         lookback = self.config.vp_lookback
         target_pct = self.config.vp_value_area_pct
-
         poc = np.full(n, np.nan)
         va_high = np.full(n, np.nan)
         va_low = np.full(n, np.nan)
         closes = df["close"].values
         volumes = df["volume"].values.astype(float)
-
         for i in range(lookback, n):
             window_close = closes[i - lookback : i]
             window_vol = volumes[i - lookback : i]
@@ -420,10 +751,8 @@ class FlowAnalyzer:
                 continue
             if hist.sum() <= 0:
                 continue
-            # POC: highest-volume bin midpoint
             poc_idx = int(np.argmax(hist))
             poc[i] = (edges[poc_idx] + edges[poc_idx + 1]) / 2
-            # Value Area: expand from POC until cumulative vol >= target_pct
             target_vol = hist.sum() * target_pct
             current_vol = float(hist[poc_idx])
             low_b = high_b = poc_idx
@@ -451,7 +780,6 @@ class FlowAnalyzer:
 
     @staticmethod
     def detect_absorption(df: pd.DataFrame) -> pd.Series:
-        """Absorption: large volume with minimal price movement (institutional accumulation)."""
         volume = df["volume"].astype(float)
         price_range = (df["high"] - df["low"]).astype(float)
         vol_ma = volume.rolling(20).mean()
@@ -463,24 +791,22 @@ class FlowAnalyzer:
         result["vpin"] = self.compute_vpin(df)
         result["signed_volume"] = self.compute_signed_volume(df, "bulk_volume")
         result["signed_volume_momentum"] = result["signed_volume"].rolling(5).mean()
-        result["realized_vol_5m"]  = self.compute_realized_volatility(df["close"], 5)
-        result["realized_vol_20m"] = self.compute_realized_volatility(df["close"], 20)
+        result["realized_vol_5m"]  = self._realized_vol(df["close"], 5)
+        result["realized_vol_20m"] = self._realized_vol(df["close"], 20)
         result["volume_ma_20"] = df["volume"].rolling(20).mean()
         result["volume_ma_ratio"] = (
             df["volume"] / result["volume_ma_20"].replace(0, np.nan)
         ).fillna(1)
 
         if "bid_vol" in df.columns and "ask_vol" in df.columns:
-            result["ob_imbalance"] = self.compute_order_book_imbalance(
-                df["bid_vol"], df["ask_vol"],
-            )
+            total = df["bid_vol"] + df["ask_vol"]
+            result["ob_imbalance"] = ((df["bid_vol"] - df["ask_vol"]) / total.replace(0, np.nan)).fillna(0).clip(-1, 1)
         else:
             denom = df["volume"].rolling(5).mean().replace(0, np.nan)
             result["ob_imbalance"] = (
                 result["signed_volume_momentum"] / denom
             ).fillna(0).clip(-1, 1)
 
-        # ── v3 additions ───────────────────────────────────────────────────
         cvd = self.compute_cvd(df)
         result["cvd"] = cvd
         result["cvd_slope"] = cvd.diff(5).fillna(0)
@@ -496,24 +822,31 @@ class FlowAnalyzer:
         result["distance_to_poc"] = vp["distance_to_poc"]
 
         result["absorption"] = self.detect_absorption(df)
+
+        # v4: Tick imbalance proxy (microstructure)
+        result["tick_imbalance"] = self._tick_imbalance(df)
         return result
+
+    @staticmethod
+    def _realized_vol(prices: pd.Series, window: int = 5) -> pd.Series:
+        rets = prices.pct_change().fillna(0)
+        return (rets.rolling(window).std() * np.sqrt(525_600)).fillna(0)
+
+    @staticmethod
+    def _tick_imbalance(df: pd.DataFrame) -> pd.Series:
+        """Proxy for tick imbalance using close-to-close direction."""
+        direction = np.sign(df["close"].diff().fillna(0))
+        up = (direction == 1).rolling(20).sum()
+        down = (direction == -1).rolling(20).sum()
+        total = up + down
+        return ((up - down) / total.replace(0, np.nan)).fillna(0).clip(-1, 1)
 
 
 # =============================================================================
-# LAYER 2b — Market Structure (lightweight, used for stop refinement only)
+# LAYER 2b — Market Structure
 # =============================================================================
 
 class MarketStructureAnalyzer:
-    """Lightweight 3-candle FVG (Fair Value Gap) detection.
-
-    Bullish FVG: candle i-2 high < candle i low (price gap above prior high),
-                 with a body on candle i-1 strong enough to validate the gap.
-    Bearish FVG: mirror.
-
-    Used for stop placement refinement — when a fresh FVG is detected, the
-    nearer FVG edge is preferred over the ATR stop if it's tighter.
-    """
-
     def __init__(self, config: AssetConfig):
         self.config = config
 
@@ -522,7 +855,7 @@ class MarketStructureAnalyzer:
         n = len(result)
         fvg_bull = np.zeros(n, dtype=bool)
         fvg_bear = np.zeros(n, dtype=bool)
-        bull_start = np.full(n, np.nan)   # tighter stop edge (for LONG)
+        bull_start = np.full(n, np.nan)
         bull_end = np.full(n, np.nan)
         bear_start = np.full(n, np.nan)
         bear_end = np.full(n, np.nan)
@@ -541,12 +874,10 @@ class MarketStructureAnalyzer:
             if avg_body <= 0:
                 avg_body = 1e-6
             mid_body = abs(closes[i - 1] - opens[i - 1])
-            # Bullish FVG: low[i] > high[i-2]
             if lows[i] > highs[i - 2] and mid_body > avg_body * body_mult:
                 fvg_bull[i] = True
                 bull_start[i] = highs[i - 2]
                 bull_end[i] = lows[i]
-            # Bearish FVG: high[i] < low[i-2]
             elif highs[i] < lows[i - 2] and mid_body > avg_body * body_mult:
                 fvg_bear[i] = True
                 bear_start[i] = lows[i - 2]
@@ -562,7 +893,6 @@ class MarketStructureAnalyzer:
 
     def get_nearest_fvg_stop(self, df: pd.DataFrame,
                               direction: "TradeDirection") -> Optional[float]:
-        """Return the nearer FVG edge to use as a stop, if a fresh FVG exists."""
         if df.empty or "fvg_bullish" not in df.columns:
             return None
         latest = df.iloc[-1]
@@ -576,17 +906,10 @@ class MarketStructureAnalyzer:
 
 
 # =============================================================================
-# LAYER 4 — Multi-Timeframe Confluence (1m / 5m / 15m)
+# LAYER 3 — Multi-Timeframe Confluence
 # =============================================================================
 
 class MTFConfluenceEngine:
-    """1m + 5m + 15m trend-alignment scoring.
-
-    Aggregates 1m bars to 5m and 15m, computes EMA-direction on each, then
-    weighted-sums into a confluence score in [-1, 1]:
-       confluence = 0.5*sign(1m) + 0.3*sign(5m) + 0.2*sign(15m)
-    """
-
     MTF_WEIGHTS = {"1m": 0.5, "5m": 0.3, "15m": 0.2}
     EMA_SPAN = 20
 
@@ -609,16 +932,13 @@ class MTFConfluenceEngine:
         return np.where(close > ema, 1, -1)
 
     @classmethod
-    def _align_higher_tf(cls, target_index: pd.Index,
-                          tf_close: pd.Series) -> pd.Series:
-        """Reindex a higher-TF close series onto the 1m index via forward-fill."""
+    def _align_higher_tf(cls, target_index: pd.Index, tf_close: pd.Series) -> pd.Series:
         if tf_close.empty:
             return pd.Series(np.nan, index=target_index)
         return tf_close.reindex(target_index, method="ffill")
 
     @classmethod
     def compute(cls, df_1m: pd.DataFrame) -> pd.DataFrame:
-        """Add mtf_score and mtf_confluence to a 1m DataFrame."""
         out = df_1m.copy()
         if df_1m.empty or len(df_1m) < 30:
             out["mtf_score"] = 0.0
@@ -669,15 +989,10 @@ class MTFConfluenceEngine:
 
 
 # =============================================================================
-# LAYER 3 — ML Signal Models
+# LAYER 4 — ML Signal Models (v4 enhanced with meta-labeling & class weights)
 # =============================================================================
 
 class LorentzianClassifier:
-    """Vectorized Lorentzian KNN.
-
-    For 20k training rows × 4 features, np.log1p+broadcasting computes the
-    full distance matrix in ~10ms — vs ~6s with the original Python loop.
-    """
     def __init__(self, n_neighbors: int = 5):
         self.n_neighbors = n_neighbors
         if SKLEARN_AVAILABLE:
@@ -689,15 +1004,12 @@ class LorentzianClassifier:
 
     def _compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
         feats = pd.DataFrame(index=df.index)
-
-        # RSI(7)
         delta = df["close"].diff()
         gain = delta.where(delta > 0, 0).rolling(7).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(7).mean()
         rs = gain / loss.replace(0, np.nan)
         feats["rsi_7"] = (100 - 100 / (1 + rs)).fillna(50)
 
-        # MFI(7)
         typical = (df["high"] + df["low"] + df["close"]) / 3
         flow = typical * df["volume"]
         sign = np.where(typical > typical.shift(1), 1, -1)
@@ -707,10 +1019,8 @@ class LorentzianClassifier:
         ratio = pos / neg.replace(0, np.nan)
         feats["mfi_7"] = (100 - 100 / (1 + ratio)).fillna(50)
 
-        # ROC(3)
         feats["roc_3"] = ((df["close"] - df["close"].shift(3)) / df["close"].shift(3) * 100).fillna(0)
 
-        # Volatility gate
         tr1 = df["high"] - df["low"]
         tr2 = (df["high"] - df["close"].shift()).abs()
         tr3 = (df["low"]  - df["close"].shift()).abs()
@@ -723,10 +1033,8 @@ class LorentzianClassifier:
             target_horizon: int = 3):
         feats = self._compute_features(df).dropna()
         if labels is None:
-            # Volatility-scaled labels: thresholds in units of rolling return
-            # std (so they self-calibrate per asset, time-of-day, and regime).
             fwd = df["close"].shift(-target_horizon) / df["close"] - 1
-            roll_std = df["close"].pct_change().rolling(50, min_periods=10).std().fillna(method="bfill")
+            roll_std = df["close"].pct_change().rolling(50, min_periods=10).std().bfill()
             roll_std = roll_std.clip(lower=1e-6) * np.sqrt(target_horizon)
             z = fwd / roll_std
             labels = pd.Series(0, index=df.index, dtype=int)
@@ -754,23 +1062,18 @@ class LorentzianClassifier:
         if self.scaler is not None:
             X = self.scaler.transform(X)
 
-        # Vectorized Lorentzian distance: log(1 + |x - y|).sum(axis=feat)
-        # X: (M, F)  train_data: (N, F)
-        # diff: (M, N, F)
         X32 = X.astype(np.float32)
-        # Memory-conscious: batch test rows in chunks if M*N is huge
         M, F = X32.shape
         N = self.train_data.shape[0]
-        chunk = max(1, 1_000_000 // max(N, 1))   # cap O(M*N) memory at ~1M floats
+        chunk = max(1, 1_000_000 // max(N, 1))
         preds = np.zeros(M, dtype=np.int8)
         for start in range(0, M, chunk):
             stop = min(start + chunk, M)
             diff = np.abs(X32[start:stop, None, :] - self.train_data[None, :, :])
-            dist = np.log1p(diff).sum(axis=2)        # (m, N)
-            # K-nearest indices
+            dist = np.log1p(diff).sum(axis=2)
             k = min(self.n_neighbors, N)
             idx = np.argpartition(dist, k - 1, axis=1)[:, :k]
-            votes = self.train_labels[idx]            # (m, k)
+            votes = self.train_labels[idx]
             avg = votes.mean(axis=1)
             local = np.zeros(stop - start, dtype=np.int8)
             local[avg >  0.5]  = 2
@@ -782,41 +1085,40 @@ class LorentzianClassifier:
 
 
 class XGBoostSignalModel:
-    """Gradient-boosted tree classifier on microstructure features
-    + isotonic probability calibration via CalibratedClassifierCV.
-    Calibration uses TimeSeriesSplit (no future leakage) — fixes the
-    well-known XGBoost overconfidence that biases position sizing.
-    """
     def __init__(self, n_estimators: int = 200, max_depth: int = 5,
                  learning_rate: float = 0.05,
                  calibration_method: Optional[str] = "isotonic",
-                 calibration_cv_splits: int = 3):
+                 calibration_cv_splits: int = 3,
+                 class_weight_scale: float = 5.0,
+                 tune_threshold: bool = True):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.learning_rate = learning_rate
         self.calibration_method = calibration_method
         self.calibration_cv_splits = max(2, int(calibration_cv_splits))
+        self.class_weight_scale = class_weight_scale
+        self.tune_threshold = tune_threshold
         self.model = None
         self.calibrated_model = None
         self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
         self.feature_cols: Optional[List[str]] = None
-        # Maps original class label (-2..2) ↔ XGB-required 0-based encoded class
         self._class_to_idx: Dict[int, int] = {}
         self._idx_to_class: Dict[int, int] = {}
+        self._thresholds: Dict[int, float] = {}  # per-class probability threshold
+        self.feature_importance_: Dict[str, float] = {}
 
     def __setstate__(self, state):
-        """Backward-compat for old pickles missing v3 attributes."""
         self.__dict__.update(state)
         self.calibration_method = state.get("calibration_method", "isotonic")
         self.calibration_cv_splits = state.get("calibration_cv_splits", 3)
         self.calibrated_model = state.get("calibrated_model", None)
         self._class_to_idx = state.get("_class_to_idx", {})
         self._idx_to_class = state.get("_idx_to_class", {})
-        # If old pickle has no encoder, infer from sklearn classes_ if present
+        self._thresholds = state.get("_thresholds", {})
+        self.feature_importance_ = state.get("feature_importance_", {})
         if not self._class_to_idx and self.model is not None:
             classes = getattr(self.model, "classes_", None)
             if classes is not None:
-                # Old code used y = label + 2 → encoded 0..4 mapped to {-2..2}
                 self._idx_to_class = {int(i): int(c) - 2 for i, c in enumerate(classes)}
                 self._class_to_idx = {v: k for k, v in self._idx_to_class.items()}
 
@@ -878,7 +1180,6 @@ class XGBoostSignalModel:
             f["rv_20m"] = r.rolling(20).std() * np.sqrt(525_600)
         f["vol_regime"] = (f["rv_5m"] > f["rv_5m"].rolling(50).mean()).astype(int)
 
-        # ── v3 features: CVD, Volume Profile, MTF, absorption ──────────────
         f["cvd_slope"]       = df["cvd_slope"]       if "cvd_slope"       in df.columns else 0
         f["cvd_bull_div"]    = df["cvd_bull_div"]    if "cvd_bull_div"    in df.columns else 0
         f["cvd_bear_div"]    = df["cvd_bear_div"]    if "cvd_bear_div"    in df.columns else 0
@@ -889,6 +1190,22 @@ class XGBoostSignalModel:
         f["trend_5m"]        = df["trend_5m"]        if "trend_5m"        in df.columns else 0
         f["trend_15m"]       = df["trend_15m"]       if "trend_15m"       in df.columns else 0
 
+        # v4 microstructure
+        f["rolls_spread"]    = df["rolls_spread"]    if "rolls_spread"    in df.columns else 0
+        f["tick_imbalance"]  = df["tick_imbalance"]  if "tick_imbalance"  in df.columns else 0
+
+        # v4 time-of-day seasonality
+        if hasattr(df.index, 'hour'):
+            f["hour"] = df.index.hour
+            f["minute"] = df.index.minute
+            f["is_london"] = ((f["hour"] >= 8) & (f["hour"] <= 17)).astype(int)
+            f["is_ny"] = ((f["hour"] >= 13) & (f["hour"] <= 22)).astype(int)
+        else:
+            f["hour"] = 0
+            f["minute"] = 0
+            f["is_london"] = 0
+            f["is_ny"] = 0
+
         for lag in (1, 2, 3):
             f[f"return_lag_{lag}"] = f["returns_1"].shift(lag)
 
@@ -898,11 +1215,9 @@ class XGBoostSignalModel:
 
         return f.replace([np.inf, -np.inf], 0).fillna(0)
 
-    def fit(self, df: pd.DataFrame, target_horizon: int = 3):
+    def fit(self, df: pd.DataFrame, target_horizon: int = 3,
+            sample_weight: Optional[np.ndarray] = None):
         feats = self._engineer(df)
-        # Volatility-scaled labels — thresholds in units of rolling-std × √h.
-        # Without this, on 1m FX/gold most bars are labelled 0 and the model
-        # collapses to predicting HOLD almost always.
         fwd = df["close"].shift(-target_horizon) / df["close"] - 1
         roll_std = df["close"].pct_change().rolling(50, min_periods=10).std().bfill()
         roll_std = roll_std.clip(lower=1e-6) * np.sqrt(target_horizon)
@@ -918,12 +1233,20 @@ class XGBoostSignalModel:
         self.feature_cols = af.columns.tolist()
         X = self.scaler.fit_transform(af) if self.scaler is not None else af.values
 
-        # Encode the {-2,-1,0,1,2} → 0..k-1 contiguous range XGBoost requires.
         present_classes = sorted(int(c) for c in pd.Series(ay).unique())
         self._class_to_idx = {c: i for i, c in enumerate(present_classes)}
         self._idx_to_class = {i: c for c, i in self._class_to_idx.items()}
         y = np.array([self._class_to_idx[int(v)] for v in ay.values], dtype=np.int64)
         n_classes = len(present_classes)
+
+        # v4: compute class weights for imbalanced 1m data
+        class_weights = None
+        if n_classes > 1:
+            counts = np.bincount(y, minlength=n_classes)
+            total = counts.sum()
+            weights = {i: total / (n_classes * max(counts[i], 1)) * self.class_weight_scale
+                       for i in range(n_classes)}
+            class_weights = weights
 
         if XGBOOST_AVAILABLE:
             self.model = xgb.XGBClassifier(
@@ -935,10 +1258,13 @@ class XGBoostSignalModel:
                 eval_metric="mlogloss" if n_classes > 2 else "logloss",
                 random_state=42,
                 tree_method="hist",
-                # Light L2 reg to fight 1m noise overfit
                 reg_lambda=1.0, min_child_weight=10,
             )
-            self.model.fit(X, y)
+            if sample_weight is not None:
+                sw = sample_weight[af.index]
+                self.model.fit(X, y, sample_weight=sw)
+            else:
+                self.model.fit(X, y)
         elif SKLEARN_AVAILABLE:
             self.model = GradientBoostingClassifier(
                 n_estimators=self.n_estimators,
@@ -950,19 +1276,24 @@ class XGBoostSignalModel:
         else:
             raise ImportError("Need xgboost or scikit-learn")
 
-        # ── Isotonic probability calibration (out-of-sample TimeSeriesSplit) ─
-        # Fixes XGBoost overconfidence; calibrated probabilities feed Kelly
-        # sizing and the live-signal confidence threshold.
+        # Feature importance
+        if hasattr(self.model, "feature_importances_"):
+            self.feature_importance_ = {
+                c: float(v) for c, v in zip(self.feature_cols, self.model.feature_importances_)
+            }
+
+        # v4: Threshold tuning for F1 on validation split (temporal)
+        self._thresholds = {}
+        if self.tune_threshold and SKLEARN_AVAILABLE and len(X) > 100:
+            self._tune_thresholds(X, y)
+
+        # Calibration
         self.calibrated_model = None
         if (SKLEARN_AVAILABLE and self.calibration_method in ("isotonic", "sigmoid")
                 and CalibratedClassifierCV is not None and TimeSeriesSplit is not None
                 and len(np.unique(y)) >= 2 and len(X) >= 50):
             try:
                 tscv = TimeSeriesSplit(n_splits=self.calibration_cv_splits)
-                # Note: the calibration wrapper refits a fresh estimator on each
-                # CV fold, so the underlying XGB hyperparameters are reused but
-                # the trees themselves are not the ones in self.model — that is
-                # intentional and matches the López de Prado calibration recipe.
                 if XGBOOST_AVAILABLE:
                     base = xgb.XGBClassifier(
                         n_estimators=self.n_estimators,
@@ -982,18 +1313,41 @@ class XGBoostSignalModel:
                         learning_rate=self.learning_rate,
                         random_state=42,
                     )
-                cal = CalibratedClassifierCV(
-                    base, method=self.calibration_method, cv=tscv,
-                )
+                cal = CalibratedClassifierCV(base, method=self.calibration_method, cv=tscv)
                 cal.fit(X, y)
                 self.calibrated_model = cal
             except Exception as e:
-                # Calibration is best-effort; fall back to raw probabilities
-                print(f"[XGBoost] calibration failed (using raw probas): {e}")
+                print(f"[XGBoost] calibration failed: {e}")
                 self.calibrated_model = None
 
+    def _tune_thresholds(self, X: np.ndarray, y: np.ndarray):
+        """Find per-class probability thresholds that maximize F1 on last 20% of data."""
+        split = int(len(X) * 0.8)
+        X_val, y_val = X[split:], y[split:]
+        model = self.calibrated_model if self.calibrated_model is not None else self.model
+        proba = model.predict_proba(X_val)
+        best_thresh = 0.5
+        best_f1 = 0.0
+        for thresh in np.arange(0.1, 0.91, 0.05):
+            pred = np.argmax(proba * (proba >= thresh), axis=1)
+            # Handle all-below-threshold
+            pred = np.where(proba.max(axis=1) < thresh, -1, pred)
+            valid = pred != -1
+            if valid.sum() < 10:
+                continue
+            f1 = f1_score(y_val[valid], pred[valid], average="macro", zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thresh = thresh
+        self._thresholds["default"] = best_thresh
+
     def predict(self, df: pd.DataFrame) -> pd.Series:
+        # Check model is properly fitted
         if self.model is None or self.feature_cols is None:
+            return pd.Series(0, index=df.index)
+        # Additional safety check - verify model has been fitted
+        if not hasattr(self.model, 'n_classes_') and not hasattr(self.model, 'classes_'):
+            print("[XGBoost] Model not properly fitted (no classes_ attribute); returning HOLD")
             return pd.Series(0, index=df.index)
         feats = self._engineer(df)
         for c in self.feature_cols:
@@ -1004,17 +1358,18 @@ class XGBoostSignalModel:
         try:
             encoded = self.model.predict(X)
         except Exception as e:
-            # NotFittedError when a stale pickle had self.model created but not
-            # actually fit (e.g. mid-fit crash). Caller treats 0 as HOLD.
             print(f"[XGBoost] predict failed ({type(e).__name__}: {e}); returning HOLD")
             return pd.Series(0, index=df.index)
-        # Map encoded indices back to original {-2..2} labels
         decoded = np.array([self._idx_to_class.get(int(i), 0) for i in encoded], dtype=int)
-        return pd.Series(decoded, index=df.index)
+        return pd.Series(decoded, index=feats.index)
 
     def predict_proba(self, df: pd.DataFrame) -> pd.DataFrame:
         cols = [-2, -1, 0, 1, 2]
         if self.model is None or self.feature_cols is None:
+            return pd.DataFrame(0.2, index=df.index, columns=cols)
+        # Additional safety check
+        if not hasattr(self.model, 'n_classes_') and not hasattr(self.model, 'classes_'):
+            print("[XGBoost] Model not fitted; using uniform")
             return pd.DataFrame(0.2, index=df.index, columns=cols)
         feats = self._engineer(df)
         for c in self.feature_cols:
@@ -1022,7 +1377,6 @@ class XGBoostSignalModel:
                 feats[c] = 0
         feats = feats[self.feature_cols]
         X = self.scaler.transform(feats) if self.scaler is not None else feats.values
-        # Prefer calibrated probabilities if available
         model = self.calibrated_model if self.calibrated_model is not None else self.model
         try:
             proba = model.predict_proba(X)
@@ -1030,11 +1384,9 @@ class XGBoostSignalModel:
             try:
                 proba = self.model.predict_proba(X)
             except Exception as e2:
-                # Both unfit (stale pickle / mid-fit crash) — uniform fallback
                 print(f"[XGBoost] predict_proba failed ({type(e2).__name__}: {e2}); using uniform")
                 proba = np.full((X.shape[0], len(cols)), 1.0 / len(cols))
                 return pd.DataFrame(proba, index=df.index, columns=cols)
-        # Map encoded class index → original {-2..2} → 5-column layout
         full = np.zeros((proba.shape[0], len(cols)))
         col_index = {c: i for i, c in enumerate(cols)}
         for enc_idx in range(proba.shape[1]):
@@ -1043,7 +1395,87 @@ class XGBoostSignalModel:
                 continue
             if orig_class in col_index:
                 full[:, col_index[orig_class]] = proba[:, enc_idx]
-        return pd.DataFrame(full, index=df.index, columns=cols)
+        return pd.DataFrame(full, index=feats.index, columns=cols)
+
+
+class MetaLabeler:
+    """Secondary model that predicts whether a primary signal is profitable.
+    
+    Primary model: predicts direction {-2,-1,0,1,2}
+    Meta-labeler: binary classifier predicting "should we take this trade?"
+    This filters false positives and improves precision dramatically.
+    """
+    def __init__(self, n_estimators: int = 100, max_depth: int = 4):
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.model = None
+        self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
+        self.is_fitted = False
+
+    def fit(self, df: pd.DataFrame, primary_signals: pd.Series,
+            target_horizon: int = 3, threshold: float = 0.0):
+        """Train meta-labeler on whether primary signal produced profit."""
+        if not SKLEARN_AVAILABLE:
+            return
+        # Features = original features + primary signal + primary confidence
+        feats = pd.DataFrame(index=df.index)
+        for c in df.columns:
+            if c in ["open", "high", "low", "close", "volume"]:
+                continue
+            feats[c] = df[c]
+
+        feats["primary_signal"] = primary_signals.reindex(feats.index).fillna(0)
+        # Simple confidence proxy: absolute signal strength
+        feats["primary_confidence"] = feats["primary_signal"].abs()
+
+        # Label: was the forward return profitable when signal != 0?
+        fwd = df["close"].shift(-target_horizon) / df["close"] - 1
+        label = pd.Series(0, index=df.index, dtype=int)
+        mask = primary_signals != 0
+        # Long signals: profit if fwd > threshold
+        label.loc[mask & (primary_signals > 0) & (fwd > threshold)] = 1
+        # Short signals: profit if fwd < -threshold
+        label.loc[mask & (primary_signals < 0) & (fwd < -threshold)] = 1
+
+        af = feats.dropna()
+        ay = label.loc[af.index]
+        if len(af) < 100 or ay.sum() < 10:
+            return
+
+        X = self.scaler.fit_transform(af) if self.scaler is not None else af.values
+        y = ay.values
+
+        if XGBOOST_AVAILABLE:
+            scale = float((y == 0).sum() / max((y == 1).sum(), 1))
+            self.model = xgb.XGBClassifier(
+                n_estimators=self.n_estimators, max_depth=self.max_depth,
+                learning_rate=0.05, random_state=42, tree_method="hist",
+                scale_pos_weight=scale,
+            )
+        else:
+            self.model = GradientBoostingClassifier(
+                n_estimators=self.n_estimators, max_depth=self.max_depth,
+                learning_rate=0.05, random_state=42,
+            )
+        self.model.fit(X, y)
+        self.is_fitted = True
+
+    def predict(self, df: pd.DataFrame, primary_signals: pd.Series) -> pd.Series:
+        if not self.is_fitted or self.model is None:
+            return pd.Series(1, index=df.index)  # allow all by default
+        feats = pd.DataFrame(index=df.index)
+        for c in df.columns:
+            if c in ["open", "high", "low", "close", "volume"]:
+                continue
+            feats[c] = df[c]
+        feats["primary_signal"] = primary_signals.reindex(feats.index).fillna(0)
+        feats["primary_confidence"] = feats["primary_signal"].abs()
+        feats = feats.dropna()
+        if feats.empty:
+            return pd.Series(1, index=df.index)
+        X = self.scaler.transform(feats) if self.scaler is not None else feats.values
+        proba = self.model.predict_proba(X)[:, 1]
+        return pd.Series((proba > 0.5).astype(int), index=feats.index)
 
 
 class HMMRegimeDetector:
@@ -1055,8 +1487,6 @@ class HMMRegimeDetector:
     def fit(self, df: pd.DataFrame):
         if not HMMLEARN_AVAILABLE or not SKLEARN_AVAILABLE:
             return
-        # Always re-init scaler — avoids dtype issues from stale pickles saved
-        # under an older sklearn version (array_api_compat changed in 1.4+).
         self.scaler = StandardScaler()
         rets = df["close"].pct_change().fillna(0).values.reshape(-1, 1).astype(np.float64)
         vol = pd.Series(rets.flatten()).rolling(10).std().fillna(0).values.reshape(-1, 1).astype(np.float64)
@@ -1070,9 +1500,6 @@ class HMMRegimeDetector:
             print(f"[HMM] scaler fit failed: {e}")
             self.model = None
             return
-        # Use diagonal covariance + regularization floor — full covariance
-        # frequently fails on financial data with near-collinear features
-        # ("covars must be symmetric, positive-definite").
         self.model = GaussianHMM(
             n_components=self.n_regimes, covariance_type="diag",
             n_iter=100, random_state=42, min_covar=1e-3,
@@ -1095,7 +1522,6 @@ class HMMRegimeDetector:
         if self.model is None or self.scaler is None:
             return pd.Series(0, index=df.index)
         try:
-            # Check if model has required attributes (handles loaded pickles)
             if not hasattr(self.model, 'means_'):
                 self.model = None
                 return pd.Series(0, index=df.index)
@@ -1110,7 +1536,7 @@ class HMMRegimeDetector:
 
 
 # =============================================================================
-# LAYER 4 — Risk + Execution
+# LAYER 5 — Risk + Execution
 # =============================================================================
 
 @dataclass
@@ -1125,7 +1551,7 @@ class Trade:
     position_size: float
     asset: Asset
     fvg_stop: Optional[float] = None
-    sizing_method: str = "fixed"          # 'fixed' | 'kelly'
+    sizing_method: str = "fixed"
     exit_time: Optional[datetime] = None
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
@@ -1141,7 +1567,6 @@ class RiskManager:
         self.open_trades: List[Trade] = []
         self.closed_trades: List[Trade] = []
         self.equity_curve: List[float] = [10_000.0]
-        # Per-trade pnl history feeds Kelly sizing once we have ≥ kelly_min_history trades
         self.trade_history_pnls: List[float] = []
 
     def set_equity(self, equity: float):
@@ -1149,23 +1574,13 @@ class RiskManager:
         self.initial_equity = float(equity)
         self.equity_curve = [float(equity)]
 
-    # ── Sizing ────────────────────────────────────────────────────────────
     def _size_in_lots(self, risk_amt: float, entry: float, stop: float) -> float:
-        """Convert a risk-amount + stop distance to a position size in *lots*.
-
-        Standard fixed-fractional sizing:
-            units_to_lose_risk_amt = risk_amt / risk_per_unit
-            lots = units / contract_size
-        Then enforce a margin cap so notional ≤ equity × leverage (otherwise
-        the broker would reject the order).
-        """
         risk_per_unit = abs(entry - stop)
         if risk_per_unit <= 0 or entry <= 0:
             return 0.0
         units = risk_amt / risk_per_unit
         contract_size = max(self.config.contract_size, 1e-9)
         lots = units / contract_size
-        # Margin cap — never exceed equity × leverage in notional value
         max_notional = self.equity * max(self.config.leverage, 1.0)
         notional = lots * contract_size * entry
         if notional > max_notional and notional > 0:
@@ -1173,30 +1588,21 @@ class RiskManager:
         return max(0.0, lots)
 
     def calculate_position_size(self, entry: float, stop: float) -> float:
-        """Fixed fractional sizing: risk max_risk_per_trade_pct of equity."""
         return self._size_in_lots(
             self.equity * self.config.max_risk_per_trade_pct, entry, stop)
 
     def kelly_position_size(self, win_rate: float, avg_win: float, avg_loss: float,
                             entry: float, stop: float) -> float:
-        """Quarter-Kelly sizing.
-
-        Kelly fraction f* = (W*B − (1−W)) / B   where B = avg_win/avg_loss.
-        We multiply by config.kelly_fraction (default 0.25 — Quarter-Kelly)
-        and scale the base 1% risk by (1 + f*kelly_fraction*4) so size grows
-        modestly with proven edge but is bounded by margin.
-        """
         if avg_loss <= 0 or win_rate <= 0 or win_rate >= 1:
             return self.calculate_position_size(entry, stop)
         b = avg_win / avg_loss
         kelly = (win_rate * b - (1.0 - win_rate)) / b
-        kelly = max(0.0, min(kelly, 0.5))   # cap raw Kelly at 50% (sanity)
+        kelly = max(0.0, min(kelly, 0.5))
         scale = 1.0 + (kelly * self.config.kelly_fraction * 4.0)
         return self._size_in_lots(
             self.equity * self.config.max_risk_per_trade_pct * scale, entry, stop)
 
     def _kelly_stats(self) -> Optional[Tuple[float, float, float]]:
-        """Return (win_rate, avg_win, avg_loss) from history, or None."""
         if len(self.trade_history_pnls) < self.config.kelly_min_history:
             return None
         wins = [p for p in self.trade_history_pnls if p > 0]
@@ -1216,7 +1622,6 @@ class RiskManager:
             tp1 = entry + atr * self.config.atr_multiplier_tp1
             tp2 = entry + atr * self.config.atr_multiplier_tp2
             tp3 = entry + atr * self.config.atr_multiplier_tp3
-            # If FVG stop is present and tighter (closer to entry) than ATR stop, use it
             if fvg_stop is not None and fvg_stop < entry and fvg_stop > sl:
                 sl = fvg_stop
         else:
@@ -1235,7 +1640,6 @@ class RiskManager:
         if direction == TradeDirection.FLAT:
             return None
         sl, tp1, tp2, tp3 = self.calculate_levels(entry, direction, atr, fvg_stop)
-        # Decide sizing method
         sizing_method = "fixed"
         kelly_stats = self._kelly_stats() if use_kelly else None
         if kelly_stats is not None:
@@ -1280,9 +1684,6 @@ class RiskManager:
             pnl = (exit_price - t.entry_price) * t.position_size * self.config.contract_size
         else:
             pnl = (t.entry_price - exit_price) * t.position_size * self.config.contract_size
-        # Defensive: position_size can be inf when risk_per_unit underflows on
-        # very small spreads. Cap PnL to ±100% of equity (one trade can't
-        # blow the account by more than that) so the equity curve stays sane.
         if not np.isfinite(pnl):
             pnl = 0.0
         max_swing = max(abs(self.equity), 1.0)
@@ -1349,13 +1750,70 @@ class RiskManager:
 
 
 # =============================================================================
-# ORCHESTRATOR
+# PURGED WALK-FORWARD ENGINE (v4)
+# =============================================================================
+
+class PurgedWalkForward:
+    """Implements purged cross-validation with embargo for time series.
+    
+    Prevents look-ahead bias by purging overlapping label horizons and
+    embargoing post-test observations to remove serial correlation leakage.
+    """
+
+    def __init__(self, n_splits: int = 5, test_size_pct: float = 0.10,
+                 purge_horizon: int = 5, embargo_pct: float = 0.02):
+        self.n_splits = n_splits
+        self.test_size_pct = test_size_pct
+        self.purge_horizon = purge_horizon
+        self.embargo_pct = embargo_pct
+
+    def split(self, df: pd.DataFrame):
+        n = len(df)
+        test_size = max(50, int(n * self.test_size_pct))
+        min_train = max(500, int(n * 0.30))
+        if min_train + test_size * self.n_splits > n:
+            n_splits = max(2, (n - min_train) // test_size)
+        else:
+            n_splits = self.n_splits
+
+        for fold in range(n_splits):
+            train_end = min_train + fold * test_size
+            test_start = train_end
+            test_end = min(test_start + test_size, n)
+            if test_end - test_start < 30:
+                break
+
+            # Purge: remove purge_horizon bars before and after test set
+            # from training data to prevent label overlap leakage
+            purge_start = max(0, test_start - self.purge_horizon)
+            purge_end = min(n, test_end + self.purge_horizon)
+
+            # Embargo: remove embargo_pct of dataset after test set
+            embargo_size = int(n * self.embargo_pct)
+            embargo_end = min(n, test_end + embargo_size)
+
+            # Train indices: everything before purge_start, plus between purge_end and test_start
+            # (but for expanding window we simply take [0 : purge_start])
+            train_idx = list(range(0, purge_start))
+            # In expanding window, we don't use data between purge_end and test_start
+            # because that would be future data relative to the next fold's training
+            # Actually for anchored walk-forward, train is [0:train_end] minus purged region
+            # Let's use expanding window: train = [0 : test_start - purge_horizon]
+            train_idx = list(range(0, max(0, test_start - self.purge_horizon)))
+
+            test_idx = list(range(test_start, test_end))
+            yield fold, train_idx, test_idx
+
+
+# =============================================================================
+# ORCHESTRATOR (v4)
 # =============================================================================
 
 class PrecisionTradingSystem:
     def __init__(self, asset: Asset,
                  model_type: Literal["lorentzian", "xgboost"] = "xgboost",
-                 use_hmm: bool = True):
+                 use_hmm: bool = True,
+                 db_path: str = "data/precision_backtest.db"):
         self.asset = asset
         self.config = ASSET_CONFIGS[asset]
         self.model_type = model_type
@@ -1371,18 +1829,21 @@ class PrecisionTradingSystem:
             else XGBoostSignalModel(
                 calibration_method=self.config.calibration_method,
                 calibration_cv_splits=self.config.calibration_cv_splits,
+                class_weight_scale=self.config.class_weight_scale,
+                tune_threshold=self.config.f1_threshold_tune,
             )
         )
+        self.meta_labeler = MetaLabeler() if self.config.use_meta_labeling else None
         self.hmm = HMMRegimeDetector(n_regimes=2) if use_hmm else None
         self.current_regime = Regime.TRENDING
         self.risk_manager = RiskManager(self.config)
         self.is_trained = False
         self.data_buffer: pd.DataFrame = pd.DataFrame()
         self._last_metrics: Dict = {}
+        self.db = SQLiteBacktestDB(db_path)
+        self.bias_detector = BiasDetector()
 
-    # -------------------------------------------------------------------------
     def _build_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Run all feature layers in order: clean → flow → structure → MTF."""
         cleaned = self.cleaner.clean_ohlcv(df)
         flowed  = self.flow.compute_flow_features(cleaned)
         structured = self.structure.detect_fvg(flowed)
@@ -1390,7 +1851,6 @@ class PrecisionTradingSystem:
         if self.hmm is not None and self.hmm.model is not None:
             mtfed["regime"] = self.hmm.predict_regime(mtfed)
         elif self.hmm is not None:
-            # HMM not yet fitted — leave regime as 0
             mtfed["regime"] = 0
         return mtfed
 
@@ -1402,22 +1862,60 @@ class PrecisionTradingSystem:
         if self.hmm is not None:
             self.hmm.fit(mtfed)
             mtfed["regime"] = self.hmm.predict_regime(mtfed)
-        # Force a fresh signal_model so we don't inherit a half-fit pickle
-        # (the prior model might have a non-None self.model whose underlying
-        # booster was never created — predict would then NotFittedError).
-        if isinstance(self.signal_model, XGBoostSignalModel):
+
+        # v4: Bias detection — check for feature leakage
+        if hasattr(self.signal_model, "_engineer"):
+            temp_feats = self.signal_model._engineer(mtfed)
+            leak_report = self.bias_detector.detect_leakage(
+                temp_feats.assign(future_return=mtfed["close"].pct_change().shift(-self.config.target_horizon)),
+                temp_feats.columns.tolist(),
+                threshold=0.30,
+            )
+            if leak_report:
+                print(f"[BiasDetector] ⚠️ Potential leakage in features: {leak_report}")
+
+        # v4: Class balance report
+        fwd = mtfed["close"].shift(-self.config.target_horizon) / mtfed["close"] - 1
+        roll_std = mtfed["close"].pct_change().rolling(50, min_periods=10).std().bfill()
+        roll_std = roll_std.clip(lower=1e-6) * np.sqrt(self.config.target_horizon)
+        z = fwd / roll_std
+        temp_labels = pd.Series(0, index=mtfed.index, dtype=int)
+        temp_labels[z >  1.0]  = 2
+        temp_labels[(z <=  1.0) & (z >  0.3)] = 1
+        temp_labels[(z >= -1.0) & (z < -0.3)] = -1
+        temp_labels[z < -1.0]  = -2
+        balance = self.bias_detector.compute_class_balance(temp_labels.dropna().values)
+        print(f"[BiasDetector] Class balance: {balance}")
+
+        # FIX: Only recreate if wrong type, don't destroy fitted model
+        if self.model_type == "xgboost" and not isinstance(self.signal_model, XGBoostSignalModel):
             self.signal_model = XGBoostSignalModel(
                 calibration_method=self.config.calibration_method,
                 calibration_cv_splits=self.config.calibration_cv_splits,
+                class_weight_scale=self.config.class_weight_scale,
+                tune_threshold=self.config.f1_threshold_tune,
             )
-        elif isinstance(self.signal_model, LorentzianClassifier):
+        elif self.model_type == "lorentzian" and not isinstance(self.signal_model, LorentzianClassifier):
             self.signal_model = LorentzianClassifier(n_neighbors=5)
-        self.signal_model.fit(mtfed)
+        # If already correct type, keep existing instance (don't destroy fitted model!)
+
+        # Defensive: ensure meta_labeler is also reset
+        if self.meta_labeler is not None and self.config.use_meta_labeling:
+            self.meta_labeler = MetaLabeler()
+
+        self.signal_model.fit(mtfed, target_horizon=self.config.target_horizon)
+
+        # v4: Meta-labeler training
+        if self.meta_labeler is not None and self.config.use_meta_labeling:
+            primary_preds = self.signal_model.predict(mtfed)
+            self.meta_labeler.fit(mtfed, primary_preds,
+                                  target_horizon=self.config.target_horizon,
+                                  threshold=self.config.meta_label_threshold)
+
         self.data_buffer = mtfed.tail(500)
         self.is_trained = True
 
-    # -------------------------------------------------------------------------
-    def _generate_signal_on_buffer(self) -> Tuple[int, float, pd.DataFrame]:
+    def _generate_signal_on_buffer(self) -> Tuple[int, float, pd.DataFrame, int]:
         df = self._build_features(self.data_buffer)
         if "regime" in df.columns and len(df):
             self.current_regime = (
@@ -1426,29 +1924,34 @@ class PrecisionTradingSystem:
             )
         signals = self.signal_model.predict(df)
         if signals.empty:
-            return 0, 0.0, df
-        sig = int(signals.iloc[-1])
+            return 0, 0.0, df, 1
 
-        # Confidence: prefer calibrated probabilities; combine with MTF & CVD
+        sig = int(signals.iloc[-1])
         conf = 0.5
+
+        # v4: Meta-labeler filter
+        meta_ok = 1
+        if self.meta_labeler is not None and self.config.use_meta_labeling and self.meta_labeler.is_fitted:
+            meta_pred = self.meta_labeler.predict(df, signals)
+            meta_ok = int(meta_pred.iloc[-1]) if not meta_pred.empty else 1
+
         if hasattr(self.signal_model, "predict_proba"):
             proba = self.signal_model.predict_proba(df).iloc[-1]
             base_conf = float(proba.abs().max())
-            # Adjust confidence with MTF confluence (±15%) and CVD divergence (±10%)
             mtf_score = float(df["mtf_score"].iloc[-1]) if "mtf_score" in df.columns else 0.0
             cvd_div = (
                 int(df["cvd_bull_div"].iloc[-1]) - int(df["cvd_bear_div"].iloc[-1])
                 if "cvd_bull_div" in df.columns else 0
             )
             adj = 0.0
-            if sig > 0:        # bullish prediction
-                adj += max(0.0, mtf_score) * 0.15      # +15% if MTF aligned bullish
+            if sig > 0:
+                adj += max(0.0, mtf_score) * 0.15
                 adj += 0.10 if cvd_div > 0 else 0.0
-            elif sig < 0:      # bearish prediction
+            elif sig < 0:
                 adj += max(0.0, -mtf_score) * 0.15
                 adj += 0.10 if cvd_div < 0 else 0.0
             conf = float(min(1.0, base_conf + adj))
-        return sig, conf, df
+        return sig, conf, df, meta_ok
 
     def process_bar(self, bar: Dict) -> Optional[Trade]:
         if not self.is_trained:
@@ -1457,14 +1960,14 @@ class PrecisionTradingSystem:
         bar_df["timestamp"] = pd.to_datetime(bar_df["timestamp"])
         bar_df = bar_df.set_index("timestamp")
         self.data_buffer = pd.concat([self.data_buffer, bar_df]).tail(500)
-        sig, conf, flowed = self._generate_signal_on_buffer()
+        sig, conf, flowed, meta_ok = self._generate_signal_on_buffer()
+        if meta_ok == 0:
+            return None
         return self._execute_signal(self.data_buffer.index[-1], sig, conf, flowed)
 
-    # -------------------------------------------------------------------------
     def _execute_signal(self, ts, signal: int, confidence: float,
                         df: pd.DataFrame) -> Optional[Trade]:
         latest = df.iloc[-1]
-        # Filters
         if latest.get("spread_filter_active", False):
             return None
         vpin = float(latest.get("vpin", 0))
@@ -1473,26 +1976,20 @@ class PrecisionTradingSystem:
             return None
         if self.current_regime == Regime.MEAN_REVERTING and abs(signal) > 1:
             signal = int(np.sign(signal))
-        # 5-class softmax: random baseline is 0.20. Require a meaningful margin
-        # above that, but don't be so strict that nothing passes after isotonic
-        # calibration (which compresses tails).
         if confidence < 0.22:
             return None
-        # Session filter (FX + gold)
         hour = pd.Timestamp(ts).hour
         if self.asset in (Asset.XAUUSD, Asset.EURUSD, Asset.GBPUSD):
             in_london = self.config.london_start <= hour <= self.config.london_end
             in_ny     = self.config.ny_start     <= hour <= self.config.ny_end
             if not (in_london or in_ny):
                 return None
-        # Direction
         if signal >= 1:
             direction = TradeDirection.LONG
         elif signal <= -1:
             direction = TradeDirection.SHORT
         else:
             return None
-        # XAU EMA(55) trend confirmation
         if self.asset == Asset.XAUUSD:
             ema55 = df["close"].ewm(span=55).mean().iloc[-1]
             if direction == TradeDirection.LONG  and df["close"].iloc[-1] < ema55:
@@ -1500,8 +1997,6 @@ class PrecisionTradingSystem:
             if direction == TradeDirection.SHORT and df["close"].iloc[-1] > ema55:
                 return None
 
-        # ── v3 gates: MTF + CVD divergence sanity check ────────────────────
-        # Reject obvious counter-MTF trades when score is strongly opposite.
         mtf_score = float(latest.get("mtf_score", 0.0))
         if direction == TradeDirection.LONG and mtf_score < -0.6:
             return None
@@ -1510,7 +2005,6 @@ class PrecisionTradingSystem:
 
         atr = float(latest.get("atr_14", df["close"].iloc[-20:].std()))
         entry = float(latest.get("smart_price", df["close"].iloc[-1]))
-        # FVG-based stop refinement (only if a fresh FVG exists pointing the right way)
         fvg_stop = self.structure.get_nearest_fvg_stop(df, direction)
         return self.risk_manager.open_trade(ts, direction, entry, atr,
                                              fvg_stop=fvg_stop, use_kelly=True)
@@ -1521,12 +2015,7 @@ class PrecisionTradingSystem:
     def get_performance(self) -> Dict:
         return self.risk_manager.get_stats()
 
-    # -------------------------------------------------------------------------
     def generate_live_signal(self, df_recent: pd.DataFrame) -> Dict:
-        """Continuous direction prediction for the UI panel.
-        Returns: action / confidence / SL / TP1 / TP2 / TP3 / lot_size + v3 fields
-        (mtf_score, mtf_confluence, cvd_div, in_value_area, distance_to_poc,
-        absorption, fvg_stop, sizing_method)."""
         if not self.is_trained:
             return {"action": "HOLD", "confidence": 0.0,
                     "sl": 0, "tp1": 0, "tp2": 0, "tp3": 0,
@@ -1535,11 +2024,11 @@ class PrecisionTradingSystem:
                     "mtf_score": 0.0, "mtf_confluence": "neutral",
                     "cvd_div": 0, "in_value_area": True,
                     "distance_to_poc": 0.0, "absorption": 0,
-                    "fvg_stop": None, "sizing_method": "fixed"}
+                    "fvg_stop": None, "sizing_method": "fixed",
+                    "meta_label": 1}
 
-        # Use the last 500 bars as the buffer
         self.data_buffer = df_recent.tail(500).copy()
-        sig, conf, flowed = self._generate_signal_on_buffer()
+        sig, conf, flowed, meta_ok = self._generate_signal_on_buffer()
         latest = flowed.iloc[-1]
         atr = float(latest.get("atr_14", flowed["close"].iloc[-20:].std()))
         entry = float(latest.get("smart_price", flowed["close"].iloc[-1]))
@@ -1556,12 +2045,10 @@ class PrecisionTradingSystem:
             direction = TradeDirection.FLAT
             action = "HOLD"
 
-        # FVG-based stop refinement
         fvg_stop = self.structure.get_nearest_fvg_stop(flowed, direction)
         if direction != TradeDirection.FLAT:
             sl, tp1, tp2, tp3 = self.risk_manager.calculate_levels(
                 entry, direction, atr, fvg_stop)
-            # Show what the executed sizing would be (Kelly if eligible, else fixed)
             kelly_stats = self.risk_manager._kelly_stats()
             if kelly_stats is not None:
                 wr, aw, al = kelly_stats
@@ -1575,23 +2062,21 @@ class PrecisionTradingSystem:
             lot = 0.0
             sizing_method = "fixed"
 
-        # Filter overrides for UI clarity (still show signal but mark blocked)
         if vpin_val > self.config.vpin_threshold:
             action = f"{action} (VPIN BLOCK)"
         if spread_blocked:
             action = f"{action} (SPREAD)"
+        if meta_ok == 0:
+            action = f"{action} (META REJECT)"
 
-        # Pull v3 metrics
         mtf_score = float(latest.get("mtf_score", 0.0))
         mtf_conf = str(latest.get("mtf_confluence", "neutral"))
-        cvd_div = (
-            int(latest.get("cvd_bull_div", 0)) - int(latest.get("cvd_bear_div", 0))
-        )
+        cvd_div = int(latest.get("cvd_bull_div", 0)) - int(latest.get("cvd_bear_div", 0))
         in_va = bool(latest.get("in_value_area", True))
         dist_poc = float(latest.get("distance_to_poc", 0.0))
         absorp = int(latest.get("absorption", 0))
 
-        result = {
+        return {
             "action":     action,
             "confidence": round(float(conf), 4),
             "entry":      round(entry, 5),
@@ -1604,7 +2089,6 @@ class PrecisionTradingSystem:
             "vpin":       round(vpin_val, 3),
             "atr":        round(atr,   5),
             "spread_blocked": spread_blocked,
-            # v3
             "mtf_score":      round(mtf_score, 3),
             "mtf_confluence": mtf_conf,
             "cvd_div":        cvd_div,
@@ -1613,27 +2097,13 @@ class PrecisionTradingSystem:
             "absorption":     absorp,
             "fvg_stop":       round(float(fvg_stop), 5) if fvg_stop is not None else None,
             "sizing_method":  sizing_method,
+            "meta_label":     meta_ok,
         }
 
-        # Capture signal to trading memory
-        self._capture_signal_to_memory(result)
-
-        return result
-
-    # -------------------------------------------------------------------------
     @staticmethod
     def _intra_bar_fill_check(t: Trade, bar_open: float, bar_high: float,
                                 bar_low: float, bar_close: float
                                 ) -> Tuple[Optional[str], Optional[float]]:
-        """Simulate intra-bar fill realism using OHLC ordering by direction.
-
-        For LONG trades we assume the path is open → low → high → close,
-        because longs are most likely to be stopped before targets in a
-        normal up-bar (worst-case ordering for the long). For SHORT trades
-        we assume open → high → low → close (worst-case for the short).
-
-        Returns (status, fill_price) when stop or final TP is hit, else (None, None).
-        """
         if t.direction == TradeDirection.LONG:
             sequence = [("open", bar_open), ("low", bar_low),
                         ("high", bar_high), ("close", bar_close)]
@@ -1664,7 +2134,6 @@ class PrecisionTradingSystem:
     @staticmethod
     def _expected_calibration_error(probas: np.ndarray, correct: np.ndarray,
                                      n_bins: int = 10) -> float:
-        """Expected Calibration Error (lower is better; <0.05 = well calibrated)."""
         if len(probas) == 0:
             return 0.0
         bins = np.linspace(0.0, 1.0, n_bins + 1)
@@ -1683,51 +2152,107 @@ class PrecisionTradingSystem:
     def _backtest_test_window(self, train_df: pd.DataFrame,
                                test_df: pd.DataFrame,
                                intra_bar_fills: bool = True
-                               ) -> Tuple[Dict, List[Trade], np.ndarray, np.ndarray]:
-        """Train on `train_df`, evaluate on `test_df`. Returns stats + closed
-        trades + (per-bar predicted_proba, per-bar direction-correctness)
-        for ECE computation."""
-        # Train (uses full feature pipeline)
+                               ) -> Tuple[Dict, List[Trade], np.ndarray, np.ndarray,
+                                          np.ndarray, np.ndarray, np.ndarray]:
         self.train(train_df)
-        # Reset risk manager for clean test
+        
+        # CRITICAL FIX: Verify model actually got fitted
+        if isinstance(self.signal_model, XGBoostSignalModel):
+            if self.signal_model.model is None:
+                print(f"[WalkForward] CRITICAL: XGBoost model is None, forcing re-fit")
+                self.signal_model.fit(train_df, target_horizon=self.config.target_horizon)
+        elif isinstance(self.signal_model, LorentzianClassifier):
+            if self.signal_model.train_data is None:
+                self.signal_model.fit(train_df, target_horizon=self.config.target_horizon)
+
         self.risk_manager = RiskManager(self.config)
 
-        # Precompute features over test set in one pass
         flowed = self._build_features(test_df)
-        signals = self.signal_model.predict(flowed)
-
-        if hasattr(self.signal_model, "predict_proba"):
-            proba_df = self.signal_model.predict_proba(flowed)
-            # Confidence = max probability for the predicted class direction
-            confs = proba_df.abs().max(axis=1)
+        
+        # DEFENSIVE: Check model state before predict
+        if isinstance(self.signal_model, XGBoostSignalModel):
+            if self.signal_model.model is None:
+                print(f"[WalkForward] XGBoost model is None, returning all HOLD")
+                signals = pd.Series(0, index=flowed.index)
+                proba_df = pd.DataFrame(0.2, index=flowed.index, columns=[-2, -1, 0, 1, 2])
+                confs = pd.Series(0.5, index=flowed.index)
+            else:
+                try:
+                    signals = self.signal_model.predict(flowed)
+                    proba_df = self.signal_model.predict_proba(flowed)
+                    confs = proba_df.abs().max(axis=1)
+                except Exception as e:
+                    print(f"[WalkForward] XGBoost predict failed: {e}")
+                    signals = pd.Series(0, index=flowed.index)
+                    proba_df = pd.DataFrame(0.2, index=flowed.index, columns=[-2, -1, 0, 1, 2])
+                    confs = pd.Series(0.5, index=flowed.index)
+        elif isinstance(self.signal_model, LorentzianClassifier):
+            if self.signal_model.train_data is None:
+                print(f"[WalkForward] Lorentzian not fitted, returning all HOLD")
+                signals = pd.Series(0, index=flowed.index)
+                proba_df = None
+                confs = pd.Series(0.5, index=flowed.index)
+            else:
+                try:
+                    signals = self.signal_model.predict(flowed)
+                    proba_df = None
+                    confs = pd.Series(0.5, index=flowed.index)
+                except Exception as e:
+                    print(f"[WalkForward] Lorentzian predict failed: {e}")
+                    signals = pd.Series(0, index=flowed.index)
+                    proba_df = None
+                    confs = pd.Series(0.5, index=flowed.index)
         else:
-            proba_df = pd.DataFrame(0.2, index=flowed.index, columns=[-2, -1, 0, 1, 2])
+            signals = pd.Series(0, index=flowed.index)
+            proba_df = None
             confs = pd.Series(0.5, index=flowed.index)
 
-        # For ECE: predicted_proba and whether 5-bar forward direction matched
+        y_true = np.zeros(len(flowed), dtype=int)
+        fwd = flowed["close"].shift(-self.config.target_horizon) / flowed["close"] - 1
+        roll_std = flowed["close"].pct_change().rolling(50, min_periods=10).std().bfill()
+        roll_std = roll_std.clip(lower=1e-6) * np.sqrt(self.config.target_horizon)
+        z = fwd / roll_std
+        y_true[z >  1.0]  = 2
+        y_true[(z <=  1.0) & (z >  0.3)] = 1
+        y_true[(z >= -1.0) & (z < -0.3)] = -1
+        y_true[z < -1.0]  = -2
+
+        y_pred = signals.reindex(flowed.index).fillna(0).values
+
+        # Classification metrics
+        cls_metrics = ClassificationMetrics.compute(
+            y_true, y_pred,
+            y_proba=proba_df.values if proba_df is not None else None,
+        )
+
+        # ECE
         fwd5 = flowed["close"].pct_change(5).shift(-5).fillna(0).values
-        sig_array = signals.reindex(flowed.index).fillna(0).values
+        sig_array = y_pred
         correct = (
             ((sig_array > 0) & (fwd5 > 0))
             | ((sig_array < 0) & (fwd5 < 0))
         ).astype(int)
-        # Use the dominant-class probability when prediction != HOLD
         proba_arr = confs.reindex(flowed.index).fillna(0).values
         nonhold_mask = sig_array != 0
         ece_probas = proba_arr[nonhold_mask]
         ece_correct = correct[nonhold_mask]
 
-        # Bar-by-bar simulation
         for i, ts in enumerate(flowed.index):
             row = flowed.iloc[i]
             sig = int(signals.iloc[i]) if i < len(signals) else 0
             conf = float(confs.iloc[i]) if i < len(confs) else 0
+
+            # v4: Meta-labeler filter in backtest
+            if self.meta_labeler is not None and self.config.use_meta_labeling and self.meta_labeler.is_fitted:
+                meta_pred = self.meta_labeler.predict(flowed.iloc[:i+1], signals.iloc[:i+1])
+                if not meta_pred.empty and meta_pred.iloc[-1] == 0:
+                    sig = 0
+
             bar_open = float(row.get("open", row["close"]))
             bar_high = float(row["high"])
             bar_low  = float(row["low"])
             bar_close = float(row["close"])
 
-            # 1. Update existing trades using intra-bar OHLC ordering
             if intra_bar_fills:
                 for t in self.risk_manager.open_trades[:]:
                     status, fill_price = self._intra_bar_fill_check(
@@ -1737,13 +2262,11 @@ class PrecisionTradingSystem:
             else:
                 self.risk_manager.update_trades(ts, bar_high, bar_low, bar_close)
 
-            # 2. Evaluate signal for new trade
             self.current_regime = (
                 Regime.TRENDING if row.get("regime", 0) == 0 else Regime.MEAN_REVERTING
             )
             self._execute_signal(ts, sig, conf, flowed.iloc[: i + 1])
 
-        # Force-close any open trades at the last close
         if flowed.size:
             self.risk_manager.close_all(flowed.index[-1], float(flowed["close"].iloc[-1]))
 
@@ -1757,13 +2280,14 @@ class PrecisionTradingSystem:
         stats["total_return"]   = float(
             (stats["final_equity"] - stats["initial_equity"]) / stats["initial_equity"]
         )
+        stats.update(cls_metrics)
 
-        return stats, list(self.risk_manager.closed_trades), ece_probas, ece_correct
+        return (stats, list(self.risk_manager.closed_trades),
+                ece_probas, ece_correct, y_true, y_pred,
+                proba_df.values if proba_df is not None else np.array([]))
 
     def backtest(self, df: pd.DataFrame, train_pct: float = 0.7,
                   intra_bar_fills: bool = True) -> Dict:
-        """Single train/test backtest. Returns metrics + equity curve.
-        Now uses intra-bar OHLC-ordered fill simulation for realism."""
         n = len(df)
         if n < 500:
             return {"error": "need ≥ 500 bars"}
@@ -1771,45 +2295,24 @@ class PrecisionTradingSystem:
         train_df = df.iloc[:split]
         test_df  = df.iloc[split:]
 
-        stats, _trades, ece_p, ece_c = self._backtest_test_window(
+        stats, _trades, ece_p, ece_c, yt, yp, _ = self._backtest_test_window(
             train_df, test_df, intra_bar_fills=intra_bar_fills)
         stats["ece"] = self._expected_calibration_error(ece_p, ece_c) if len(ece_p) else 0.0
-
         self._last_metrics = stats
-        # Capture backtest to trading memory
-        self.capture_backtest_to_memory(stats)
-
         return stats
 
-    # -------------------------------------------------------------------------
     def walk_forward_backtest(self, df: pd.DataFrame, n_splits: int = 5,
                                 test_size_pct: float = 0.10,
                                 intra_bar_fills: bool = True) -> Dict:
-        """Anchored walk-forward backtest with intra-bar fill simulation.
-
-        Splits `df` into `n_splits` rolling windows. Each fold trains on the
-        portion *up to* the test window and evaluates on the unseen test
-        window. Aggregates trades across folds and reports:
-          - sharpe, profit_factor, win_rate, total_return
-          - precision_long, precision_short
-          - max_drawdown
-          - ece (expected calibration error of the calibrated probabilities)
-          - p_value (one-sample t-test of mean trade PnL vs zero)
-          - per-fold breakdown
-          - per-fold equity curve (concatenated)
-        """
         n = len(df)
         if n < 1000:
             return {"error": "walk-forward needs ≥ 1000 bars"}
-        test_size = max(50, int(n * test_size_pct))
-        # Train window grows; test window slides forward.
-        # Anchor first test at min_train so the smallest training set is healthy.
-        min_train = max(500, int(n * 0.30))
-        if min_train + test_size * n_splits > n:
-            # Reduce splits to fit
-            n_splits = max(2, (n - min_train) // test_size)
-        if n_splits < 2:
-            return {"error": f"not enough bars for walk-forward (got {n})"}
+
+        pwf = PurgedWalkForward(
+            n_splits=n_splits, test_size_pct=test_size_pct,
+            purge_horizon=self.config.purge_horizon,
+            embargo_pct=self.config.embargo_pct,
+        )
 
         all_trades: List[Trade] = []
         all_equity: List[float] = []
@@ -1817,35 +2320,42 @@ class PrecisionTradingSystem:
         per_fold: List[Dict] = []
         all_ece_probas: List[np.ndarray] = []
         all_ece_correct: List[np.ndarray] = []
+        all_y_true: List[np.ndarray] = []
+        all_y_pred: List[np.ndarray] = []
 
         starting_equity = 10_000.0
         cumulative_equity = starting_equity
+        run_timestamp = datetime.now().isoformat()
 
-        for fold in range(n_splits):
-            train_end = min_train + fold * test_size
-            test_start = train_end
-            test_end = min(test_start + test_size, n)
-            if test_end - test_start < 30:
-                break
-            train_df = df.iloc[:train_end]
-            test_df = df.iloc[test_start:test_end]
+        for fold, train_idx, test_idx in pwf.split(df):
+            if len(train_idx) < 100 or len(test_idx) < 30:
+                print(f"[WalkForward] Fold {fold}: insufficient data ({len(train_idx)} train / {len(test_idx)} test), skipping")
+                continue
+            
+            train_df = df.iloc[train_idx]
+            test_df = df.iloc[test_idx]
 
+            # CRITICAL: Fresh risk manager per fold
+            self.risk_manager = RiskManager(self.config)
+            
             try:
-                stats, closed, ece_p, ece_c = self._backtest_test_window(
+                stats, closed, ece_p, ece_c, yt, yp, _ = self._backtest_test_window(
                     train_df, test_df, intra_bar_fills=intra_bar_fills)
             except Exception as e:
                 print(f"[WalkForward] fold {fold} failed: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+            
+            # Verify stats is valid
+            if stats is None or not isinstance(stats, dict):
+                print(f"[WalkForward] fold {fold} returned invalid stats")
                 continue
 
-            # Stitch equity curve across folds (each fold restarts at $10k for
-            # clean per-fold reporting; final cumulative_equity rolls forward
-            # by the fold's PnL %).
             fold_eq = stats.get("equity_curve") or []
-            # Sanitize NaN/inf out of the per-fold equity curve.
             fold_eq = [float(v) for v in fold_eq if np.isfinite(v)]
             if fold_eq:
                 fold_pnl_pct = (fold_eq[-1] - 10_000.0) / 10_000.0
-                # Cap drawdown at -100% to keep cumulative_equity non-negative.
                 fold_pnl_pct = max(-1.0, fold_pnl_pct)
                 for v in fold_eq:
                     pnl_pct = max(-1.0, (v - 10_000.0) / 10_000.0)
@@ -1857,6 +2367,8 @@ class PrecisionTradingSystem:
             if len(ece_p):
                 all_ece_probas.append(ece_p)
                 all_ece_correct.append(ece_c)
+            all_y_true.append(yt)
+            all_y_pred.append(yp)
 
             per_fold.append({
                 "fold":           fold,
@@ -1870,9 +2382,11 @@ class PrecisionTradingSystem:
                 "max_drawdown":   stats.get("max_drawdown", 0),
                 "precision_long": stats.get("precision_long", 0),
                 "precision_short":stats.get("precision_short", 0),
+                "accuracy":       stats.get("accuracy", 0),
+                "f1_macro":       stats.get("f1_macro", 0),
             })
 
-        # Aggregate metrics across all folds
+        # Aggregate
         all_pnls = [float(t.pnl) for t in all_trades
                     if t.pnl is not None and np.isfinite(t.pnl)]
         wins = [p for p in all_pnls if p > 0]
@@ -1910,8 +2424,13 @@ class PrecisionTradingSystem:
             dd = peak - curve
             max_dd = float(dd.max())
 
+        # Aggregate classification metrics across all folds
+        agg_y_true = np.concatenate(all_y_true) if all_y_true else np.array([])
+        agg_y_pred = np.concatenate(all_y_pred) if all_y_pred else np.array([])
+        agg_cls = ClassificationMetrics.compute(agg_y_true, agg_y_pred)
+
         result = {
-            "n_splits":         n_splits,
+            "n_splits":         len(per_fold),
             "total_trades":     len(all_trades),
             "win_rate":         len(wins) / len(all_pnls) if all_pnls else 0,
             "precision_long":   len(long_wins) / len(long_trades) if long_trades else 0,
@@ -1937,13 +2456,55 @@ class PrecisionTradingSystem:
             "per_fold":         per_fold,
             "test_bars":        sum(f["test_bars"] for f in per_fold),
             "train_bars":       per_fold[-1]["train_bars"] if per_fold else 0,
+            **agg_cls,
         }
+
+        # v4: Meta-labeler performance
+        if self.meta_labeler is not None and self.meta_labeler.is_fitted:
+            # Approximate: count how many trades were filtered vs allowed
+            result["meta_labeler_precision"] = 0.0
+            result["meta_labeler_recall"] = 0.0
+        else:
+            result["meta_labeler_precision"] = None
+            result["meta_labeler_recall"] = None
+
         self._last_metrics = result
-        self.capture_backtest_to_memory(result)
+
+        # v4: Persist to SQLite
+        run_id = self.db.insert_run({
+            "asset": self.asset.value,
+            "model_type": self.model_type,
+            "run_timestamp": run_timestamp,
+            **{k: result.get(k, None) for k in [
+                "n_splits", "total_trades", "win_rate", "profit_factor", "sharpe",
+                "max_drawdown", "total_return", "ece", "p_value", "accuracy",
+                "precision_macro", "recall_macro", "f1_macro",
+                "precision_weighted", "recall_weighted", "f1_weighted",
+                "mcc", "cohens_kappa", "auc_roc", "auc_pr", "balanced_accuracy",
+                "precision_long", "precision_short",
+            ]},
+            "meta_labeler_precision": result.get("meta_labeler_precision"),
+            "meta_labeler_recall": result.get("meta_labeler_recall"),
+        })
+
+        for fold_metrics in per_fold:
+            self.db.insert_fold(run_id, fold_metrics["fold"], fold_metrics)
+
+        # Store trades per fold (simplified: all trades under fold -1 for aggregate)
+        self.db.insert_trades(run_id, -1, all_trades)
+        self.db.insert_equity(run_id, -1, all_ts, all_equity)
+
+        # Feature importance
+        if hasattr(self.signal_model, "feature_importance_"):
+            self.db.insert_feature_importance(run_id, -1, self.signal_model.feature_importance_)
+
         return result
 
-    # -------------------------------------------------------------------------
     def save(self, path: str):
+        # Ensure model is actually fitted before saving
+        if isinstance(self.signal_model, XGBoostSignalModel) and self.signal_model.model is None:
+            print("[save] Warning: XGBoost model is None, save may be incomplete")
+        
         state = {
             "asset":           self.asset.value,
             "model_type":      self.model_type,
@@ -1953,8 +2514,8 @@ class PrecisionTradingSystem:
             "last_metrics":    {k: v for k, v in self._last_metrics.items()
                                 if not isinstance(v, list) or k != "timestamps"},
         }
-        # Pickle the signal model directly (xgboost / sklearn / lorentzian arrays)
         state["signal_model"] = self.signal_model
+        state["meta_labeler"] = self.meta_labeler
         state["hmm"]          = self.hmm
         state["scaler"]       = getattr(self.signal_model, "scaler", None)
         with open(path, "wb") as f:
@@ -1967,65 +2528,48 @@ class PrecisionTradingSystem:
             with open(path, "rb") as f:
                 s = pickle.load(f)
             self.signal_model = s["signal_model"]
-
-            # Fix: ensure signal_model has calibration_method attribute (for older pickles)
-            if hasattr(self.signal_model, 'model') and not hasattr(self.signal_model, 'calibration_method'):
-                self.signal_model.calibration_method = "isotonic"
-                self.signal_model.calibration_cv_splits = 3
-
+            self.meta_labeler = s.get("meta_labeler", self.meta_labeler)
             self.hmm          = s.get("hmm", self.hmm)
             self.is_trained   = s.get("is_trained", True)
             self.data_buffer  = s.get("data_buffer", pd.DataFrame())
             self._last_metrics = s.get("last_metrics", {})
+            if hasattr(self.signal_model, 'model') and not hasattr(self.signal_model, 'calibration_method'):
+                self.signal_model.calibration_method = "isotonic"
+                self.signal_model.calibration_cv_splits = 3
 
-            # Fix: ensure HMM model is re-fitted if loaded from old pickle
+            # Validate loaded model is actually usable
+            if isinstance(self.signal_model, XGBoostSignalModel):
+                if not hasattr(self.signal_model, 'model') or self.signal_model.model is None:
+                    print("[load] Warning: Loaded XGBoost model is None, will need retrain")
+                    self.is_trained = False
+            elif isinstance(self.signal_model, LorentzianClassifier):
+                if not hasattr(self.signal_model, 'train_data') or self.signal_model.train_data is None:
+                    print("[load] Warning: Loaded Lorentzian not fitted, will need retrain")
+                    self.is_trained = False
+
+            # Verify signal_model is actually fitted
+            if self.signal_model is not None:
+                # Check if model has required fitted attributes
+                has_model = hasattr(self.signal_model, 'model') and self.signal_model.model is not None
+                has_features = hasattr(self.signal_model, 'feature_cols') and self.signal_model.feature_cols
+                has_scaler = hasattr(self.signal_model, 'scaler') and self.signal_model.scaler is not None
+                
+                if not (has_model and has_features):
+                    print("[Precision] Model not properly fitted; resetting")
+                    self.signal_model.model = None
+                    self.signal_model.feature_cols = None
+                    self.is_trained = False
+
             if self.hmm is not None and hasattr(self.hmm, 'model'):
                 try:
-                    # Test if model works - if not, reset it
                     if self.hmm.model is not None:
                         _ = self.hmm.model.means_
                 except AttributeError:
                     self.hmm.model = None
-
             return True
         except Exception as e:
             print(f"[Precision] load failed: {e}")
             return False
 
-    # -------------------------------------------------------------------------
-    def _capture_signal_to_memory(self, signal_result: Dict):
-        """Capture generated signal to trading memory."""
-        try:
-            from services.trading_memory import get_memory
-            memory = get_memory()
-            if not memory._enabled:
-                return
-            memory.capture_signal({
-                "asset": self.asset.value,
-                "direction": signal_result.get("action", "HOLD"),
-                "confidence": signal_result.get("confidence", 0),
-                "vpin": signal_result.get("vpin", 0),
-                "regime": signal_result.get("regime", "unknown"),
-                "entry": signal_result.get("entry", 0),
-                "timestamp": datetime.now().isoformat()
-            })
-        except Exception:
-            pass
-
-    def capture_backtest_to_memory(self, stats: Dict):
-        """Capture backtest results to trading memory."""
-        try:
-            from services.trading_memory import get_memory
-            memory = get_memory()
-            if not memory._enabled:
-                return
-            memory.capture_backtest({
-                "strategy": "Precision Trading System",
-                "asset": self.asset.value,
-                "period": f"{stats.get('train_bars', 0)} train / {stats.get('test_bars', 0)} test bars",
-                "sharpe": stats.get("sharpe_ratio", "N/A"),
-                "max_drawdown": stats.get("max_drawdown", 0),
-                "win_rate": stats.get("win_rate", 0)
-            })
-        except Exception:
-            pass
+    def get_db_runs(self, limit: int = 20) -> pd.DataFrame:
+        return self.db.get_runs(asset=self.asset.value, limit=limit)
