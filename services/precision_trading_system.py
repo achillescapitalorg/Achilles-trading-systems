@@ -1109,6 +1109,9 @@ class XGBoostSignalModel:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        # v4 backward-compat: attributes added after initial deployment
+        self.class_weight_scale = getattr(self, 'class_weight_scale', 5.0)
+        self.tune_threshold     = getattr(self, 'tune_threshold',     True)
         self.calibration_method = state.get("calibration_method", "isotonic")
         self.calibration_cv_splits = state.get("calibration_cv_splits", 3)
         self.calibrated_model = state.get("calibrated_model", None)
@@ -1121,6 +1124,19 @@ class XGBoostSignalModel:
             if classes is not None:
                 self._idx_to_class = {int(i): int(c) - 2 for i, c in enumerate(classes)}
                 self._class_to_idx = {v: k for k, v in self._idx_to_class.items()}
+
+    def _is_fitted(self) -> bool:
+        """True only if the underlying xgboost booster has actually been fit."""
+        if self.model is None:
+            return False
+        if not hasattr(self.model, "classes_"):
+            return False
+        try:
+            n_feat = getattr(self.model, "n_features_in_", 1)
+            self.model.predict(np.zeros((1, int(n_feat))))
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _rsi(p: pd.Series, period: int = 14) -> pd.Series:
@@ -1244,7 +1260,8 @@ class XGBoostSignalModel:
         if n_classes > 1:
             counts = np.bincount(y, minlength=n_classes)
             total = counts.sum()
-            weights = {i: total / (n_classes * max(counts[i], 1)) * self.class_weight_scale
+            cws = getattr(self, 'class_weight_scale', 5.0)
+            weights = {i: total / (n_classes * max(counts[i], 1)) * cws
                        for i in range(n_classes)}
             class_weights = weights
 
@@ -1342,12 +1359,7 @@ class XGBoostSignalModel:
         self._thresholds["default"] = best_thresh
 
     def predict(self, df: pd.DataFrame) -> pd.Series:
-        # Check model is properly fitted
-        if self.model is None or self.feature_cols is None:
-            return pd.Series(0, index=df.index)
-        # Additional safety check - verify model has been fitted
-        if not hasattr(self.model, 'n_classes_') and not hasattr(self.model, 'classes_'):
-            print("[XGBoost] Model not properly fitted (no classes_ attribute); returning HOLD")
+        if not self._is_fitted() or self.feature_cols is None:
             return pd.Series(0, index=df.index)
         feats = self._engineer(df)
         for c in self.feature_cols:
@@ -1359,17 +1371,13 @@ class XGBoostSignalModel:
             encoded = self.model.predict(X)
         except Exception as e:
             print(f"[XGBoost] predict failed ({type(e).__name__}: {e}); returning HOLD")
-            return pd.Series(0, index=df.index)
+            return pd.Series(0, index=feats.index)
         decoded = np.array([self._idx_to_class.get(int(i), 0) for i in encoded], dtype=int)
         return pd.Series(decoded, index=feats.index)
 
     def predict_proba(self, df: pd.DataFrame) -> pd.DataFrame:
         cols = [-2, -1, 0, 1, 2]
-        if self.model is None or self.feature_cols is None:
-            return pd.DataFrame(0.2, index=df.index, columns=cols)
-        # Additional safety check
-        if not hasattr(self.model, 'n_classes_') and not hasattr(self.model, 'classes_'):
-            print("[XGBoost] Model not fitted; using uniform")
+        if not self._is_fitted() or self.feature_cols is None:
             return pd.DataFrame(0.2, index=df.index, columns=cols)
         feats = self._engineer(df)
         for c in self.feature_cols:
@@ -1386,7 +1394,7 @@ class XGBoostSignalModel:
             except Exception as e2:
                 print(f"[XGBoost] predict_proba failed ({type(e2).__name__}: {e2}); using uniform")
                 proba = np.full((X.shape[0], len(cols)), 1.0 / len(cols))
-                return pd.DataFrame(proba, index=df.index, columns=cols)
+                return pd.DataFrame(proba, index=feats.index, columns=cols)
         full = np.zeros((proba.shape[0], len(cols)))
         col_index = {c: i for i, c in enumerate(cols)}
         for enc_idx in range(proba.shape[1]):
@@ -1887,23 +1895,36 @@ class PrecisionTradingSystem:
         balance = self.bias_detector.compute_class_balance(temp_labels.dropna().values)
         print(f"[BiasDetector] Class balance: {balance}")
 
-        # FIX: Only recreate if wrong type, don't destroy fitted model
-        if self.model_type == "xgboost" and not isinstance(self.signal_model, XGBoostSignalModel):
-            self.signal_model = XGBoostSignalModel(
-                calibration_method=self.config.calibration_method,
-                calibration_cv_splits=self.config.calibration_cv_splits,
-                class_weight_scale=self.config.class_weight_scale,
-                tune_threshold=self.config.f1_threshold_tune,
-            )
+        # FIX: Only recreate if wrong type or missing v4 attrs, don't destroy fitted model
+        needs_reinit = False
+        if self.model_type == "xgboost":
+            if not isinstance(self.signal_model, XGBoostSignalModel):
+                needs_reinit = True
+            elif not hasattr(self.signal_model, 'class_weight_scale'):
+                needs_reinit = True
+            elif getattr(self.signal_model, 'model', None) is None:
+                needs_reinit = True
+            if needs_reinit:
+                self.signal_model = XGBoostSignalModel(
+                    calibration_method=self.config.calibration_method,
+                    calibration_cv_splits=self.config.calibration_cv_splits,
+                    class_weight_scale=self.config.class_weight_scale,
+                    tune_threshold=self.config.f1_threshold_tune,
+                )
         elif self.model_type == "lorentzian" and not isinstance(self.signal_model, LorentzianClassifier):
             self.signal_model = LorentzianClassifier(n_neighbors=5)
-        # If already correct type, keep existing instance (don't destroy fitted model!)
 
         # Defensive: ensure meta_labeler is also reset
         if self.meta_labeler is not None and self.config.use_meta_labeling:
             self.meta_labeler = MetaLabeler()
 
         self.signal_model.fit(mtfed, target_horizon=self.config.target_horizon)
+
+        # DEFENSIVE: abort if XGBoost never actually fitted (e.g. exception mid-fit)
+        if isinstance(self.signal_model, XGBoostSignalModel) and not self.signal_model._is_fitted():
+            print("[Precision] XGBoost fit did not complete successfully; aborting train")
+            self.is_trained = False
+            return
 
         # v4: Meta-labeler training
         if self.meta_labeler is not None and self.config.use_meta_labeling:
@@ -2158,8 +2179,14 @@ class PrecisionTradingSystem:
         
         # CRITICAL FIX: Verify model actually got fitted
         if isinstance(self.signal_model, XGBoostSignalModel):
-            if self.signal_model.model is None:
-                print(f"[WalkForward] CRITICAL: XGBoost model is None, forcing re-fit")
+            if not self.signal_model._is_fitted():
+                print(f"[WalkForward] CRITICAL: XGBoost model not fitted, forcing clean re-fit")
+                self.signal_model = XGBoostSignalModel(
+                    calibration_method=self.config.calibration_method,
+                    calibration_cv_splits=self.config.calibration_cv_splits,
+                    class_weight_scale=self.config.class_weight_scale,
+                    tune_threshold=self.config.f1_threshold_tune,
+                )
                 self.signal_model.fit(train_df, target_horizon=self.config.target_horizon)
         elif isinstance(self.signal_model, LorentzianClassifier):
             if self.signal_model.train_data is None:
@@ -2536,6 +2563,12 @@ class PrecisionTradingSystem:
             if hasattr(self.signal_model, 'model') and not hasattr(self.signal_model, 'calibration_method'):
                 self.signal_model.calibration_method = "isotonic"
                 self.signal_model.calibration_cv_splits = 3
+            # v4 backward-compat for old pickles
+            if isinstance(self.signal_model, XGBoostSignalModel):
+                if not hasattr(self.signal_model, 'class_weight_scale'):
+                    self.signal_model.class_weight_scale = 5.0
+                if not hasattr(self.signal_model, 'tune_threshold'):
+                    self.signal_model.tune_threshold = True
 
             # Validate loaded model is actually usable
             if isinstance(self.signal_model, XGBoostSignalModel):
