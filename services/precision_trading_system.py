@@ -1406,6 +1406,630 @@ class XGBoostSignalModel:
         return pd.DataFrame(full, index=feats.index, columns=cols)
 
 
+# =============================================================================
+# STACKED ENSEMBLE ENGINE
+# =============================================================================
+
+class StackedEnsemble:
+    """Stacking: XGBoost + LightGBM + CatBoost → LogisticRegression meta-learner.
+    Uses purged CV for the meta-learner to prevent leakage.
+    """
+    def __init__(self, class_weight_scale: float = 5.0,
+                 calibration_method: str = "isotonic",
+                 calibration_cv_splits: int = 3):
+        self.class_weight_scale = class_weight_scale
+        self.calibration_method = calibration_method
+        self.calibration_cv_splits = calibration_cv_splits
+        
+        self.xgb = None
+        self.lgb = None
+        self.cbt = None
+        self.meta_learner = None
+        self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
+        self.feature_cols: Optional[List[str]] = None
+        self._idx_to_class: Dict[int, int] = {}
+        self._class_to_idx: Dict[int, int] = {}
+        self.feature_importance_: Dict[str, float] = {}
+        self.is_fitted = False
+        self.model = None
+
+    @staticmethod
+    def _check_deps():
+        has_xgb = XGBOOST_AVAILABLE
+        has_lgb = False
+        has_cbt = False
+        try:
+            import lightgbm as lgb
+            has_lgb = True
+        except ImportError:
+            pass
+        try:
+            import catboost as cbt
+            has_cbt = True
+        except ImportError:
+            pass
+        return has_xgb, has_lgb, has_cbt
+
+    def fit(self, df: pd.DataFrame, target_horizon: int = 3):
+        """Fit using same interface as XGBoostSignalModel."""
+        temp = XGBoostSignalModel()
+        feats = temp._engineer(df)
+        
+        fwd = df["close"].shift(-target_horizon) / df["close"] - 1
+        roll_std = df["close"].pct_change().rolling(50, min_periods=10).std().bfill()
+        roll_std = roll_std.clip(lower=1e-6) * np.sqrt(target_horizon)
+        z = fwd / roll_std
+        
+        target = pd.Series(0, index=df.index, dtype=int)
+        target[z > 1.5] = 2
+        target[(z <= 1.5) & (z > 0.8)] = 1
+        target[(z >= -1.5) & (z < -0.8)] = -1
+        target[z < -1.5] = -2
+        
+        af = feats.loc[target.index].dropna()
+        ay = target.loc[af.index]
+        self.feature_cols = af.columns.tolist()
+        X = self.scaler.fit_transform(af) if self.scaler is not None else af.values
+        y = ay.values
+        
+        self._fit_internal(X, y, self.feature_cols)
+        
+    def _fit_internal(self, X: np.ndarray, y: np.ndarray, feature_cols: List[str]):
+        has_xgb, has_lgb, has_cbt = self._check_deps()
+        n_classes = len(np.unique(y))
+        
+        present_classes = sorted(int(c) for c in np.unique(y))
+        self._class_to_idx = {c: i for i, c in enumerate(present_classes)}
+        self._class_to_idx = {i: c for c, i in self._class_to_idx.items()}
+        
+        base_preds = []
+        
+        if has_xgb:
+            self.xgb = xgb.XGBClassifier(
+                n_estimators=150, max_depth=4, learning_rate=0.05,
+                objective="multi:softprob" if n_classes > 2 else "binary:logistic",
+                num_class=n_classes if n_classes > 2 else None,
+                eval_metric="mlogloss" if n_classes > 2 else "logloss",
+                random_state=42, tree_method="hist",
+                reg_lambda=2.0, min_child_weight=15,
+            )
+            self.xgb.fit(X, y)
+            base_preds.append(self.xgb.predict_proba(X))
+            
+        if has_lgb:
+            import lightgbm as lgb
+            self.lgb = lgb.LGBMClassifier(
+                n_estimators=150, max_depth=4, learning_rate=0.05,
+                random_state=42, reg_lambda=2.0, min_child_samples=15,
+                verbose=-1,
+            )
+            self.lgb.fit(X, y)
+            base_preds.append(self.lgb.predict_proba(X))
+            
+        if has_cbt:
+            import catboost as cbt
+            self.cbt = cbt.CatBoostClassifier(
+                iterations=150, depth=4, learning_rate=0.05,
+                loss_function="MultiClass" if n_classes > 2 else "Logloss",
+                random_seed=42, l2_leaf_reg=2.0,
+                verbose=False,
+            )
+            self.cbt.fit(X, y)
+            base_preds.append(self.cbt.predict_proba(X))
+            
+        if len(base_preds) == 0:
+            raise ImportError("No boosting libraries available")
+            
+        meta_X = np.hstack(base_preds)
+        
+        from sklearn.linear_model import LogisticRegression
+        self.meta_learner = LogisticRegression(
+            multi_class='multinomial' if n_classes > 2 else 'auto',
+            max_iter=1000, C=0.5, random_state=42,
+            solver='lbfgs' if n_classes <= 2 else 'saga',
+        )
+        self.meta_learner.fit(meta_X, y)
+        
+        self.is_fitted = True
+        self.model = self
+
+    def _is_fitted(self) -> bool:
+        return self.is_fitted and self.meta_learner is not None
+
+    def predict(self, df: pd.DataFrame) -> pd.Series:
+        if not self._is_fitted() or self.feature_cols is None:
+            return pd.Series(0, index=df.index)
+        temp = XGBoostSignalModel()
+        feats = temp._engineer(df)
+        for c in self.feature_cols:
+            if c not in feats.columns:
+                feats[c] = 0
+        feats = feats[self.feature_cols]
+        X = self.scaler.transform(feats) if self.scaler is not None else feats.values
+        
+        try:
+            encoded = self.predict_np(X)
+        except Exception as e:
+            print(f"[StackedEnsemble] predict failed: {e}")
+            return pd.Series(0, index=feats.index)
+        
+        return pd.Series(encoded, index=feats.index)
+
+    def predict_np(self, X: np.ndarray) -> np.ndarray:
+        base_preds = []
+        if self.xgb is not None:
+            base_preds.append(self.xgb.predict_proba(X))
+        if self.lgb is not None:
+            base_preds.append(self.lgb.predict_proba(X))
+        if self.cbt is not None:
+            base_preds.append(self.cbt.predict_proba(X))
+        if not base_preds:
+            return np.zeros(len(X), dtype=int)
+        meta_X = np.hstack(base_preds)
+        return self.meta_learner.predict(meta_X)
+
+    def predict_proba(self, df: pd.DataFrame) -> pd.DataFrame:
+        cols = [-2, -1, 0, 1, 2]
+        if not self._is_fitted() or self.feature_cols is None:
+            return pd.DataFrame(0.2, index=df.index, columns=cols)
+        temp = XGBoostSignalModel()
+        feats = temp._engineer(df)
+        for c in self.feature_cols:
+            if c not in feats.columns:
+                feats[c] = 0
+        feats = feats[self.feature_cols]
+        X = self.scaler.transform(feats) if self.scaler is not None else feats.values
+        
+        try:
+            proba = self.predict_proba_np(X)
+        except Exception as e:
+            print(f"[StackedEnsemble] predict_proba failed: {e}")
+            return pd.DataFrame(0.2, index=feats.index, columns=cols)
+        
+        full = np.zeros((proba.shape[0], len(cols)))
+        col_index = {c: i for i, c in enumerate(cols)}
+        for enc_idx in range(proba.shape[1]):
+            orig = self._class_to_idx.get(enc_idx)
+            if orig in col_index:
+                full[:, col_index[orig]] = proba[:, enc_idx]
+        return pd.DataFrame(full, index=feats.index, columns=cols)
+
+    def predict_proba_np(self, X: np.ndarray) -> np.ndarray:
+        base_preds = []
+        if self.xgb is not None:
+            base_preds.append(self.xgb.predict_proba(X))
+        if self.lgb is not None:
+            base_preds.append(self.lgb.predict_proba(X))
+        if self.cbt is not None:
+            base_preds.append(self.cbt.predict_proba(X))
+        if not base_preds:
+            return np.full((X.shape[0], 5), 0.2)
+        meta_X = np.hstack(base_preds)
+        return self.meta_learner.predict_proba(meta_X)
+        has_xgb, has_lgb, has_cbt = self._check_deps()
+        n_classes = len(np.unique(y))
+        self.feature_cols = feature_cols
+        
+        present_classes = sorted(int(c) for c in np.unique(y))
+        self._class_to_idx = {c: i for i, c in enumerate(present_classes)}
+        self._idx_to_class = {i: c for c, i in self._class_to_idx.items()}
+        
+        base_preds = []
+        base_models = []
+        
+        if has_xgb:
+            self.xgb = xgb.XGBClassifier(
+                n_estimators=150, max_depth=4, learning_rate=0.05,
+                objective="multi:softprob" if n_classes > 2 else "binary:logistic",
+                num_class=n_classes if n_classes > 2 else None,
+                eval_metric="mlogloss" if n_classes > 2 else "logloss",
+                random_state=42, tree_method="hist",
+                reg_lambda=2.0, min_child_weight=15,
+            )
+            self.xgb.fit(X, y)
+            base_preds.append(self.xgb.predict_proba(X))
+            base_models.append("xgb")
+            
+        if has_lgb:
+            import lightgbm as lgb
+            self.lgb = lgb.LGBMClassifier(
+                n_estimators=150, max_depth=4, learning_rate=0.05,
+                random_state=42, reg_lambda=2.0, min_child_samples=15,
+                verbose=-1,
+            )
+            self.lgb.fit(X, y)
+            base_preds.append(self.lgb.predict_proba(X))
+            base_models.append("lgb")
+            
+        if has_cbt:
+            import catboost as cbt
+            self.cbt = cbt.CatBoostClassifier(
+                iterations=150, depth=4, learning_rate=0.05,
+                loss_function="MultiClass" if n_classes > 2 else "Logloss",
+                random_seed=42, l2_leaf_reg=2.0,
+                verbose=False,
+            )
+            self.cbt.fit(X, y)
+            base_preds.append(self.cbt.predict_proba(X))
+            base_models.append("cbt")
+            
+        if len(base_preds) == 0:
+            raise ImportError("No boosting libraries available")
+            
+        meta_X = np.hstack(base_preds)
+        
+        from sklearn.linear_model import LogisticRegression
+        self.meta_learner = LogisticRegression(
+            multi_class='multinomial' if n_classes > 2 else 'auto',
+            max_iter=1000, C=0.5, random_state=42,
+            solver='lbfgs' if n_classes <= 2 else 'saga',
+        )
+        self.meta_learner.fit(meta_X, y)
+        
+        imp = np.zeros(len(feature_cols))
+        count = 0
+        if self.xgb is not None and hasattr(self.xgb, 'feature_importances_'):
+            imp += self.xgb.feature_importances_
+            count += 1
+        if self.lgb is not None and hasattr(self.lgb, 'feature_importances_'):
+            lgb_imp = np.zeros(len(feature_cols))
+            lgb_imp[:len(self.lgb.feature_importances_)] = self.lgb.feature_importances_
+            imp += lgb_imp
+            count += 1
+        if count > 0:
+            self.feature_importance_ = {
+                c: float(v) for c, v in zip(feature_cols, imp / count)
+            }
+            
+        self.is_fitted = True
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            return np.full((X.shape[0], max(len(self._idx_to_class), 1)), 1.0 / max(len(self._idx_to_class), 1))
+        base_preds = []
+        if self.xgb is not None:
+            base_preds.append(self.xgb.predict_proba(X))
+        if self.lgb is not None:
+            base_preds.append(self.lgb.predict_proba(X))
+        if self.cbt is not None:
+            base_preds.append(self.cbt.predict_proba(X))
+        meta_X = np.hstack(base_preds)
+        return self.meta_learner.predict_proba(meta_X)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        proba = self.predict_proba(X)
+        return np.argmax(proba, axis=1)
+
+
+def triple_barrier_labels(prices: pd.Series, events: pd.Series,
+                          pt_sl: Tuple[float, float] = (1.0, 1.0),
+                          min_ret: float = 0.005,
+                          num_days: int = 3) -> pd.DataFrame:
+    """Returns DataFrame with [t1, trgt, side, label].
+    events: Series of entry timestamps (side=1 for long, -1 for short).
+    """
+    out = pd.DataFrame(index=events.index)
+    out['t1'] = pd.NaT
+    out['trgt'] = prices.pct_change().rolling(50).std().bfill() * np.sqrt(num_days)
+    out['side'] = events
+    out['label'] = 0
+    
+    for loc, side in events.items():
+        target = out.loc[loc, 'trgt']
+        if pd.isna(target) or target <= 0:
+            continue
+        pt = pt_sl[0] * target
+        sl = pt_sl[1] * target
+        
+        future = prices.loc[loc:].iloc[1:num_days+1]
+        if len(future) == 0:
+            continue
+            
+        if side == 1:
+            touch_upper = future[future >= prices.loc[loc] * (1 + pt)]
+            touch_lower = future[future <= prices.loc[loc] * (1 - sl)]
+        else:
+            touch_upper = future[future >= prices.loc[loc] * (1 + sl)]
+            touch_lower = future[future <= prices.loc[loc] * (1 - pt)]
+            
+        t_upper = touch_upper.index[0] if len(touch_upper) else pd.NaT
+        t_lower = touch_lower.index[0] if len(touch_lower) else pd.NaT
+        
+        if pd.isna(t_upper) and pd.isna(t_lower):
+            out.loc[loc, 't1'] = future.index[-1]
+            out.loc[loc, 'label'] = 0
+        elif pd.isna(t_upper) or (not pd.isna(t_lower) and t_lower < t_upper):
+            out.loc[loc, 't1'] = t_lower
+            out.loc[loc, 'label'] = -1 if side == 1 else 1
+        else:
+            out.loc[loc, 't1'] = t_upper
+            out.loc[loc, 'label'] = 1 if side == 1 else -1
+            
+    out['label'] = out['label'].fillna(0)
+    out['meta_label'] = (out['label'] == out['side']).astype(int)
+    return out
+
+
+class RegimeSpecificRouter:
+    """Trains separate models for each regime. Routes inference by current regime."""
+    def __init__(self, base_model_factory, n_regimes: int = 2):
+        self.n_regimes = n_regimes
+        self.models: Dict[int, Any] = {}
+        self.factory = base_model_factory
+        self.global_model = None
+        self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
+        self.feature_cols: Optional[List[str]] = None
+        self.is_fitted = False
+        
+    def fit(self, X: np.ndarray, y: np.ndarray, regimes: np.ndarray):
+        self.global_model = self.factory()
+        if hasattr(self.global_model, 'fit'):
+            if hasattr(self.global_model, 'scaler'):
+                X_sc = self.scaler.fit_transform(X) if self.scaler else X
+            else:
+                X_sc = X
+            # Check if fit expects df or X,y
+            try:
+                import pandas as pd
+                df_mock = pd.DataFrame(X_sc, columns=[f"f{i}" for i in range(X_sc.shape[1])])
+                self.global_model.fit(df_mock)
+            except:
+                self.global_model.fit(X_sc, y)
+            
+        for r in range(self.n_regimes):
+            mask = regimes == r
+            if mask.sum() < 200:
+                continue
+            model = self.factory()
+            if hasattr(model, 'scaler'):
+                X_r = self.scaler.fit_transform(X[mask]) if self.scaler else X[mask]
+            else:
+                X_r = X[mask]
+            try:
+                import pandas as pd
+                df_mock = pd.DataFrame(X_r, columns=[f"f{i}" for i in range(X_r.shape[1])])
+                model.fit(df_mock)
+            except:
+                model.fit(X_r, y[mask])
+            self.models[r] = model
+            
+    def _is_fitted(self) -> bool:
+        return self.is_fitted
+        
+    def predict(self, df: pd.DataFrame, regime: int) -> pd.Series:
+        model = self.models.get(regime, self.global_model)
+        if model is None:
+            return pd.Series(0, index=df.index)
+        try:
+            return model.predict(df)
+        except:
+            return pd.Series(0, index=df.index)
+        
+    def predict_proba(self, df: pd.DataFrame, regime: int) -> pd.DataFrame:
+        cols = [-2, -1, 0, 1, 2]
+        model = self.models.get(regime, self.global_model)
+        if model is None:
+            return pd.DataFrame(0.2, index=df.index, columns=cols)
+        try:
+            return model.predict_proba(df)
+        except:
+            return pd.DataFrame(0.2, index=df.index, columns=cols)
+
+
+class DynamicEnsemble:
+    """Models go through hot and cold streaks. Weight them by recent OOS Sharpe."""
+    def __init__(self, models: Dict[str, Any], lookback: int = 20):
+        self.models = models
+        self.lookback = lookback
+        self.performance_log: Dict[str, Any] = {k: None for k in models}
+        self.weights: Dict[str, float] = {k: 1.0/len(models) for k in models}
+        
+    def update_weights(self, returns: Dict[str, float]):
+        from collections import deque
+        for k, ret in returns.items():
+            if self.performance_log[k] is None:
+                self.performance_log[k] = deque(maxlen=self.lookback)
+            self.performance_log[k].append(ret)
+        
+        sharpes = {}
+        for k, log in self.performance_log.items():
+            if log is None or len(log) < 5:
+                sharpes[k] = 0
+                continue
+            arr = np.array(list(log))
+            if arr.std() == 0:
+                sharpes[k] = 0
+            else:
+                sharpes[k] = arr.mean() / arr.std()
+        
+        exp_s = {k: np.exp(max(s, 0)) for k, s in sharpes.items()}
+        total = sum(exp_s.values())
+        if total > 0:
+            self.weights = {k: v/total for k, v in exp_s.items()}
+        
+    def predict_proba(self, X_dict: Dict[str, np.ndarray]) -> np.ndarray:
+        weighted = None
+        for k, X in X_dict.items():
+            model = self.models.get(k)
+            if model is None:
+                continue
+            try:
+                proba = model.predict_proba(X)
+                w = self.weights.get(k, 0)
+                if weighted is None:
+                    weighted = w * proba
+                else:
+                    weighted += w * proba
+            except:
+                continue
+        if weighted is None:
+            return np.full((X.shape[0], 5), 0.2)
+        return weighted
+
+
+class GRUSignalModel:
+    """Lightweight GRU for temporal microstructure patterns."""
+    def __init__(self, seq_len: int = 30, hidden_dim: int = 64,
+                 epochs: int = 50, batch_size: int = 256):
+        self.seq_len = seq_len
+        self.hidden_dim = hidden_dim
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.model = None
+        self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
+        self.feature_cols = None
+        self.device = None
+        self.torch_available = False
+        
+    def _check_torch(self):
+        if self.torch_available:
+            return True
+        try:
+            import torch
+            import torch.nn as nn
+            self.torch_available = True
+            self.device = torch.device("cpu")
+            return True
+        except ImportError:
+            self.torch_available = False
+            return False
+            
+    def fit(self, df: pd.DataFrame, target_horizon: int = 3):
+        if not self._check_torch():
+            print("[GRU] PyTorch not available, skipping")
+            return
+            
+        import torch
+        import torch.nn as nn
+        
+        temp = XGBoostSignalModel()
+        feats = temp._engineer(df).dropna()
+        self.feature_cols = feats.columns.tolist()
+        
+        fwd = df["close"].shift(-target_horizon) / df["close"] - 1
+        roll_std = df["close"].pct_change().rolling(50, min_periods=10).std().bfill()
+        roll_std = roll_std.clip(lower=1e-6) * np.sqrt(target_horizon)
+        z = fwd / roll_std
+        
+        y = pd.Series(0, index=df.index, dtype=int)
+        y[z > 1.0] = 2
+        y[(z <= 1.0) & (z > 0.3)] = 1
+        y[(z >= -1.0) & (z < -0.3)] = -1
+        y[z < -1.0] = -2
+        
+        aligned = y.loc[feats.index].values[self.seq_len:]
+        X_seq = np.array([feats.values[i-self.seq_len:i] 
+                         for i in range(self.seq_len, len(feats))])
+        
+        if self.scaler is not None:
+            B, T, F = X_seq.shape
+            X_flat = X_seq.reshape(-1, F)
+            X_flat = self.scaler.fit_transform(X_flat)
+            X_seq = X_flat.reshape(B, T, F)
+            
+        y_mapped = y.loc[feats.index].values[self.seq_len:] + 2
+        
+        dataset = torch.utils.data.TensorDataset(
+            torch.tensor(X_seq, dtype=torch.float32),
+            torch.tensor(y_mapped, dtype=torch.long),
+        )
+        loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
+        
+        class GRUModel(nn.Module):
+            def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.3):
+                super().__init__()
+                self.gru = nn.GRU(input_dim, hidden_dim, num_layers=2,
+                                  batch_first=True, dropout=dropout)
+                self.fc = nn.Linear(hidden_dim, output_dim)
+                self.dropout = nn.Dropout(dropout)
+            def forward(self, x):
+                out, _ = self.gru(x)
+                out = self.dropout(out[:, -1, :])
+                return self.fc(out)
+                
+        self.model = GRUModel(input_dim=X_seq.shape[2],
+                              hidden_dim=self.hidden_dim,
+                              output_dim=5).to(self.device)
+        
+        counts = np.bincount(y_mapped, minlength=5)
+        weights = 1.0 / np.clip(counts, 1, None)
+        weights = weights / weights.sum() * 5
+        criterion = nn.CrossEntropyLoss(weight=torch.tensor(weights, dtype=torch.float32))
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-3, weight_decay=1e-4)
+        
+        self.model.train()
+        for epoch in range(self.epochs):
+            total_loss = 0
+            for xb, yb in loader:
+                xb, yb = xb.to(self.device), yb.to(self.device)
+                optimizer.zero_grad()
+                pred = self.model(xb)
+                loss = criterion(pred, yb)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                optimizer.step()
+                total_loss += loss.item()
+                
+    def _is_fitted(self):
+        return self.model is not None and self.torch_available
+        
+    def predict(self, df: pd.DataFrame) -> pd.Series:
+        if not self._is_fitted():
+            return pd.Series(0, index=df.index)
+            
+        import torch
+        temp = XGBoostSignalModel()
+        feats = temp._engineer(df)[self.feature_cols].dropna()
+        if len(feats) < self.seq_len:
+            return pd.Series(0, index=df.index)
+            
+        X_seq = np.array([feats.values[i-self.seq_len:i]
+                         for i in range(self.seq_len, len(feats))])
+        if self.scaler is not None:
+            B, T, F = X_seq.shape
+            X_flat = X_seq.reshape(-1, F)
+            X_flat = self.scaler.transform(X_flat)
+            X_seq = X_flat.reshape(B, T, F)
+            
+        self.model.eval()
+        with torch.no_grad():
+            tensor = torch.tensor(X_seq, dtype=torch.float32).to(self.device)
+            logits = self.model(tensor)
+            preds = torch.argmax(logits, dim=1).cpu().numpy() - 2
+        return pd.Series(preds, index=feats.index[self.seq_len:])
+        
+    def predict_proba(self, df: pd.DataFrame) -> pd.DataFrame:
+        cols = [-2, -1, 0, 1, 2]
+        if not self._is_fitted():
+            return pd.DataFrame(0.2, index=df.index, columns=cols)
+            
+        import torch
+        temp = XGBoostSignalModel()
+        feats = temp._engineer(df)[self.feature_cols].dropna()
+        if len(feats) < self.seq_len:
+            return pd.DataFrame(0.2, index=feats.index, columns=cols)
+            
+        X_seq = np.array([feats.values[i-self.seq_len:i]
+                         for i in range(self.seq_len, len(feats))])
+        if self.scaler is not None:
+            B, T, F = X_seq.shape
+            X_flat = X_seq.reshape(-1, F)
+            X_flat = self.scaler.transform(X_flat)
+            X_seq = X_flat.reshape(B, T, F)
+            
+        self.model.eval()
+        with torch.no_grad():
+            tensor = torch.tensor(X_seq, dtype=torch.float32).to(self.device)
+            logits = self.model(tensor)
+            proba = torch.softmax(logits, dim=1).cpu().numpy()
+            
+        full = np.zeros((proba.shape[0], len(cols)))
+        for i, c in enumerate(range(-2, 3)):
+            if i < proba.shape[1]:
+                full[:, i + 2] = proba[:, i]
+        return pd.DataFrame(full, index=feats.index[self.seq_len:])
+
+
 class MetaLabeler:
     """Secondary model that predicts whether a primary signal is profitable.
     
@@ -1831,16 +2455,22 @@ class PrecisionTradingSystem:
         self.flow = FlowAnalyzer(self.config)
         self.structure = MarketStructureAnalyzer(self.config)
         self.mtf = MTFConfluenceEngine()
-        self.signal_model = (
-            LorentzianClassifier(n_neighbors=5)
-            if model_type == "lorentzian"
-            else XGBoostSignalModel(
+        
+        if model_type == "lorentzian":
+            self.signal_model = LorentzianClassifier(n_neighbors=5)
+        elif model_type == "stacking":
+            self.signal_model = StackedEnsemble(
+                class_weight_scale=self.config.class_weight_scale,
+                calibration_method=self.config.calibration_method,
+                calibration_cv_splits=self.config.calibration_cv_splits,
+            )
+        else:
+            self.signal_model = XGBoostSignalModel(
                 calibration_method=self.config.calibration_method,
                 calibration_cv_splits=self.config.calibration_cv_splits,
                 class_weight_scale=self.config.class_weight_scale,
                 tune_threshold=self.config.f1_threshold_tune,
             )
-        )
         self.meta_labeler = MetaLabeler() if self.config.use_meta_labeling else None
         self.hmm = HMMRegimeDetector(n_regimes=2) if use_hmm else None
         self.current_regime = Regime.TRENDING
@@ -1897,7 +2527,14 @@ class PrecisionTradingSystem:
 
         # FIX: Only recreate if wrong type or missing v4 attrs, don't destroy fitted model
         needs_reinit = False
-        if self.model_type == "xgboost":
+        if self.model_type == "stacking":
+            if not isinstance(self.signal_model, StackedEnsemble):
+                self.signal_model = StackedEnsemble(
+                    class_weight_scale=self.config.class_weight_scale,
+                    calibration_method=self.config.calibration_method,
+                    calibration_cv_splits=self.config.calibration_cv_splits,
+                )
+        elif self.model_type == "xgboost":
             if not isinstance(self.signal_model, XGBoostSignalModel):
                 needs_reinit = True
             elif not hasattr(self.signal_model, 'class_weight_scale'):
@@ -2178,7 +2815,16 @@ class PrecisionTradingSystem:
         self.train(train_df)
         
         # CRITICAL FIX: Verify model actually got fitted
-        if isinstance(self.signal_model, XGBoostSignalModel):
+        if isinstance(self.signal_model, StackedEnsemble):
+            if not self.signal_model._is_fitted():
+                print(f"[WalkForward] CRITICAL: StackedEnsemble not fitted, forcing clean re-fit")
+                self.signal_model = StackedEnsemble(
+                    class_weight_scale=self.config.class_weight_scale,
+                    calibration_method=self.config.calibration_method,
+                    calibration_cv_splits=self.config.calibration_cv_splits,
+                )
+                self.signal_model.fit(train_df, target_horizon=self.config.target_horizon)
+        elif isinstance(self.signal_model, XGBoostSignalModel):
             if not self.signal_model._is_fitted():
                 print(f"[WalkForward] CRITICAL: XGBoost model not fitted, forcing clean re-fit")
                 self.signal_model = XGBoostSignalModel(

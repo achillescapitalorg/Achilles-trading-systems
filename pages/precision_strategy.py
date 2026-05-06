@@ -176,6 +176,7 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                         id="prec-model",
                         options=[
                             {"label": "XGBoost",     "value": "xgboost"},
+                            {"label": "Stacking",   "value": "stacking"},
                             {"label": "Lorentzian",  "value": "lorentzian"},
                         ],
                         value="xgboost", clearable=False,
