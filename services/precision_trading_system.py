@@ -76,6 +76,124 @@ warnings.filterwarnings('ignore')
 
 
 # =============================================================================
+# VECTORIZED LABELING + ADVANCED TECHNIQUES
+# =============================================================================
+
+def triple_barrier_labels_vectorized(df, pt_atr_mult=1.5, sl_atr_mult=1.0,
+                                       max_bars=5):
+    """Vectorized triple-barrier labelling with the SAME corrected logic as
+    TripleBarrierLabeler.label() — symmetric, direction-agnostic.
+
+    For each bar, picks +1/-1 based on which PROFIT-TAKE barrier fires first
+    (validated by no SL on that side firing earlier), else 0 (timeout/SL).
+    """
+    if 'atr_14' not in df.columns:
+        df = df.copy()
+        df['atr_14'] = (df['high'] - df['low']).rolling(14).mean()
+    atr = df['atr_14'].values
+    close = df['close'].values
+    high = df['high'].values
+    low = df['low'].values
+    n = len(df)
+    labels = np.zeros(n, dtype=int)
+
+    for i in range(n - max_bars):
+        a = atr[i]
+        if not np.isfinite(a) or a == 0:
+            continue
+        entry = close[i]
+        upper_pt = entry + pt_atr_mult * a   # long TP
+        upper_sl = entry + sl_atr_mult * a   # short SL
+        lower_pt = entry - pt_atr_mult * a   # short TP
+        lower_sl = entry - sl_atr_mult * a   # long SL
+        for j in range(i + 1, min(i + max_bars + 1, n)):
+            hi, lo = high[j], low[j]
+            hit_long_tp = hi >= upper_pt
+            hit_long_sl = lo <= lower_sl
+            hit_short_tp = lo <= lower_pt
+            hit_short_sl = hi >= upper_sl
+            if hit_long_tp and not hit_long_sl:
+                labels[i] = 1; break
+            if hit_short_tp and not hit_short_sl:
+                labels[i] = -1; break
+            if hit_long_sl or hit_short_sl:
+                labels[i] = 0; break
+    return pd.Series(labels, index=df.index).astype(int)
+
+
+class MarkovRegimeForecaster:
+    """Discrete Markov-chain regime forecaster.
+
+    Estimates the transition probability matrix from a regime label sequence
+    (e.g. HMM regimes) and produces:
+      - next-regime probabilities P(R_{t+1} | R_t)
+      - persistence score = P(stay) — useful for signal confidence
+      - transition entropy = -sum p log p — high entropy = unstable regime
+
+    These features feed into the signal model and the live-signal panel.
+    """
+
+    def __init__(self, n_states: int = 2, smoothing: float = 1.0):
+        self.n_states = n_states
+        self.smoothing = smoothing  # Laplace smoothing
+        self.T: Optional[np.ndarray] = None  # transition matrix [n×n]
+        self.steady_state: Optional[np.ndarray] = None
+        self._fitted = False
+
+    def fit(self, regime_seq: np.ndarray) -> "MarkovRegimeForecaster":
+        seq = np.asarray(regime_seq, dtype=int)
+        # Laplace-smoothed counts
+        counts = np.full((self.n_states, self.n_states), self.smoothing, dtype=float)
+        for i in range(len(seq) - 1):
+            a, b = int(seq[i]), int(seq[i + 1])
+            if 0 <= a < self.n_states and 0 <= b < self.n_states:
+                counts[a, b] += 1.0
+        self.T = counts / counts.sum(axis=1, keepdims=True)
+        # Stationary distribution = left-eigenvector for eigenvalue 1
+        try:
+            eigvals, eigvecs = np.linalg.eig(self.T.T)
+            idx = int(np.argmin(np.abs(eigvals - 1.0)))
+            ss = np.real(eigvecs[:, idx])
+            ss = np.abs(ss); ss /= ss.sum()
+            self.steady_state = ss
+        except Exception:
+            self.steady_state = np.ones(self.n_states) / self.n_states
+        self._fitted = True
+        return self
+
+    def next_regime_proba(self, current_regime: int) -> np.ndarray:
+        if not self._fitted or self.T is None:
+            return np.ones(self.n_states) / self.n_states
+        cr = int(current_regime) % self.n_states
+        return self.T[cr]
+
+    def persistence(self, current_regime: int) -> float:
+        """Probability of staying in the current regime."""
+        p = self.next_regime_proba(current_regime)
+        return float(p[int(current_regime) % self.n_states])
+
+    def entropy(self, current_regime: int) -> float:
+        """Shannon entropy of the next-regime distribution."""
+        p = self.next_regime_proba(current_regime)
+        p = np.clip(p, 1e-12, 1.0)
+        return float(-(p * np.log(p)).sum())
+
+    def add_features(self, df: pd.DataFrame, regime_col: str = "regime") -> pd.DataFrame:
+        """Add columns: markov_persistence, markov_entropy."""
+        if regime_col not in df.columns:
+            return df
+        regimes = df[regime_col].fillna(0).astype(int).values
+        if not self._fitted:
+            self.fit(regimes)
+        pers = np.array([self.persistence(r) for r in regimes])
+        ent = np.array([self.entropy(r) for r in regimes])
+        out = df.copy()
+        out["markov_persistence"] = pers
+        out["markov_entropy"] = ent
+        return out
+
+
+# =============================================================================
 # CONFIG
 # =============================================================================
 

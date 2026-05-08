@@ -204,11 +204,67 @@ layout = dbc.Container(fluid=True, style={"backgroundColor": C["bg"],
                                 "fontSize": "10px", "marginBottom": "3px"}),
                     dbc.Button("🔁 Walk-Forward", id="prec-wfbacktest-btn",
                                 color="success", size="sm",
-                                style={"fontSize": "11px"}),
+                                style={"fontSize": "11px",
+                                        "marginRight": "5px"}),
+                ], width="auto"),
+                dbc.Col([
+                    html.Label(" ", style={"display": "block",
+                                "fontSize": "10px", "marginBottom": "3px"}),
+                    dbc.Button("🔥 Full Training", id="prec-fulltrain-btn",
+                                color="danger", size="sm",
+                                style={"fontSize": "11px"},
+                                title="60d train + 7d val + 7d test, "
+                                      "DataCleaner pipeline, Markov regime "
+                                      "features, temporal-decay weights, "
+                                      "comprehensive metrics, versioned save"),
                 ], width="auto"),
             ], align="end"),
         ], width=6, style={"textAlign": "right"}),
     ], className="mb-3", align="center"),
+
+    # ── Full Training results panel ────────────────────────────────────────
+    _card(
+        "🔥 FULL TRAINING PIPELINE  ·  data clean + train/val/test + Markov regime",
+        dcc.Loading(
+            id="prec-ft-loading", type="circle", color=C["danger"],
+            custom_spinner=html.Div([
+                dbc.Spinner(color="danger", size="sm",
+                            spinner_style={"marginRight": "8px"}),
+                html.Span("Running full training pipeline — fetching 74 days of data, "
+                            "cleaning, splitting, fitting model with temporal decay "
+                            "weights, computing train/val/test metrics, saving versioned "
+                            "artifact… (~60-180 s)",
+                            style={"color": C["danger"], "fontSize": "11px"})
+            ], style={"padding": "16px", "textAlign": "center"}),
+            children=html.Div([
+                dbc.Row([
+                    dbc.Col(_stat("STATUS",      "prec-ft-status-stat", C["text"]),   width=2),
+                    dbc.Col(_stat("PROGRESS",    "prec-ft-progress",    C["info"]),   width=2),
+                    dbc.Col(_stat("CLEAN BARS",  "prec-ft-clean",       C["text"]),   width=2),
+                    dbc.Col(_stat("OUTLIERS",    "prec-ft-outliers",    C["warn"]),   width=2),
+                    dbc.Col(_stat("FEATURES",    "prec-ft-features",    C["info"]),   width=2),
+                    dbc.Col(_stat("DURATION (s)","prec-ft-duration",    C["text"]),   width=2),
+                ]),
+                dbc.Row([
+                    dbc.Col(_stat("TRAIN F1",    "prec-ft-train-f1",    C["accent"]), width=2),
+                    dbc.Col(_stat("VAL F1",      "prec-ft-val-f1",      C["accent"]), width=2),
+                    dbc.Col(_stat("OOS F1",      "prec-ft-oos-f1",      C["accent"]), width=2),
+                    dbc.Col(_stat("OOS ACC",     "prec-ft-oos-acc",     C["info"]),   width=2),
+                    dbc.Col(_stat("OOS WINRATE", "prec-ft-oos-wr",      C["accent"]), width=2),
+                    dbc.Col(_stat("OOS MCC",     "prec-ft-oos-mcc",     C["purple"]), width=2),
+                ], className="mt-1"),
+                html.Div(id="prec-ft-message",
+                            children="Click 'Full Training' for end-to-end pipeline. "
+                                     "Watch terminal for stage-by-stage progress.",
+                            style={"color": C["muted"], "fontSize": "10px",
+                                    "marginTop": "8px", "textAlign": "center"}),
+                html.Div(id="prec-ft-modelpath",
+                            style={"color": C["muted"], "fontSize": "9px",
+                                    "marginTop": "4px", "textAlign": "center",
+                                    "fontFamily": "monospace"}),
+            ]),
+        ),
+    ),
 
     # ── Live signal banner ─────────────────────────────────────────────────
     _card(
@@ -989,3 +1045,139 @@ def load_db_runs(n_clicks, symbol):
         return table, f"Loaded {len(df)} runs from SQLite."
     except Exception as e:
         return html.Div(f"DB Error: {e}", style={"color": C["danger"]}), f"Error: {e}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Full Training Pipeline — runs in a daemon thread, polled by an interval
+# ─────────────────────────────────────────────────────────────────────────────
+
+_full_training_state: Dict[str, Any] = {"running": False, "metrics": None,
+                                          "started_at": None, "system_key": None}
+
+
+def _yfinance_fetch(symbol: str):
+    """Closure factory: returns a fetch_fn(start, end, interval) for the
+    given symbol, mapping to yfinance via the existing app.fetch_yahoo_finance_data."""
+    from app import fetch_yahoo_finance_data
+    yf_intervals = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h"}
+
+    def fetch_fn(start, end, interval: str = "1m") -> "pd.DataFrame":
+        days = max(1, (end - start).days)
+        # yfinance limits 1m to ~7 days/request; for longer windows fall back to
+        # the prebuilt CSV in data/historical for reliability.
+        try:
+            interval_yf = yf_intervals.get(interval, "1m")
+            if interval == "1m" and days > 7:
+                # Use prebuilt 1m CSV
+                csv = os.path.join(DATA_DIR, "historical", f"{symbol}_1m.csv")
+                if os.path.exists(csv):
+                    df = pd.read_csv(csv, index_col="timestamp", parse_dates=["timestamp"])
+                    if "source" in df.columns:
+                        df = df[df["source"] == "yfinance"]
+                    df = df[["open", "high", "low", "close", "volume"]]
+                    df = df.loc[(df.index >= pd.Timestamp(start, tz="UTC"))
+                                & (df.index <= pd.Timestamp(end, tz="UTC"))]
+                    return df
+            df = fetch_yahoo_finance_data(symbol, period=f"{days+2}d", interval=interval_yf)
+            if df is None or df.empty:
+                return pd.DataFrame()
+            if "timestamp" in df.columns:
+                df = df.set_index("timestamp")
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("UTC", ambiguous="NaT", nonexistent="NaT")
+            return df.loc[(df.index >= pd.Timestamp(start, tz="UTC"))
+                          & (df.index <= pd.Timestamp(end, tz="UTC"))][
+                ["open", "high", "low", "close", "volume"]
+            ]
+        except Exception as e:
+            print(f"[FullTraining] fetch failed: {e}")
+            # Final fallback: load whatever CSV exists for this symbol
+            for tf in ("1h", "1m"):
+                csv = os.path.join(DATA_DIR, "historical", f"{symbol}_{tf}.csv")
+                if os.path.exists(csv):
+                    df = pd.read_csv(csv, index_col="timestamp", parse_dates=["timestamp"])
+                    if "source" in df.columns:
+                        df = df[df["source"] == "yfinance"]
+                    return df[["open", "high", "low", "close", "volume"]]
+            return pd.DataFrame()
+    return fetch_fn
+
+
+@callback(
+    Output("prec-ft-message", "children", allow_duplicate=True),
+    Input("prec-fulltrain-btn", "n_clicks"),
+    State("prec-symbol", "value"),
+    State("prec-model", "value"),
+    prevent_initial_call=True,
+)
+def start_full_training(n_clicks, symbol, model):
+    if not n_clicks:
+        return no_update
+    if _full_training_state.get("running"):
+        return f"⏳ Training already running for {_full_training_state.get('system_key')}"
+    try:
+        from services.training_pipeline import TrainingConfig, TrainingPipeline
+    except Exception as e:
+        return f"❌ Cannot import training_pipeline: {e}"
+
+    sys = _get_system(symbol, model)
+    cfg = TrainingConfig(asset=symbol, model_type=model)
+    pipeline = TrainingPipeline(sys, cfg)
+    fetch_fn = _yfinance_fetch(symbol)
+
+    _full_training_state["running"] = True
+    _full_training_state["pipeline"] = pipeline
+    _full_training_state["system_key"] = f"{symbol}_{model}"
+    _full_training_state["started_at"] = _time.time()
+
+    def _runner():
+        try:
+            pipeline.run(fetch_fn)
+        finally:
+            _full_training_state["running"] = False
+
+    threading.Thread(target=_runner, daemon=True,
+                       name=f"FullTrain-{symbol}-{model}").start()
+    return (f"🔥 Full Training started for {symbol}/{model}. Watch terminal "
+            f"for stage-by-stage progress (60-180 s).")
+
+
+@callback(
+    Output("prec-ft-status-stat", "children"),
+    Output("prec-ft-progress",    "children"),
+    Output("prec-ft-clean",       "children"),
+    Output("prec-ft-outliers",    "children"),
+    Output("prec-ft-features",    "children"),
+    Output("prec-ft-duration",    "children"),
+    Output("prec-ft-train-f1",    "children"),
+    Output("prec-ft-val-f1",      "children"),
+    Output("prec-ft-oos-f1",      "children"),
+    Output("prec-ft-oos-acc",     "children"),
+    Output("prec-ft-oos-wr",      "children"),
+    Output("prec-ft-oos-mcc",     "children"),
+    Output("prec-ft-message",     "children"),
+    Output("prec-ft-modelpath",   "children"),
+    Input("prec-interval",        "n_intervals"),
+    prevent_initial_call=False,
+)
+def poll_full_training(_n):
+    pipeline = _full_training_state.get("pipeline")
+    if pipeline is None:
+        return ("--",) * 12 + (
+            "Click 'Full Training' for end-to-end pipeline.", "")
+    m = pipeline.metrics
+    return (
+        m.status.upper(),
+        f"{m.progress_pct:.0f}%",
+        f"{m.clean_bars:,}" if m.clean_bars else "--",
+        f"{m.outliers_removed:,}" if m.outliers_removed else "0",
+        f"{m.n_features}" if m.n_features else "--",
+        f"{m.training_duration_sec:.0f}" if m.training_duration_sec else "--",
+        f"{m.train_f1:.3f}" if m.train_f1 else "--",
+        f"{m.val_f1:.3f}" if m.val_f1 else "--",
+        f"{m.oos_f1:.3f}" if m.oos_f1 else "--",
+        f"{m.oos_accuracy:.1%}" if m.oos_accuracy else "--",
+        f"{m.oos_winrate:.1%}" if m.oos_winrate else "--",
+        f"{m.oos_mcc:.3f}" if m.oos_mcc else "--",
+        m.message,
+        m.model_path or "",
+    )
