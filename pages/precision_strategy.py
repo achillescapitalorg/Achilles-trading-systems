@@ -30,6 +30,10 @@ from services.precision_trading_system import (
     PYKALMAN_AVAILABLE,
     HMMLEARN_AVAILABLE,
 )
+from services.temperature_calibration import OnlineCalibrator
+
+# Global online calibrator per (symbol, model) key
+_online_calibrators: Dict[str, OnlineCalibrator] = {}
 
 C = {
     "bg":       "#000000",
@@ -589,7 +593,25 @@ def update_live_signal(_n, symbol, model, _trig):
         col = C["muted"]
 
     badge_style = {"fontSize": "30px", "color": col, "fontWeight": "bold", "lineHeight": "1"}
-    conf_text = f"Confidence: {sig['confidence']:.1%}"
+    # Apply temperature scaling / online calibration to confidence
+    key_cal = f"{symbol}_{model}"
+    calibrator = _online_calibrators.get(key_cal)
+    if calibrator is None:
+        calibrator = OnlineCalibrator(window_size=500, update_every=50)
+        _online_calibrators[key_cal] = calibrator
+    # Temperature scaling: treat raw confidence as logit
+    raw_conf = float(sig.get("confidence", 0.5))
+    # Convert probability to logit for temperature scaling
+    eps = 1e-6
+    logit = np.log((raw_conf + eps) / (1 - raw_conf + eps))
+    calibrated_probs = calibrator.calibrate(np.array([[logit, -logit]]))
+    calibrated_conf = float(calibrated_probs[0, 1])
+    # If calibrator has enough data, use calibrated; otherwise blend
+    if calibrator.is_calibrated:
+        display_conf = calibrated_conf
+    else:
+        display_conf = 0.7 * raw_conf + 0.3 * calibrated_conf
+    conf_text = f"Confidence: {display_conf:.1%} (raw {raw_conf:.1%})"
 
     mtf_score_str = f"{sig.get('mtf_score', 0):+.2f}"
     mtf_conf_str = sig.get("mtf_confluence", "neutral").upper().replace("_", " ")

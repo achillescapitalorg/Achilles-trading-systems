@@ -53,3 +53,7 @@ xgboost>=2.0.0     # gradient-boosted classifier (XAU/BTC/EUR/GBP)
 pykalman>=0.9.5    # Kalman price denoising (Layer 1)
 hmmlearn>=0.3.0    # HMM regime detection (Layer 3)
 
+# New validated improvements (2025-05)
+shap>=0.44.0       # SHAP feature importance monitoring (optional)
+# polygon-api-client>=1.0.0  # Uncomment for Polygon.io data adapter
+

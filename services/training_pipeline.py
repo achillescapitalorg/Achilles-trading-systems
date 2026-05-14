@@ -171,7 +171,9 @@ class TrainingConfig:
     
     # Cross-validation
     n_cv_folds: int = 5
-    cv_method: str = "purged"  # purged, timeseries, blocked
+    cv_method: str = "purged"  # purged, timeseries, blocked, cpcv
+    cpcv_n_splits: int = 6
+    cpcv_n_test_splits: int = 2
     
     # Ensemble
     ensemble_models: List[str] = field(default_factory=lambda: ["xgboost", "lorentzian"])
@@ -813,6 +815,7 @@ class TrainingPipeline:
             config.drift_statistical_threshold,
             config.drift_ks_threshold
         )
+        self.shap_monitor = None  # Initialized after first SHAP run
         self.hyperopt = HyperparameterOptimizer(config)
         self.registry = ModelRegistry(config.experiment_tracking_path)
         
@@ -921,39 +924,51 @@ class TrainingPipeline:
                     f"{prefix}_accuracy": 0.0, f"{prefix}_winrate": 0.0}
     
     def _cross_validate(self, df: pd.DataFrame, n_splits: int = 5) -> Dict[str, float]:
-        """Run purged cross-validation."""
-        if self.config.cv_method == "purged":
+        """Run cross-validation: purged, timeseries, blocked, or CPCV."""
+        from services.cpcv import CombinatorialPurgedCV
+
+        if self.config.cv_method == "cpcv":
+            cpcv = CombinatorialPurgedCV(
+                n_splits=self.config.cpcv_n_splits,
+                n_test_splits=self.config.cpcv_n_test_splits,
+                embargo_pct=self.config.embargo_pct,
+            )
+            splits = cpcv.split(df)
+        elif self.config.cv_method == "purged":
             pwf = PurgedWalkForward(
                 n_splits=n_splits,
                 test_size_pct=0.1,
                 purge_horizon=self.config.purge_horizon,
                 embargo_pct=self.config.embargo_pct
             )
+            splits = [(train_idx, [test_idx]) for _, train_idx, test_idx in pwf.split(df)]
         else:
             from sklearn.model_selection import TimeSeriesSplit
-            pwf = TimeSeriesSplit(n_splits=n_splits)
-        
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            splits = [(train_idx, [test_idx]) for train_idx, test_idx in tscv.split(df)]
+
         f1_scores = []
         mcc_scores = []
-        
-        for fold, train_idx, test_idx in pwf.split(df):
+
+        for train_idx, test_idx_list in splits:
+            test_idx = test_idx_list[0]
             if len(train_idx) < 100 or len(test_idx) < 30:
                 continue
-            
+
             train_df = df.iloc[train_idx]
             test_df = df.iloc[test_idx]
-            
+
             # Build features
             mtfed_train = self.feature_engineer.engineer_features(train_df, fit=True)
             mtfed_test = self.feature_engineer.engineer_features(test_df, fit=False)
-            
+
             # Train temporary model
             temp_model = XGBoostSignalModel()
             temp_model.fit(mtfed_train)
-            
+
             # Predict and score
             preds = temp_model.predict(mtfed_test)
-            
+
             # Get labels
             cfg = self.system.config
             y_true = triple_barrier_labels_vectorized(
@@ -962,11 +977,11 @@ class TrainingPipeline:
                 sl_atr_mult=getattr(cfg, "atr_multiplier_stop", 1.0),
                 max_bars=10
             )
-            
+
             y_pred = preds.reindex(y_true.index).fillna(0).values
             yt = y_true.values
             mask = ~(np.isnan(yt) | np.isnan(y_pred.astype(float)))
-            
+
             if mask.sum() > 10:
                 f1 = f1_score(yt[mask], y_pred[mask], average='macro', zero_division=0)
                 try:
@@ -975,24 +990,25 @@ class TrainingPipeline:
                     mcc = 0.0
                 f1_scores.append(f1)
                 mcc_scores.append(mcc)
-        
+
         return {
             'cv_f1_mean': float(np.mean(f1_scores)) if f1_scores else 0.0,
             'cv_f1_std': float(np.std(f1_scores)) if f1_scores else 0.0,
             'cv_mcc_mean': float(np.mean(mcc_scores)) if mcc_scores else 0.0,
             'cv_mcc_std': float(np.std(mcc_scores)) if mcc_scores else 0.0,
+            'n_paths': len(f1_scores),
         }
     
     def _generate_shap_values(self, df: pd.DataFrame, model: Any) -> Dict[str, Any]:
-        """Generate SHAP values for model explainability."""
+        """Generate SHAP values for model explainability and drift monitoring."""
         if not SHAP_AVAILABLE:
             return {'error': 'SHAP not available'}
-        
+
         try:
             # Sample data for SHAP
             sample_size = min(self.config.shap_sample_size, len(df))
-            sample_df = df.sample(sample_size) if len(df) > sample_size else df
-            
+            sample_df = df.sample(sample_size, random_state=42) if len(df) > sample_size else df
+
             # Get features
             if hasattr(model, '_engineer'):
                 feats = model._engineer(sample_df)
@@ -1000,22 +1016,39 @@ class TrainingPipeline:
                     feats = feats[model.feature_cols]
             else:
                 feats = sample_df.select_dtypes(include=[np.number]).fillna(0)
-            
+
+            # Initialize SHAP monitor on first call
+            if self.shap_monitor is None:
+                from services.shap_monitor import SHAPFeatureMonitor
+                self.shap_monitor = SHAPFeatureMonitor(
+                    feature_names=list(feats.columns),
+                    alert_threshold=0.2,
+                )
+
             # Create SHAP explainer
             if hasattr(model, 'model') and model.model is not None:
                 explainer = shap.TreeExplainer(model.model)
                 shap_values = explainer.shap_values(feats.values)
-                
+
                 # Summary statistics
                 feature_importance = dict(zip(
                     feats.columns,
                     np.abs(shap_values).mean(axis=0).tolist()
                 ))
-                
+
+                # Set baseline if not set, otherwise check drift
+                X_sample = feats.values
+                if self.shap_monitor.baseline_importance is None:
+                    self.shap_monitor.set_baseline(model.model, X_sample)
+                    drift_report = {"status": "baseline_set"}
+                else:
+                    drift_report = self.shap_monitor.check_drift(model.model, X_sample)
+
                 return {
                     'feature_importance': feature_importance,
                     'shap_values_shape': str(np.array(shap_values).shape),
-                    'sample_size': sample_size
+                    'sample_size': sample_size,
+                    'drift_report': drift_report,
                 }
             else:
                 return {'error': 'Model not fitted'}

@@ -27,10 +27,18 @@ from scipy import stats
 
 # ── Realistic gold futures (GC=F) trading costs ──────────────────────────────
 # Source: CME Group GC contract spec + typical retail broker conditions
+# NOTE: Legacy fixed costs kept for backward compatibility.
+# Use use_realistic_costs=True to enable session/volatility-dependent costs.
 GOLD_SPREAD_USD     = 0.30      # bid-ask half-spread per leg
 GOLD_SLIPPAGE_USD   = 0.10      # market impact slippage per leg
 GOLD_TICK_SIZE      = 0.10
 GOLD_VALUE_PER_DOL  = 100.0     # 1 contract = 100 oz, $1 move = $100
+
+# Import new realistic cost model
+from services.realistic_costs import RealisticCostModel, detect_volatility_regime
+
+# Default realistic cost model instance
+_DEFAULT_COST_MODEL = RealisticCostModel(commission_per_lot=7.0)
 
 
 @dataclass
@@ -147,6 +155,8 @@ def run_backtest(
     confidence: Optional[np.ndarray] = None,
     min_confidence: float = 0.40,
     n_trials_for_dsr: int = 10,
+    use_realistic_costs: bool = False,
+    cost_model: Optional[RealisticCostModel] = None,
 ) -> BacktestResult:
     """
     Bar-by-bar trade simulation with realistic costs and intra-bar SL/TP fills.
@@ -155,6 +165,8 @@ def run_backtest(
                                        'timestamp' (optional)]
     signals:   integer array, 0=HOLD, 1=BUY, 2=SELL — same length as df
     confidence: optional array of probabilities (filter out low-confidence signals)
+    use_realistic_costs: if True, uses session/volatility-dependent costs
+    cost_model: optional RealisticCostModel instance (uses default if None)
     """
     assert len(signals) == len(df), "signals and df length mismatch"
     n = len(df)
@@ -181,6 +193,28 @@ def run_backtest(
     direction_correct = 0
     direction_total = 0
 
+    # Setup cost model
+    cost_model = cost_model or _DEFAULT_COST_MODEL if use_realistic_costs else None
+
+    def _get_bar_costs(idx: int, vol_regime: str = "normal") -> Tuple[float, float]:
+        """Returns (spread_usd, slippage_usd) per oz for bar idx."""
+        if cost_model is None:
+            return GOLD_SPREAD_USD, GOLD_SLIPPAGE_USD
+        ts = df["timestamp"].iloc[idx] if "timestamp" in df.columns else pd.Timestamp.now()
+        if not isinstance(ts, pd.Timestamp):
+            ts = pd.Timestamp(ts)
+        spread = cost_model.compute_spread(ts, vol_regime)
+        # slippage approximated as spread * 0.3 for quick per-bar estimate
+        slippage = spread * 0.3
+        return spread, slippage
+
+    def _vol_regime(idx: int) -> str:
+        if cost_model is None or "atr" not in df.columns:
+            return "normal"
+        atr = df["atr"].iloc[idx]
+        atr_ma = df["atr"].rolling(50).mean().iloc[idx]
+        return detect_volatility_regime(atr, atr_ma)
+
     for i in range(n):
         bar_high = highs[i]
         bar_low  = lows[i]
@@ -188,6 +222,9 @@ def run_backtest(
         bar_close = closes[i]
         bar_atr   = max(atrs[i], 0.5)
         ts = df["timestamp"].iloc[i] if "timestamp" in df.columns else i
+        vol_regime = _vol_regime(i)
+        spread_usd, slip_usd = _get_bar_costs(i, vol_regime)
+        leg_cost = (spread_usd + slip_usd)
 
         # ── Check intra-bar SL/TP fills first (assume worst case for the trader) ──
         if position != 0:
@@ -206,7 +243,7 @@ def run_backtest(
 
             exit_reason = None; exit_price = 0.0
             if hit_sl:
-                exit_price = sl_price - position * (GOLD_SLIPPAGE_USD)  # adverse slippage
+                exit_price = sl_price - position * (slip_usd)  # adverse slippage
                 exit_reason = "sl"
             elif hit_tp:
                 exit_price = tp_price + position * 0  # touch fill
@@ -215,7 +252,7 @@ def run_backtest(
             if exit_reason:
                 pnl_dollar = position * (exit_price - entry_price) * pos_size
                 # Spread + slippage cost on exit
-                pnl_dollar -= (GOLD_SPREAD_USD + GOLD_SLIPPAGE_USD) * pos_size
+                pnl_dollar -= leg_cost * pos_size
                 pnl_pct = pnl_dollar / capital
                 capital += pnl_dollar
                 trades.append(Trade(
@@ -245,9 +282,9 @@ def run_backtest(
 
             # Close opposite position first
             if position != 0 and position != target_pos:
-                exit_price = bar_close - position * (GOLD_SPREAD_USD + GOLD_SLIPPAGE_USD)
+                exit_price = bar_close - position * leg_cost
                 pnl_dollar = position * (exit_price - entry_price) * pos_size
-                pnl_dollar -= (GOLD_SPREAD_USD + GOLD_SLIPPAGE_USD) * pos_size
+                pnl_dollar -= leg_cost * pos_size
                 pnl_pct = pnl_dollar / capital
                 capital += pnl_dollar
                 trades.append(Trade(
@@ -268,7 +305,7 @@ def run_backtest(
                 # Round to 0.01 oz
                 pos_size = round(pos_size, 2)
 
-                entry_price = bar_close + target_pos * (GOLD_SPREAD_USD + GOLD_SLIPPAGE_USD)
+                entry_price = bar_close + target_pos * leg_cost
                 if target_pos == 1:
                     sl_price = entry_price - sl_dist
                     tp_price = entry_price + bar_atr * tp_atr_mult
@@ -287,9 +324,11 @@ def run_backtest(
 
     # Close any open position at the last close
     if position != 0:
-        exit_price = closes[-1] - position * (GOLD_SPREAD_USD + GOLD_SLIPPAGE_USD)
+        spread_usd, slip_usd = _get_bar_costs(n - 1, _vol_regime(n - 1))
+        leg_cost = spread_usd + slip_usd
+        exit_price = closes[-1] - position * leg_cost
         pnl_dollar = position * (exit_price - entry_price) * pos_size
-        pnl_dollar -= (GOLD_SPREAD_USD + GOLD_SLIPPAGE_USD) * pos_size
+        pnl_dollar -= leg_cost * pos_size
         pnl_pct = pnl_dollar / capital
         capital += pnl_dollar
         trades.append(Trade(
