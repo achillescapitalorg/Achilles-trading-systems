@@ -1,12 +1,142 @@
+# =============================================================================
+# Python
+# =============================================================================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# =============================================================================
+# Virtual Environments
+# =============================================================================
 venv/
 .venv/
-.DS_Store
+env/
+ENV/
+env.bak/
+venv.bak/
 
-# graphify: keep report + index, ignore generated graph data + cache
+# =============================================================================
+# IDEs & Editors
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# =============================================================================
+# Environment / Secrets
+# =============================================================================
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# =============================================================================
+# Jupyter
+# =============================================================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# =============================================================================
+# Testing / Coverage
+# =============================================================================
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# =============================================================================
+# Project-specific: Generated Data, Models, Cache, Databases
+# =============================================================================
+# Large binary artefacts (models, scalers, checkpoints)
+*.pt
+*.pkl
+*.pth
+*.h5
+*.onnx
+
+# Databases & caches
+data/*.db
+data/*.db-journal
+data/*.db_cache.*
+data/*.json
+data/yf_cache/
+data/experiments/
+data/feature_store/
+data/historical/
+data/models/
+*.db
+*.db-journal
+
+# Backtest / trading memory
+trading_memory.db*
+precision_backtest.db*
+
+# News cache
+data/news_cache.json
+
+# Graphify generated artefacts (keep report + index)
 graphify-out/cache/
 graphify-out/graph.html
 graphify-out/graph.json
-graphify-out/.graphify_*
 graphify-out/manifest.json
+graphify-out/.graphify_*
+
+# =============================================================================
+# Misc
+# =============================================================================
+*.log
+*.out
+*.bak
+*.tmp
+tmp/
+temp/
