@@ -1558,6 +1558,7 @@ class XGBoostSignalModel:
         return pd.DataFrame(full, index=aligned.index, columns=cols)
 
 
+
 # =============================================================================
 # STACKED ENSEMBLE ENGINE
 # =============================================================================
