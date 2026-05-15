@@ -234,71 +234,9 @@ TRADE_HISTORY = []
 
 
 def fetch_yahoo_finance_data(symbol, period="5d", interval="15m"):
-    """Fetch real-time data from Yahoo Finance."""
-    try:
-        yf_symbol = YF_SYMBOLS.get(symbol, symbol)
-        ticker = yf.Ticker(yf_symbol)
-
-        # Fetch historical data
-        df = ticker.history(period=period, interval=interval)
-
-        # Check if df is None or empty
-        if df is None or (hasattr(df, 'empty') and df.empty):
-            return generate_fallback_data(symbol)
-
-        # Check if df has expected structure
-        if not hasattr(df, 'columns') or len(df.columns) == 0:
-            return generate_fallback_data(symbol)
-
-        df = df.reset_index()
-
-        # Handle column renaming safely
-        # yfinance ≥0.2.40 may return MultiIndex columns like ('Close', 'BTC-USD')
-        # Flatten them to single-level lowercase strings first.
-        try:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [
-                    str(col[0]).lower() if isinstance(col, tuple) else str(col).lower()
-                    for col in df.columns
-                ]
-            else:
-                df.columns = [str(c).lower() for c in df.columns]
-        except Exception:
-            try:
-                df.columns = df.columns.str.lower()
-            except Exception:
-                df = pd.DataFrame(
-                    df.values,
-                    columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'][:len(df.columns)]
-                )
-
-        # Handle datetime column
-        if 'date' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['date'])
-        elif 'datetime' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['datetime'])
-        elif 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-        elif len(df.columns) > 0:
-            df['timestamp'] = pd.to_datetime(df.iloc[:, 0])
-        else:
-            return generate_fallback_data(symbol)
-
-        # Ensure required columns exist
-        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        for col in required_cols:
-            if col not in df.columns:
-                return generate_fallback_data(symbol)
-
-        # Normalize to UTC-naive so categorical x-axis labels are consistent
-        if df['timestamp'].dt.tz is not None:
-            df['timestamp'] = df['timestamp'].dt.tz_convert('UTC').dt.tz_localize(None)
-
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-
-    except Exception as e:
-        print(f"Error fetching data for {symbol}: {e}")
-        return generate_fallback_data(symbol)
+    """Fetch real-time data from Yahoo Finance with cache + dedup + retry."""
+    from services.yf_cache import fetch_cached
+    return fetch_cached(symbol, period=period, interval=interval)
 
 
 def generate_fallback_data(symbol, periods=100):

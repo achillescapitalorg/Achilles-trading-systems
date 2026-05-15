@@ -256,6 +256,8 @@ class AssetConfig:
     purge_horizon: int = 5          # bars to purge around test sets
     embargo_pct: float = 0.02       # % of dataset to embargo after test
     use_meta_labeling: bool = True
+    confidence_threshold: float = 0.15
+    use_ema_filter: bool = False
     meta_label_threshold: float = 0.0  # min PnL to label as "take trade"
     class_weight_scale: float = 5.0    # scale_pos_weight multiplier
     f1_threshold_tune: bool = True     # optimize prob threshold for F1
@@ -273,16 +275,18 @@ class AssetConfig:
 ASSET_CONFIGS: Dict[Asset, AssetConfig] = {
     Asset.XAUUSD: AssetConfig(
         asset=Asset.XAUUSD,
-        pip_value=0.01, spread_avg=0.05, tick_size=0.01,
+        pip_value=0.01, spread_avg=0.35, tick_size=0.01,
         contract_size=100.0, leverage=100.0,
         kalman_observation_covariance=0.5,
         kalman_transition_covariance=0.005,
         vpin_buckets=50, vpin_window=50, vpin_threshold=0.90,
-        max_risk_per_trade_pct=0.01,
+        max_risk_per_trade_pct=0.005,
         atr_multiplier_stop=2.0,
+        confidence_threshold=0.15,
+        use_ema_filter=False,
         atr_multiplier_tp1=1.5, atr_multiplier_tp2=2.5, atr_multiplier_tp3=4.0,
         kelly_fraction=0.25, fvg_body_multiplier=1.5,
-        target_horizon=3, purge_horizon=5, embargo_pct=0.02,
+        target_horizon=10, purge_horizon=15, embargo_pct=0.02,
     ),
     Asset.BTCUSD: AssetConfig(
         asset=Asset.BTCUSD,
@@ -1203,12 +1207,22 @@ class LorentzianClassifier:
 
 
 class XGBoostSignalModel:
-    def __init__(self, n_estimators: int = 200, max_depth: int = 5,
-                 learning_rate: float = 0.05,
-                 calibration_method: Optional[str] = "isotonic",
+    def __init__(self, n_estimators: int = 100, max_depth: int = 3,
+                 learning_rate: float = 0.1,
+                 calibration_method: Optional[str] = None,
                  calibration_cv_splits: int = 3,
-                 class_weight_scale: float = 5.0,
-                 tune_threshold: bool = True):
+                 class_weight_scale: float = 3.0,
+                 tune_threshold: bool = False,
+                 subsample: float = 0.6,
+                 colsample_bytree: float = 0.6,
+                 reg_lambda: float = 5.0):
+        """v5: Much stronger regularization for noisy 1m data.
+        Defaults changed from (200 trees, depth 5) to (100 trees, depth 3)
+        with subsample=0.6 and lambda=5.0 to fight overfitting.
+        """
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
+        self.reg_lambda_val = reg_lambda
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.learning_rate = learning_rate
@@ -1222,12 +1236,12 @@ class XGBoostSignalModel:
         self.feature_cols: Optional[List[str]] = None
         self._class_to_idx: Dict[int, int] = {}
         self._idx_to_class: Dict[int, int] = {}
-        self._thresholds: Dict[int, float] = {}  # per-class probability threshold
+        self._thresholds: Dict[int, float] = {}
         self.feature_importance_: Dict[str, float] = {}
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        # v4 backward-compat: attributes added after initial deployment
+        # v4/v5 backward-compat: attributes added after initial deployment
         self.class_weight_scale = getattr(self, 'class_weight_scale', 5.0)
         self.tune_threshold     = getattr(self, 'tune_threshold',     True)
         self.calibration_method = state.get("calibration_method", "isotonic")
@@ -1237,6 +1251,10 @@ class XGBoostSignalModel:
         self._idx_to_class = state.get("_idx_to_class", {})
         self._thresholds = state.get("_thresholds", {})
         self.feature_importance_ = state.get("feature_importance_", {})
+        # v5 regularization params (saved models from before v5 won't have these)
+        self.subsample         = getattr(self, 'subsample',         0.6)
+        self.colsample_bytree  = getattr(self, 'colsample_bytree',  0.6)
+        self.reg_lambda_val    = getattr(self, 'reg_lambda_val',    5.0)
         if not self._class_to_idx and self.model is not None:
             classes = getattr(self.model, "classes_", None)
             if classes is not None:
@@ -1329,9 +1347,17 @@ class XGBoostSignalModel:
         f["tick_imbalance"]  = df["tick_imbalance"]  if "tick_imbalance"  in df.columns else 0
 
         # v4 time-of-day seasonality
-        if hasattr(df.index, 'hour'):
-            f["hour"] = df.index.hour
-            f["minute"] = df.index.minute
+        ts_series = None
+        if isinstance(df.index, pd.DatetimeIndex):
+            ts_series = pd.Series(df.index)
+        elif "timestamp" in df.columns:
+            ts_series = pd.to_datetime(df["timestamp"])
+        elif hasattr(df.index, 'hour'):
+            ts_series = pd.Series(df.index)
+        if ts_series is not None:
+            ts_dt = pd.to_datetime(ts_series)
+            f["hour"] = ts_dt.dt.hour
+            f["minute"] = ts_dt.dt.minute
             f["is_london"] = ((f["hour"] >= 8) & (f["hour"] <= 17)).astype(int)
             f["is_ny"] = ((f["hour"] >= 13) & (f["hour"] <= 22)).astype(int)
         else:
@@ -1340,6 +1366,9 @@ class XGBoostSignalModel:
             f["is_london"] = 0
             f["is_ny"] = 0
 
+        # v5: Keep return_lags for backward-compat with saved models.
+        # Stronger regularization (depth 3, lambda 5, subsample 0.6) now
+        # prevents them from overfitting to short-term autocorrelation.
         for lag in (1, 2, 3):
             f[f"return_lag_{lag}"] = f["returns_1"].shift(lag)
 
@@ -1388,12 +1417,16 @@ class XGBoostSignalModel:
                 n_estimators=self.n_estimators,
                 max_depth=self.max_depth,
                 learning_rate=self.learning_rate,
+                subsample=self.subsample,
+                colsample_bytree=self.colsample_bytree,
                 objective="multi:softprob" if n_classes > 2 else "binary:logistic",
                 num_class=n_classes if n_classes > 2 else None,
                 eval_metric="mlogloss" if n_classes > 2 else "logloss",
                 random_state=42,
                 tree_method="hist",
-                reg_lambda=1.0, min_child_weight=10,
+                reg_lambda=self.reg_lambda_val,
+                min_child_weight=50,
+                gamma=1.0,
             )
             if sample_weight is not None:
                 sw = sample_weight[af.index]
@@ -1480,29 +1513,30 @@ class XGBoostSignalModel:
         if not self._is_fitted() or self.feature_cols is None:
             return pd.Series(0, index=df.index)
         feats = self._engineer(df)
+        # Defensive: ensure exact column count to avoid shape mismatch
+        # with models saved before/after feature changes
+        aligned = pd.DataFrame(index=feats.index)
         for c in self.feature_cols:
-            if c not in feats.columns:
-                feats[c] = 0
-        feats = feats[self.feature_cols]
-        X = self.scaler.transform(feats) if self.scaler is not None else feats.values
+            aligned[c] = feats[c] if c in feats.columns else 0.0
+        X = self.scaler.transform(aligned) if self.scaler is not None else aligned.values
         try:
             encoded = self.model.predict(X)
         except Exception as e:
             print(f"[XGBoost] predict failed ({type(e).__name__}: {e}); returning HOLD")
-            return pd.Series(0, index=feats.index)
+            return pd.Series(0, index=aligned.index)
         decoded = np.array([self._idx_to_class.get(int(i), 0) for i in encoded], dtype=int)
-        return pd.Series(decoded, index=feats.index)
+        return pd.Series(decoded, index=aligned.index)
 
     def predict_proba(self, df: pd.DataFrame) -> pd.DataFrame:
         cols = [-2, -1, 0, 1, 2]
         if not self._is_fitted() or self.feature_cols is None:
             return pd.DataFrame(0.2, index=df.index, columns=cols)
         feats = self._engineer(df)
+        # Defensive: ensure exact column count to avoid shape mismatch
+        aligned = pd.DataFrame(index=feats.index)
         for c in self.feature_cols:
-            if c not in feats.columns:
-                feats[c] = 0
-        feats = feats[self.feature_cols]
-        X = self.scaler.transform(feats) if self.scaler is not None else feats.values
+            aligned[c] = feats[c] if c in feats.columns else 0.0
+        X = self.scaler.transform(aligned) if self.scaler is not None else aligned.values
         model = self.calibrated_model if self.calibrated_model is not None else self.model
         try:
             proba = model.predict_proba(X)
@@ -1512,7 +1546,7 @@ class XGBoostSignalModel:
             except Exception as e2:
                 print(f"[XGBoost] predict_proba failed ({type(e2).__name__}: {e2}); using uniform")
                 proba = np.full((X.shape[0], len(cols)), 1.0 / len(cols))
-                return pd.DataFrame(proba, index=feats.index, columns=cols)
+                return pd.DataFrame(proba, index=aligned.index, columns=cols)
         full = np.zeros((proba.shape[0], len(cols)))
         col_index = {c: i for i, c in enumerate(cols)}
         for enc_idx in range(proba.shape[1]):
@@ -1521,7 +1555,7 @@ class XGBoostSignalModel:
                 continue
             if orig_class in col_index:
                 full[:, col_index[orig_class]] = proba[:, enc_idx]
-        return pd.DataFrame(full, index=feats.index, columns=cols)
+        return pd.DataFrame(full, index=aligned.index, columns=cols)
 
 
 # =============================================================================
@@ -2428,14 +2462,23 @@ class RiskManager:
                 if t.tp_level_hit == 2 and low <= t.take_profit_3:
                     self._close(t, ts, t.take_profit_3, "closed_tp3"); continue
 
+    def _trade_cost(self, t: Trade) -> float:
+        """Round-trip cost = spread × position_size × contract_size.
+        For gold: spread≈$0.30–$2.50/oz → $30–$250 per lot per round-trip.
+        """
+        return self.config.spread_avg * t.position_size * self.config.contract_size
+
     def _close(self, t: Trade, ts: datetime, exit_price: float, status: str):
         t.exit_time = ts; t.exit_price = exit_price
         if t.direction == TradeDirection.LONG:
-            pnl = (exit_price - t.entry_price) * t.position_size * self.config.contract_size
+            gross_pnl = (exit_price - t.entry_price) * t.position_size * self.config.contract_size
         else:
-            pnl = (t.entry_price - exit_price) * t.position_size * self.config.contract_size
-        if not np.isfinite(pnl):
-            pnl = 0.0
+            gross_pnl = (t.entry_price - exit_price) * t.position_size * self.config.contract_size
+        if not np.isfinite(gross_pnl):
+            gross_pnl = 0.0
+        # Deduct realistic round-trip spread cost
+        cost = self._trade_cost(t)
+        pnl = gross_pnl - cost
         max_swing = max(abs(self.equity), 1.0)
         pnl = float(np.clip(pnl, -max_swing, max_swing))
         t.pnl = pnl
@@ -2493,10 +2536,20 @@ class RiskManager:
 
     @staticmethod
     def _sharpe(pnls: List[float]) -> float:
-        if len(pnls) < 2: return 0.0
+        """Compute Sharpe from per-trade PnLs.
+        Annualisation assumes ~1 trade per day (conservative for 1m systems).
+        Previously used sqrt(252*24*60) which assumed one trade every minute —
+        physically impossible and inflated Sharpe by ~25×.
+        """
+        if len(pnls) < 2:
+            return 0.0
         a = np.array(pnls)
-        if a.std() == 0: return 0.0
-        return float(a.mean() / a.std() * np.sqrt(252 * 24 * 60))
+        if a.std() == 0:
+            return 0.0
+        # Conservative: assume ~1 trade/day on average for a 1m strategy.
+        # Realistic active 1m systems make 2–10 trades/day.
+        trades_per_day = 1.0
+        return float(a.mean() / a.std() * np.sqrt(252 * trades_per_day))
 
 
 # =============================================================================
@@ -2752,9 +2805,14 @@ class PrecisionTradingSystem:
             return None
         if self.current_regime == Regime.MEAN_REVERTING and abs(signal) > 1:
             signal = int(np.sign(signal))
-        if confidence < 0.22:
+        if confidence < getattr(self.config, 'confidence_threshold', 0.22):
             return None
-        hour = pd.Timestamp(ts).hour
+        # Extract hour from timestamp column if ts is an integer index
+        if isinstance(ts, int):
+            ts_val = df["timestamp"].iloc[-1] if "timestamp" in df.columns else ts
+            hour = pd.Timestamp(ts_val).hour
+        else:
+            hour = pd.Timestamp(ts).hour
         if self.asset in (Asset.XAUUSD, Asset.EURUSD, Asset.GBPUSD):
             in_london = self.config.london_start <= hour <= self.config.london_end
             in_ny     = self.config.ny_start     <= hour <= self.config.ny_end
@@ -2766,7 +2824,7 @@ class PrecisionTradingSystem:
             direction = TradeDirection.SHORT
         else:
             return None
-        if self.asset == Asset.XAUUSD:
+        if getattr(self.config, 'use_ema_filter', False) and self.asset == Asset.XAUUSD:
             ema55 = df["close"].ewm(span=55).mean().iloc[-1]
             if direction == TradeDirection.LONG  and df["close"].iloc[-1] < ema55:
                 return None

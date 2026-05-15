@@ -20,7 +20,7 @@ Features:
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Tuple
 from datetime import datetime
 from scipy import stats
 
@@ -386,7 +386,7 @@ def run_backtest(
     else:
         dsr = 0.0
 
-    return BacktestResult(
+    result = BacktestResult(
         trades=trades,
         equity_curve=equity_curve,
         timestamps=timestamps,
@@ -409,6 +409,27 @@ def run_backtest(
         initial_capital=initial_capital,
         final_capital=capital,
     )
+
+    # ── Validation sanity check ─────────────────────────────────────────
+    if pnls:
+        try:
+            from services.backtest_validator import BacktestValidator
+            validator = BacktestValidator()
+            returns_series = pd.Series(pnls)
+            report = validator.validate(
+                backtest_returns=returns_series,
+                n_trials=max(1, n_trials_for_dsr),
+            )
+            if report.errors:
+                print("\n" + report.summary())
+            elif report.warnings:
+                print("\n[BACKTEST VALIDATION WARNINGS]")
+                for w in report.warnings:
+                    print(f"  ⚠️  {w}")
+        except Exception as e:
+            print(f"[Validation check skipped: {e}]")
+
+    return result
 
 
 def walk_forward_backtest(

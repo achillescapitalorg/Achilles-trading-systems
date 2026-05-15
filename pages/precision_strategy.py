@@ -1088,8 +1088,8 @@ def _yfinance_fetch(symbol: str):
         # the prebuilt CSV in data/historical for reliability.
         try:
             interval_yf = yf_intervals.get(interval, "1m")
-            if interval == "1m" and days > 7:
-                # Use prebuilt 1m CSV
+            if interval == "1m":
+                # yfinance limits 1m to ~7 days; use prebuilt CSV or cap period
                 csv = os.path.join(DATA_DIR, "historical", f"{symbol}_1m.csv")
                 if os.path.exists(csv):
                     df = pd.read_csv(csv, index_col="timestamp", parse_dates=["timestamp"])
@@ -1098,7 +1098,10 @@ def _yfinance_fetch(symbol: str):
                     df = df[["open", "high", "low", "close", "volume"]]
                     df = df.loc[(df.index >= pd.Timestamp(start, tz="UTC"))
                                 & (df.index <= pd.Timestamp(end, tz="UTC"))]
-                    return df
+                    if not df.empty:
+                        return df
+                # Fallback: cap at 5d to stay well under Yahoo's 8-day limit
+                days = min(days, 5)
             df = fetch_yahoo_finance_data(symbol, period=f"{days+2}d", interval=interval_yf)
             if df is None or df.empty:
                 return pd.DataFrame()

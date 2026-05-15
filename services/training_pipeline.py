@@ -1484,7 +1484,7 @@ def run_training(
         mds = get_market_data_service()
         
         def default_fetch(start, end, interval):
-            return mds.fetch_history(asset, period="60d", interval=interval)
+            return mds.fetch_history_range(asset, start=start, end=end, interval=interval)
         
         fetch_fn = default_fetch
     

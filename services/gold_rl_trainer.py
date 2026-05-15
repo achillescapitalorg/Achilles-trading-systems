@@ -11,17 +11,26 @@ Improved version with:
 """
 
 import os
+import sys
 import json
 import time
 import pickle
 import threading
 import warnings
+from contextlib import redirect_stderr
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
 
 warnings.filterwarnings("ignore")
+
+# Suppress yfinance's misleading "delisted" stderr spam
+_YF_NULL = open(os.devnull, "w")
+
+
+def _suppress_yf_stderr():
+    return redirect_stderr(_YF_NULL)
 
 try:
     import torch
@@ -138,14 +147,15 @@ class GoldRLTrainer:
             chunk_end   = end_dt - timedelta(days=offset)
             chunk_start = end_dt - timedelta(days=min(offset + 7, max_days))
             try:
-                df_chunk = yf.download(
-                    self.GOLD_YF_SYMBOL,
-                    start=chunk_start.strftime("%Y-%m-%d"),
-                    end=chunk_end.strftime("%Y-%m-%d"),
-                    interval="1m",
-                    progress=False,
-                    auto_adjust=True,
-                )
+                with _suppress_yf_stderr():
+                    df_chunk = yf.download(
+                        self.GOLD_YF_SYMBOL,
+                        start=chunk_start.strftime("%Y-%m-%d"),
+                        end=chunk_end.strftime("%Y-%m-%d"),
+                        interval="1m",
+                        progress=False,
+                        auto_adjust=True,
+                    )
                 if not df_chunk.empty:
                     chunks.append(df_chunk)
                     print(f"  chunk {chunk_start.date()} → {chunk_end.date()}: {len(df_chunk)} bars")
@@ -162,13 +172,14 @@ class GoldRLTrainer:
         if len(df) < 1000:
             print(f"[GoldRL] 1m data sparse ({len(df)} bars) — falling back to 15m")
             try:
-                df = yf.download(
-                    self.GOLD_YF_SYMBOL,
-                    period=f"{months_back * 30}d",
-                    interval="15m",
-                    progress=False,
-                    auto_adjust=True,
-                )
+                with _suppress_yf_stderr():
+                    df = yf.download(
+                        self.GOLD_YF_SYMBOL,
+                        period=f"{months_back * 30}d",
+                        interval="15m",
+                        progress=False,
+                        auto_adjust=True,
+                    )
             except Exception as e:
                 print(f"[GoldRL] 15m fallback failed: {e}")
                 return pd.DataFrame()
