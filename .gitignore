@@ -116,6 +116,12 @@ data/feature_store/
 # NOTE: gold CSV and regime cache are tracked (under 100MB each)
 data/beta_testing/processed/models/*.csv
 data/beta_testing/processed/models/*.json
+# Exclude huge serialized dataframes (>100MB)
+data/beta_testing/processed/models/data_split.pkl
+data/beta_testing/processed/models/df_clean.pkl
+data/beta_testing/processed/models/df_v9.pkl
+data/beta_testing/processed/models/features.pkl
+data/beta_testing/processed/models/features_v9.pkl
 data/cross_asset/
 
 # All JSON caches at root data level
