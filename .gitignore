@@ -95,36 +95,60 @@ coverage.xml
 cover/
 
 # =============================================================================
-# Project-specific: Generated Data, Models, Cache, Databases
+# Large Binary Artefacts (Models, Checkpoints)
 # =============================================================================
-# Large binary artefacts (models, scalers, checkpoints)
 *.pt
 *.pkl
 *.pth
 *.h5
 *.onnx
+*.ubj
 
-# Databases & caches
+# =============================================================================
+# Data & Cache (Large / Generated)
+# =============================================================================
+# Raw data
+data/beta_testing/kaggle_raw/
+data/historical/
+data/feature_store/
+
+# Processed data & cache
+data/beta_testing/processed/gold_2025_2026.csv
+data/beta_testing/processed/regime_cache/
+data/beta_testing/processed/models/*.csv
+data/beta_testing/processed/models/*.json
+data/cross_asset/
+
+# All JSON caches at root data level
+data/*.json
 data/*.db
 data/*.db-journal
-data/*.db_cache.*
-data/*.json
-data/yf_cache/
-data/experiments/
-data/feature_store/
-data/historical/
-data/models/
-*.db
-*.db-journal
-
-# Backtest / trading memory
-trading_memory.db*
-precision_backtest.db*
-
-# News cache
 data/news_cache.json
+data/yf_cache/
 
-# Graphify generated artefacts (keep report + index)
+# =============================================================================
+# Logs & Temp
+# =============================================================================
+*.log
+*.out
+*.bak
+*.tmp
+*.txt
+!requirements.txt
+!README.txt
+wget-log
+report.txt
+improvement_report.txt
+scripts/*_log.txt
+
+# =============================================================================
+# Checkpoints
+# =============================================================================
+.checkpoint_*.md
+
+# =============================================================================
+# Graphify
+# =============================================================================
 graphify-out/cache/
 graphify-out/graph.html
 graphify-out/graph.json
@@ -133,23 +157,9 @@ graphify-out/new_extraction.json
 graphify-out/.graphify_*
 
 # =============================================================================
-# Binaries / Archives / Generated docs
+# Databases
 # =============================================================================
-*.zip
-*.exe
-*.pdf
-*.log
-*.out
-*.bak
-*.tmp
-wget-log
-report.txt
-improvement_report.txt
-
-# =============================================================================
-# Misc
-# =============================================================================
-tmp/
-temp/
-
-
+*.db
+*.db-journal
+trading_memory.db*
+precision_backtest.db*

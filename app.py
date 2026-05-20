@@ -2422,6 +2422,12 @@ app.layout = dbc.Container(fluid=True, children=[
                     active="exact",
                     style={"color": COLORS["info"], "fontSize": "12px", "fontWeight": "bold"},
                 ),
+                dbc.NavLink(
+                    [html.Span("🔬", style={"marginRight": "4px"}), "Beta"],
+                    href="/beta-dashboard",
+                    active="exact",
+                    style={"color": COLORS["warning"], "fontSize": "12px", "fontWeight": "bold"},
+                ),
             ], style={"marginLeft": "auto"}),
         ]),
         color=COLORS["surface"],
@@ -2842,6 +2848,9 @@ def render_page(pathname):
     if pathname == "/precision":
         from pages.precision_strategy import layout as precision_layout
         return precision_layout
+    if pathname == "/beta-dashboard":
+        from pages.beta_dashboard import layout as beta_dashboard_layout
+        return beta_dashboard_layout
     return get_dashboard_layout()
 
 
@@ -6080,17 +6089,18 @@ def update_unified_recommendation(symbol, n, pathname):
 import pages.smma_strategy        # noqa: E402  — registers @callback for /strategy
 import pages.news                 # noqa: E402  — registers @callback for /news
 import pages.precision_strategy   # noqa: E402  — registers @callback for /precision
+import pages.beta_dashboard       # noqa: E402  — registers @callback for /beta-dashboard
 
 
 # Run the app
 if __name__ == "__main__":
     print("=" * 60)
-    print("🚀 Professional Trading Terminal - Dash Frontend")
+    print("Professional Trading Terminal - Dash Frontend")
     print("=" * 60)
-    print(f"📊 Data Source: Yahoo Finance (Real-time)")
-    print(f"🌐 Starting Dash server on http://localhost:8050")
+    print("Data Source: Yahoo Finance (Real-time)")
+    print("Starting Dash server on http://localhost:8050")
     print("=" * 60)
-    print("📈 Available Instruments:")
+    print("Available Instruments:")
     for inst in INSTRUMENTS:
         print(f"   {inst['symbol']} - {inst['name']} ({inst['yf']})")
     print("=" * 60)

@@ -1,0 +1,18 @@
+{
+  "id": "achillescapital/notebookf4e2a1d5b2",
+  "id_no": 119506200,
+  "title": "notebookf4e2a1d5b2",
+  "code_file": "notebookf4e2a1d5b2.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "dataset_sources": [
+    "novandraanugrah/xauusd-gold-price-historical-data-2004-2024"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

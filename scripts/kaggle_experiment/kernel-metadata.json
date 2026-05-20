@@ -1,0 +1,13 @@
+{
+  "id": "achillescapital/gold-1m-model-experiments",
+  "title": "Gold 1m Model Experiments",
+  "code_file": "gold_experiments.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "dataset_sources": ["novandraanugrah/xauusd-gold-price-historical-data-2004-2024"],
+  "competition_sources": [],
+  "kernel_sources": []
+}
