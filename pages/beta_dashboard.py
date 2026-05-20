@@ -24,6 +24,7 @@ from beta_testing.models.lgb_model import Gold1mLightGBM
 from beta_testing.models.xgb_model import Gold1mXGBoost
 from beta_testing.models.rf_model import Gold1mRandomForest
 import regime_integration as ri
+from regime_integration_v2 import IntegratedTradingSystem
 from sentiment.fetcher_expanded import ExpandedNewsFetcher
 from sentiment.hardened_pretrade_booster import HardenedPreTradeBooster
 from sentiment.sentiment_hardened import HardenedSentimentAnalyzer
@@ -100,6 +101,9 @@ class ModelCache:
 
 _model_cache = ModelCache()
 
+# ── Microstructure + Risk Manager Integration ───────────────────────────
+_trading_system = IntegratedTradingSystem(account_balance=10000.0)
+
 
 # ── Data cache (load once, reuse in callback) ───────────────────────────
 _df_cache = None
@@ -148,7 +152,7 @@ def _generate_live_signals():
 
         if preds:
             avg_prob = np.mean(list(preds.values()))
-            action = "BUY" if avg_prob > 0.55 else "SELL" if avg_prob < 0.45 else "HOLD"
+            action = "BUY" if avg_prob > 0.65 else "SELL" if avg_prob < 0.35 else "HOLD"
             confidence = abs(avg_prob - 0.5) * 2
             signals[h] = {
                 "action": action,
@@ -352,6 +356,43 @@ layout = dbc.Container(
             ])
         ),
 
+        # ── Microstructure Filter Panel ───────────────────────────────
+        _card(
+            "🔬 MICROSTRUCTURE FILTER  ·  OFI + VPIN + Entropy",
+            html.Div([
+                dbc.Row([
+                    dbc.Col(_stat("OFI PROXY", "beta-micro-ofi", COLORS["accent"]), width=2),
+                    dbc.Col(_stat("VPIN", "beta-micro-vpin", COLORS["warning"]), width=2),
+                    dbc.Col(_stat("ENTROPY", "beta-micro-entropy", COLORS["info"]), width=2),
+                    dbc.Col(_stat("HFT ACTIVITY", "beta-micro-hft", COLORS["text_secondary"]), width=2),
+                    dbc.Col(_stat("QUALITY", "beta-micro-quality", COLORS["success"]), width=2),
+                ]),
+                html.Div(id="beta-micro-reason",
+                         children="Microstructure analysis initializing...",
+                         style={"color": COLORS["text_secondary"], "fontSize": "11px",
+                                "marginTop": "10px", "textAlign": "center"}),
+            ])
+        ),
+
+        # ── Risk Manager Panel ────────────────────────────────────────
+        _card(
+            "🛡️ RISK MANAGER  ·  Live P&L + Drawdown Monitoring",
+            html.Div([
+                dbc.Row([
+                    dbc.Col(_stat("BALANCE", "beta-risk-balance", COLORS["success"]), width=2),
+                    dbc.Col(_stat("DAILY PnL", "beta-risk-daily-pnl", COLORS["info"]), width=2),
+                    dbc.Col(_stat("WIN RATE", "beta-risk-winrate", COLORS["accent"]), width=2),
+                    dbc.Col(_stat("MAX DD", "beta-risk-maxdd", COLORS["danger"]), width=2),
+                    dbc.Col(_stat("CONSEC LOSS", "beta-risk-consec", COLORS["warning"]), width=2),
+                    dbc.Col(_stat("HALTED", "beta-risk-halted", COLORS["danger"]), width=2),
+                ]),
+                html.Div(id="beta-risk-reason",
+                         children="Risk manager initializing...",
+                         style={"color": COLORS["text_secondary"], "fontSize": "11px",
+                                "marginTop": "10px", "textAlign": "center"}),
+            ])
+        ),
+
         # ── Per-Model Cards ───────────────────────────────────────────
         html.H4("Per-Model Breakdown", style={"color": COLORS["accent"], "marginTop": "20px", "marginBottom": "12px"}),
         dbc.Row(id="beta-model-cards", className="g-3"),
@@ -417,6 +458,19 @@ layout = dbc.Container(
     Output("beta-l5-swan", "children"),
     Output("beta-cooldown", "children"),
     Output("beta-sentiment-reason", "children"),
+    # Microstructure outputs
+    Output("beta-micro-ofi", "children"),
+    Output("beta-micro-vpin", "children"),
+    Output("beta-micro-entropy", "children"),
+    Output("beta-micro-hft", "children"),
+    Output("beta-micro-quality", "children"),
+    # Risk manager outputs
+    Output("beta-risk-balance", "children"),
+    Output("beta-risk-daily-pnl", "children"),
+    Output("beta-risk-winrate", "children"),
+    Output("beta-risk-maxdd", "children"),
+    Output("beta-risk-consec", "children"),
+    Output("beta-risk-halted", "children"),
     # Existing outputs
     Output("beta-model-cards", "children"),
     Output("beta-metrics-row", "children"),
@@ -473,6 +527,10 @@ def refresh_beta_dashboard(_n_intervals):
             "—", "—", "—", "—", "—", "—",
             "—", "—", "—", "—", "—", "—",
             "Sentiment system initializing...",
+            # Microstructure
+            "—", "—", "—", "—", "—",
+            # Risk manager
+            "—", "—", "—", "—", "—", "—",
             # Existing
             [empty] * 3,
             [empty] * 4,
@@ -635,6 +693,50 @@ def refresh_beta_dashboard(_n_intervals):
     else:
         sentiment_reason_display = sentiment_reason
 
+    # ── Microstructure + Risk Manager ───────────────────────────
+    micro_ofi_str = "—"
+    micro_vpin_str = "—"
+    micro_entropy_str = "—"
+    micro_hft_str = "—"
+    micro_quality_str = "—"
+    risk_balance_str = "—"
+    risk_daily_pnl_str = "—"
+    risk_winrate_str = "—"
+    risk_maxdd_str = "—"
+    risk_consec_str = "—"
+    risk_halted_str = "—"
+
+    if df is not None and _trading_system is not None:
+        try:
+            micro = _trading_system._analyze_microstructure(df)
+            micro_ofi_str = f"{micro['ofi_proxy']:.2f}"
+            micro_vpin_str = html.Span([
+                f"{micro['vpin_proxy']:.2f} ",
+                html.Small("✅" if micro['vpin_proxy'] < 0.6 else "❌", style={"fontSize": "10px"}),
+            ])
+            micro_entropy_str = html.Span([
+                f"{micro['sign_entropy']:.2f} ",
+                html.Small("✅" if micro['sign_entropy'] < 0.7 else "❌", style={"fontSize": "10px"}),
+            ])
+            micro_hft_str = f"{micro['hft_activity']:.2f}"
+            micro_quality_str = f"{micro['quality_score']:.2f}"
+
+            risk_data = _trading_system.get_dashboard_data()
+            risk_balance_str = f"${risk_data['account_balance']:,.2f}"
+            risk_daily_pnl_str = f"${risk_data['daily_pnl']:,.2f}"
+            risk_winrate_str = f"{risk_data['win_rate']:.1%}"
+            risk_maxdd_str = f"{risk_data['max_drawdown_pct']:.2%}"
+            risk_consec_str = f"{risk_data['consecutive_losses']}/3"
+            if risk_data['trading_halted']:
+                risk_halted_str = html.Span([
+                    "YES ",
+                    html.Small(risk_data['halt_reason'], style={"color": COLORS["danger"], "fontSize": "9px"}),
+                ], style={"color": COLORS["danger"]})
+            else:
+                risk_halted_str = html.Span("NO", style={"color": COLORS["success"]})
+        except Exception as e:
+            print(f"[BetaDashboard] Microstructure/Risk error: {e}")
+
     # ── Per-Model Cards ─────────────────────────────────────────
     model_cards = []
     for h in HORIZONS:
@@ -784,6 +886,19 @@ def refresh_beta_dashboard(_n_intervals):
         l5_status,
         cooldown_status,
         sentiment_reason_display,
+        # Microstructure
+        micro_ofi_str,
+        micro_vpin_str,
+        micro_entropy_str,
+        micro_hft_str,
+        micro_quality_str,
+        # Risk manager
+        risk_balance_str,
+        risk_daily_pnl_str,
+        risk_winrate_str,
+        risk_maxdd_str,
+        risk_consec_str,
+        risk_halted_str,
         # Existing
         model_cards,
         metrics,

@@ -12,6 +12,7 @@ from pathlib import Path
 # Add project root for cross-asset import
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from features.cross_asset_features import compute_cross_asset_features
+from features.features_microstructure import MicrostructureFeatureEngine
 
 
 def compute_1m_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -148,6 +149,15 @@ def compute_1m_features(df: pd.DataFrame) -> pd.DataFrame:
             f = pd.concat([f, cross], axis=1)
     except Exception as e:
         print(f"[Features] Cross-asset features failed: {e}")
+
+    # ==================== MICROSTRUCTURE FEATURES ====================
+    try:
+        micro_engine = MicrostructureFeatureEngine(tick_size=0.01)
+        micro_features = micro_engine.generate_all_features(df)
+        if not micro_features.empty:
+            f = pd.concat([f, micro_features], axis=1)
+    except Exception as e:
+        print(f"[Features] Microstructure features failed: {e}")
 
     # Clean
     f = f.replace([np.inf, -np.inf], np.nan)
