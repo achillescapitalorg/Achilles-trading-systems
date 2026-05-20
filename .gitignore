@@ -98,11 +98,11 @@ cover/
 # Large Binary Artefacts (Models, Checkpoints)
 # =============================================================================
 *.pt
-*.pkl
 *.pth
 *.h5
 *.onnx
-*.ubj
+# NOTE: *.pkl and *.ubj model files are tracked (under 100MB each)
+# Kaggle raw data is excluded separately below
 
 # =============================================================================
 # Data & Cache (Large / Generated)
@@ -113,8 +113,7 @@ data/historical/
 data/feature_store/
 
 # Processed data & cache
-data/beta_testing/processed/gold_2025_2026.csv
-data/beta_testing/processed/regime_cache/
+# NOTE: gold CSV and regime cache are tracked (under 100MB each)
 data/beta_testing/processed/models/*.csv
 data/beta_testing/processed/models/*.json
 data/cross_asset/
