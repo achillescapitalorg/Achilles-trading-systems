@@ -501,6 +501,31 @@ def refresh_beta_dashboard(_n_intervals):
     
     regime_pred = _get_regime_prediction(df, raw_signal=raw_signal) if df is not None else None
 
+    # ── AUTHORITATIVE DECISION: v2 full pipeline ─────────────────
+    signal_v2 = None
+    if df is not None and _trading_system is not None:
+        try:
+            primary = signals.get(60, signals.get(20, {}))
+            preds = primary.get("preds", {})
+            votes = [1 if p > 0.5 else -1 for p in preds.values()]
+            ensemble_vote = 1 if primary.get("raw_prob", 0.5) > 0.5 else -1
+            model_agreement = sum(1 for v in votes if v == ensemble_vote) / max(len(votes), 1)
+
+            precomputed = {
+                "direction": primary.get("action", "HOLD"),
+                "confidence": primary.get("confidence", 0),
+                "model_agreement": model_agreement,
+            }
+            signal_v2 = _trading_system.process_bar(
+                df_1m=df,
+                signal_15m=None,
+                current_time=datetime.now(),
+                live_price=df["close"].iloc[-1],
+                precomputed_ensemble=precomputed,
+            )
+        except Exception as e:
+            print(f"[BetaDashboard] v2 process_bar error: {e}")
+
     # Empty states
     empty = dbc.Col(
         html.Div("—", style={"color": COLORS["text_secondary"], "fontSize": "20px", "fontWeight": "bold"}),
@@ -623,6 +648,45 @@ def refresh_beta_dashboard(_n_intervals):
         raw_signal_str = adjusted_signal_str = stop_str = tp_str = rr_str = "—"
         reason_str = "Regime models not loaded yet"
 
+    # Override with v2's authoritative decision (all 7 filters + risk manager)
+    if signal_v2 is not None:
+        v2_action = signal_v2.final_decision
+        # Map v2 decisions to display labels
+        if v2_action == 'OPEN_LONG':
+            final_action = 'BUY'
+        elif v2_action == 'OPEN_SHORT':
+            final_action = 'SELL'
+        else:
+            final_action = 'HOLD'
+        final_conf = signal_v2.ensemble_confidence
+        stop_loss = signal_v2.stop_loss if signal_v2.stop_loss > 0 else None
+        take_profit = signal_v2.take_profit if signal_v2.take_profit > 0 else None
+        risk_reward = signal_v2.risk_reward_ratio
+        reason = signal_v2.decision_reason
+
+        adjusted_signal_str = f"{final_action} @ {final_conf:.1%}"
+        stop_str = f"{stop_loss:.2f}" if stop_loss else "—"
+        tp_str = f"{take_profit:.2f}" if take_profit else "—"
+        if risk_reward < 1.0:
+            rr_str = html.Span([
+                f"{risk_reward:.2f} ",
+                html.Small("⚠️ Risk>Reward", style={"color": COLORS["danger"], "fontSize": "10px"}),
+            ], style={"color": COLORS["danger"]})
+        else:
+            rr_str = f"{risk_reward:.2f}"
+        reason_str = reason if reason else "No adjustment needed"
+
+        # Override regime display with v2's actual state
+        position_mult_str = f"{signal_v2.regime_position_multiplier:.2f}x"
+        if _trading_system.risk_manager and _trading_system.risk_manager.trading_halted:
+            trading_status_str = "HALTED"
+        elif _trading_system.risk_manager and _trading_system.risk_manager.open_trade is not None:
+            trading_status_str = "TRADE OPEN"
+        elif v2_action == 'BLOCKED':
+            trading_status_str = "BLOCKED"
+        else:
+            trading_status_str = "ACTIVE"
+
     # ── Sentiment Analysis ──────────────────────────────────────
     fetcher = ExpandedNewsFetcher()
     headlines_df = fetcher.fetch_all(use_demo=True)
@@ -635,8 +699,8 @@ def refresh_beta_dashboard(_n_intervals):
 
     # Build trade signal for sentiment boost
     trade_signal = {
-        'action': final_action if regime_pred else action,
-        'confidence': final_conf if regime_pred else conf,
+        'action': final_action,
+        'confidence': final_conf,
         'price': price,
     }
 
