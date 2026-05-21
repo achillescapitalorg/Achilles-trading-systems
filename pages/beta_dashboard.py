@@ -151,14 +151,10 @@ def _load_df():
 
             for sym in MT5_GOLD_SYMBOLS:
                 if mt5.symbol_select(sym, True):
-                    # Force server download with explicit time range (bypass local cache)
-                    now = datetime.now()
-                    past = now - timedelta(hours=12)
-                    rates = mt5.copy_rates_from(sym, mt5.TIMEFRAME_M1, past, now)
+                    rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M1, 0, 500)
                     if rates is not None and len(rates) > 0:
-                        rates = rates[-500:]  # Keep last 500 bars from 12h window
                         selected_symbol = sym
-                        print(f"[MT5] Fetched {len(rates)} bars from server ({past.strftime('%H:%M')} to {now.strftime('%H:%M')})")
+                        print(f"[MT5] Selected symbol: {sym}")
                         break
 
             if selected_symbol is None:
@@ -174,7 +170,8 @@ def _load_df():
             df_live = df_live.sort_values("date").set_index("date")
 
             last_bar_time = df_live.index[-1]
-            if (datetime.now() - last_bar_time).total_seconds() < 120:
+            age_sec = (datetime.now() - last_bar_time).total_seconds()
+            if age_sec < 120:
                 _df_cache = df_live
                 _df_cache_time = datetime.now()
                 _df_cache_source = "mt5"
@@ -183,6 +180,17 @@ def _load_df():
                 return _df_cache
             else:
                 mt5.shutdown()
+                print("\n" + "="*70)
+                print("WARNING: MT5 returned stale M1 bars!")
+                print(f"  Last bar age: {age_sec/60:.0f} minutes")
+                print("  Likely cause: mt5.initialize() connected to the WRONG terminal.")
+                print("  FIX:")
+                print("    1. Close ALL MetaTrader 5 terminals")
+                print("    2. Open ONLY ONE terminal (your Exness account)")
+                print("    3. Open the XAUUSDm M1 chart")
+                print("    4. Wait 1 minute for M1 bars to build")
+                print("    5. Restart the dashboard")
+                print("="*70 + "\n")
                 raise RuntimeError("MT5 data stale")
 
         except Exception as e:
