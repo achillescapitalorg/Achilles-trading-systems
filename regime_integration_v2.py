@@ -53,6 +53,12 @@ try:
 except ImportError:
     ri = None
 
+try:
+    from beta_testing.features_15m import resample_to_15m, compute_15m_features
+except ImportError:
+    resample_to_15m = None
+    compute_15m_features = None
+
 
 @dataclass
 class SignalPackage:
@@ -128,6 +134,14 @@ class IntegratedTradingSystem:
         # Risk manager
         self.risk_manager = RiskManager(account_balance=account_balance) if RiskManager else None
 
+        # 15m model cache (lazy load)
+        self._15m_model_cache = {
+            'lgb': None,
+            'xgb': None,
+            'rf': None,
+            'loaded': False,
+        }
+
         # State
         self.last_15m_signal = None
         self.feature_cache = {}
@@ -161,9 +175,9 @@ class IntegratedTradingSystem:
         if signal_15m is not None:
             self.last_15m_signal = signal_15m
 
-        # Default to HOLD if no 15m signal
+        # Default to real 15m prediction if no external signal provided
         if self.last_15m_signal is None:
-            self.last_15m_signal = {'direction': 'HOLD', 'strength': 0.0}
+            self.last_15m_signal = self._predict_15m(df_1m)
 
         # Step 1: Generate microstructure features
         micro = self._analyze_microstructure(df_1m)
@@ -275,6 +289,98 @@ class IntegratedTradingSystem:
             return tr.rolling(period, min_periods=1).mean().iloc[-1]
         except Exception:
             return 0.5
+
+    # =====================================================================
+    # 15M SIGNAL GENERATION
+    # =====================================================================
+    def _load_15m_models(self):
+        """Lazy-load 15m LGB/XGB/RF models."""
+        if self._15m_model_cache['loaded']:
+            return
+
+        PROJECT_ROOT = Path(__file__).parent.resolve()
+        MODEL_DIR = PROJECT_ROOT / "data" / "beta_testing" / "processed" / "models"
+
+        try:
+            from beta_testing.models.lgb_model import Gold1mLightGBM
+            from beta_testing.models.xgb_model import Gold1mXGBoost
+            from beta_testing.models.rf_model import Gold1mRandomForest
+
+            lgb_path = MODEL_DIR / 'gold_15m_lgb.pkl'
+            xgb_path = MODEL_DIR / 'gold_15m_xgb.ubj'
+            rf_path = MODEL_DIR / 'gold_15m_rf.pkl'
+
+            if lgb_path.exists():
+                m = Gold1mLightGBM()
+                m.load(str(lgb_path))
+                self._15m_model_cache['lgb'] = m
+
+            if xgb_path.exists():
+                m = Gold1mXGBoost()
+                m.load(str(xgb_path))
+                self._15m_model_cache['xgb'] = m
+
+            if rf_path.exists():
+                m = Gold1mRandomForest()
+                m.load(str(rf_path))
+                self._15m_model_cache['rf'] = m
+
+            self._15m_model_cache['loaded'] = True
+            print(f"[15m] Models loaded from {MODEL_DIR}")
+        except Exception as e:
+            print(f"[15m] Model load error: {e}")
+
+    def _predict_15m(self, df_1m: pd.DataFrame) -> Dict:
+        """
+        Generate 15m directional bias from latest 1m bars.
+
+        Returns:
+            {'direction': 'BUY'|'SELL'|'HOLD', 'strength': float}
+        """
+        if resample_to_15m is None or compute_15m_features is None:
+            return {'direction': 'HOLD', 'strength': 0.0}
+
+        self._load_15m_models()
+        if not any(self._15m_model_cache.get(k) for k in ['lgb', 'xgb', 'rf']):
+            return {'direction': 'HOLD', 'strength': 0.0}
+
+        try:
+            # Need enough 1m bars to form meaningful 15m bars
+            if len(df_1m) < 200:
+                return {'direction': 'HOLD', 'strength': 0.0}
+
+            # Resample last ~500 bars to 15m
+            df_15m = resample_to_15m(df_1m.tail(500))
+            if len(df_15m) < 10:
+                return {'direction': 'HOLD', 'strength': 0.0}
+
+            features = compute_15m_features(df_15m)
+
+            # Drop target columns if present
+            target_cols = [c for c in features.columns if c.startswith('target_')]
+            X = features.drop(columns=target_cols, errors='ignore')
+            X_latest = X.iloc[[-1]]
+
+            preds = {}
+            if self._15m_model_cache['lgb'] is not None:
+                preds['lgb'] = float(self._15m_model_cache['lgb'].predict(X_latest)[0])
+            if self._15m_model_cache['xgb'] is not None:
+                preds['xgb'] = float(self._15m_model_cache['xgb'].predict(X_latest)[0])
+            if self._15m_model_cache['rf'] is not None:
+                preds['rf'] = float(self._15m_model_cache['rf'].predict(X_latest)[0])
+
+            if not preds:
+                return {'direction': 'HOLD', 'strength': 0.0}
+
+            avg_prob = np.mean(list(preds.values()))
+            direction = 'BUY' if avg_prob > 0.55 else 'SELL' if avg_prob < 0.45 else 'HOLD'
+            strength = abs(avg_prob - 0.5) * 2
+
+            return {'direction': direction, 'strength': strength}
+
+        except Exception as e:
+            print(f"[15m] Prediction error: {e}")
+            return {'direction': 'HOLD', 'strength': 0.0}
 
     # =====================================================================
     # STEP 2: ENSEMBLE PREDICTION (fallback if no precomputed)

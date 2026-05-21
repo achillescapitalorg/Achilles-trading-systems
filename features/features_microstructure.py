@@ -82,7 +82,7 @@ class MicrostructureFeatureEngine:
     # =========================================================================
     def compute_vpin_proxy(self, df: pd.DataFrame, window: int = 50) -> pd.Series:
         """
-        VPIN proxy using volume-bucket approach.
+        VPIN proxy using volume-bucket approach (vectorized).
 
         High VPIN = toxic flow (informed traders active) = avoid or expect
         large moves. Low VPIN = benign flow = safer to trade.
@@ -93,36 +93,28 @@ class MicrostructureFeatureEngine:
         buy_volume = df['volume'] * (df['close'] > typical_price).astype(float)
         sell_volume = df['volume'] * (df['close'] <= typical_price).astype(float)
 
-        vpin_values = []
+        # Rolling sums
+        total_vol = df['volume'].rolling(window=window, min_periods=1).sum()
+        buy_vol_win = buy_volume.rolling(window=window, min_periods=1).sum()
+        sell_vol_win = sell_volume.rolling(window=window, min_periods=1).sum()
 
-        for i in range(len(df)):
-            start = max(0, i - window + 1)
-            window_slice = df.iloc[start:i+1]
+        # Volume imbalance normalized
+        vol_imbalance = np.abs(buy_vol_win - sell_vol_win) / (total_vol + 1e-9)
 
-            if len(window_slice) < 10:
-                vpin_values.append(0.5)
-                continue
+        # Return component: rolling sum of absolute returns
+        returns = np.abs(df['close'].pct_change().fillna(0))
+        return_component = returns.rolling(window=window, min_periods=1).sum() * 100
 
-            total_vol = window_slice['volume'].sum()
-            if total_vol < self.volume_bucket_size:
-                vpin_values.append(0.5)
-                continue
+        # VPIN = vol_imbalance * return_component
+        vpin = vol_imbalance * return_component
 
-            buy_vol_win = buy_volume.iloc[start:i+1].sum()
-            sell_vol_win = sell_volume.iloc[start:i+1].sum()
+        # Minimum volume bucket check
+        vpin = np.where(total_vol < self.volume_bucket_size, 0.5, vpin)
 
-            # Volume imbalance normalized
-            vol_imbalance = np.abs(buy_vol_win - sell_vol_win) / (total_vol + 1e-9)
+        # Cap at 1.0
+        vpin = np.clip(vpin, 0, 1.0)
 
-            # Return component: sum of absolute returns in window
-            returns = np.abs(window_slice['close'].pct_change().fillna(0))
-            return_component = returns.sum() * 100  # Scale to percentage
-
-            # VPIN = vol_imbalance * return_component, capped at 1.0
-            vpin = min(vol_imbalance * return_component, 1.0)
-            vpin_values.append(vpin)
-
-        return pd.Series(vpin_values, index=df.index)
+        return pd.Series(vpin, index=df.index)
 
     # =========================================================================
     # 3. REALIZED VOLATILITY ESTIMATORS (Gold-Specific)
@@ -241,32 +233,12 @@ class MicrostructureFeatureEngine:
         features = pd.DataFrame(index=df.index)
         returns = df['close'].pct_change()
 
-        # 1. Return sign entropy (run-length distribution)
-        def _sign_entropy(x: pd.Series) -> float:
-            if len(x) < 5:
-                return 0.5
-            signs = np.sign(x)
-            runs = []
-            current_run = 1
-            for i in range(1, len(signs)):
-                if signs.iloc[i] == signs.iloc[i-1]:
-                    current_run += 1
-                else:
-                    runs.append(current_run)
-                    current_run = 1
-            runs.append(current_run)
-
-            if len(runs) <= 1:
-                return 0.5
-
-            probs = np.array(runs) / sum(runs)
-            entropy = -np.sum(probs * np.log2(probs + 1e-9))
-            max_entropy = np.log2(len(runs))
-            return entropy / max_entropy if max_entropy > 0 else 0
-
-        features['sign_entropy'] = returns.rolling(window=window, min_periods=5).apply(
-            _sign_entropy, raw=False
-        )
+        # 1. Return sign entropy (run-length distribution) — vectorized approximation
+        # Fast proxy: ratio of sign changes to total bars in window
+        sign_changes = (np.sign(returns) != np.sign(returns.shift(1))).rolling(
+            window=window, min_periods=5
+        ).sum()
+        features['sign_entropy'] = sign_changes / window
 
         # 2. Price path efficiency (direct vs meandering)
         bar_range = df['high'] - df['low']
