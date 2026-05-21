@@ -143,14 +143,22 @@ def _load_df():
         selected_symbol = None
         try:
             if not mt5.initialize():
-                raise RuntimeError("MT5 terminal not running")
+                raise RuntimeError(f"MT5 init failed: {mt5.last_error()}")
+
+            terminal_info = mt5.terminal_info()
+            if terminal_info:
+                print(f"[MT5] Connected to terminal: {terminal_info.name}, build: {terminal_info.build}")
 
             for sym in MT5_GOLD_SYMBOLS:
                 if mt5.symbol_select(sym, True):
-                    rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M1, 0, 500)
+                    # Force server download with explicit time range (bypass local cache)
+                    now = datetime.now()
+                    past = now - timedelta(hours=12)
+                    rates = mt5.copy_rates_from(sym, mt5.TIMEFRAME_M1, past, now)
                     if rates is not None and len(rates) > 0:
+                        rates = rates[-500:]  # Keep last 500 bars from 12h window
                         selected_symbol = sym
-                        print(f"[MT5] Selected symbol: {sym}")
+                        print(f"[MT5] Fetched {len(rates)} bars from server ({past.strftime('%H:%M')} to {now.strftime('%H:%M')})")
                         break
 
             if selected_symbol is None:
