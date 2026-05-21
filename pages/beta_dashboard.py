@@ -8,7 +8,9 @@ import sys
 import os
 from pathlib import Path
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import yfinance as yf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -105,17 +107,63 @@ _model_cache = ModelCache()
 _trading_system = IntegratedTradingSystem(account_balance=10000.0)
 
 
-# ── Data cache (load once, reuse in callback) ───────────────────────────
+# ── Data cache (live data with CSV fallback) ────────────────────────────
 _df_cache = None
+_df_cache_time = None
+CACHE_TTL_SECONDS = 60  # Refresh live data every 60 seconds
 
 def _load_df():
-    """Load CSV once at module level. Returns cached DataFrame."""
-    global _df_cache
+    """Load live gold data from yfinance, with CSV fallback. Returns cached DataFrame."""
+    global _df_cache, _df_cache_time
+
+    # Try live data first
+    try:
+        if _df_cache is not None and _df_cache_time is not None:
+            if (datetime.now() - _df_cache_time).total_seconds() < CACHE_TTL_SECONDS:
+                return _df_cache
+
+        ticker = yf.Ticker("GC=F")
+        df_live = ticker.history(period="5d", interval="1m")
+
+        if not df_live.empty:
+            df_live = df_live.reset_index()
+            df_live = df_live.rename(columns={
+                'Datetime': 'date',
+                'Open': 'open',
+                'High': 'high',
+                'Low': 'low',
+                'Close': 'close',
+                'Volume': 'volume'
+            })
+            df_live['date'] = pd.to_datetime(df_live['date']).dt.tz_localize(None)
+            df_live = df_live.sort_values("date").reset_index(drop=True)
+
+            # Clean: drop zero volume, forward-fill gaps, drop NaN
+            df_live = df_live[df_live['volume'] > 0]
+            df_live[['open', 'high', 'low', 'close']] = df_live[['open', 'high', 'low', 'close']].ffill()
+            df_live = df_live.dropna(subset=['open', 'high', 'low', 'close', 'volume'])
+
+            last_bar_time = df_live['date'].iloc[-1]
+            if (datetime.now() - last_bar_time).total_seconds() < 600:
+                df_live = df_live.set_index("date").sort_index()
+                _df_cache = df_live
+                _df_cache_time = datetime.now()
+                print(f"[LiveData] Loaded {len(df_live)} live bars. Last: {last_bar_time}")
+                return _df_cache
+            else:
+                print(f"[LiveData] Stale data detected (last bar: {last_bar_time}), falling back to CSV")
+    except Exception as e:
+        print(f"[LiveData] Error fetching live data: {e}")
+
+    # Fallback to CSV
     if _df_cache is None and DATA_PATH.exists():
+        print(f"[LiveData] Loading fallback CSV: {DATA_PATH}")
         df = pd.read_csv(DATA_PATH, parse_dates=["date"])
         df = df.set_index("date").sort_index()
         df = df.drop(columns=[c for c in ["is_original", "minutes_since_last_bar"] if c in df.columns], errors="ignore")
         _df_cache = df
+        _df_cache_time = datetime.now()
+
     return _df_cache
 
 
@@ -594,7 +642,25 @@ def refresh_beta_dashboard(_n_intervals):
         f"{h60_preds.get('rf', 0):.3f}",
     ])
 
-    status = f"Live ✓  •  Last update: {datetime.now().strftime('%H:%M:%S')}  •  Data: {df.index[-1].strftime('%Y-%m-%d %H:%M')}"
+    # Data freshness banner
+    last_bar_time = df.index[-1]
+    is_live = (datetime.now() - last_bar_time).total_seconds() < 600
+    status = html.Div([
+        html.Div(
+            f"{'LIVE' if is_live else 'STALE (CSV Fallback)'} | Last bar: {last_bar_time.strftime('%Y-%m-%d %H:%M')}",
+            style={
+                'color': 'green' if is_live else 'orange',
+                'fontWeight': 'bold',
+                'fontSize': '12px',
+                'marginBottom': '4px',
+                'textAlign': 'center'
+            }
+        ),
+        html.Div(
+            f"Live ✓  •  Last update: {datetime.now().strftime('%H:%M:%S')}  •  Data: {df.index[-1].strftime('%Y-%m-%d %H:%M')}",
+            style={'color': COLORS['text_secondary'], 'fontSize': '10px', 'textAlign': 'center'}
+        ),
+    ])
 
     # ── Regime Data ─────────────────────────────────────────────
     if regime_pred:
