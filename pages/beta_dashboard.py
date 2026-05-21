@@ -121,15 +121,21 @@ _trading_system = IntegratedTradingSystem(account_balance=10000.0)
 # ── Data cache (live data with CSV fallback) ────────────────────────────
 _df_cache = None
 _df_cache_time = None
-CACHE_TTL_SECONDS = 60  # Refresh live data every 60 seconds
+_df_cache_source = None  # "mt5" | "csv"
+CACHE_TTL_LIVE = 60      # Normal cache for live MT5 data
+CACHE_TTL_FALLBACK = 10  # Aggressive retry for CSV fallback
 
 def _load_df():
     """Load live gold data from MT5 broker, with yfinance + CSV fallback."""
-    global _df_cache, _df_cache_time
+    global _df_cache, _df_cache_time, _df_cache_source
 
-    # Check cache
+    print(f"[_load_df] Cache: source={_df_cache_source}, age={(datetime.now()-_df_cache_time).total_seconds() if _df_cache_time else 'None'}s")
+
+    # Check cache — source-aware TTL
     if _df_cache is not None and _df_cache_time is not None:
-        if (datetime.now() - _df_cache_time).total_seconds() < CACHE_TTL_SECONDS:
+        ttl = CACHE_TTL_LIVE if _df_cache_source == "mt5" else CACHE_TTL_FALLBACK
+        if (datetime.now() - _df_cache_time).total_seconds() < ttl:
+            print(f"[_load_df] Returning cached data (source={_df_cache_source}, ttl={ttl}s)")
             return _df_cache
 
     # 1. Try MT5 broker data (primary — real-time from Exness)
@@ -163,6 +169,7 @@ def _load_df():
             if (datetime.now() - last_bar_time).total_seconds() < 120:
                 _df_cache = df_live
                 _df_cache_time = datetime.now()
+                _df_cache_source = "mt5"
                 print(f"[MT5] Loaded {len(df_live)} live bars via {selected_symbol}. Last: {last_bar_time}")
                 mt5.shutdown()
                 return _df_cache
@@ -214,12 +221,15 @@ def _load_df():
 
     # 3. Final fallback to CSV
     if _df_cache is None and DATA_PATH.exists():
-        print(f"[LiveData] Loading fallback CSV: {DATA_PATH}")
+        print(f"[CSV] Loading fallback: {DATA_PATH}")
         df = pd.read_csv(DATA_PATH, parse_dates=["date"])
         df = df.set_index("date").sort_index()
         df = df.drop(columns=[c for c in ["is_original", "minutes_since_last_bar"] if c in df.columns], errors="ignore")
         _df_cache = df
         _df_cache_time = datetime.now()
+        _df_cache_source = "csv"
+        print(f"[CSV] Loaded {len(df)} fallback rows. Last: {df.index[-1]}")
+        return _df_cache
 
     return _df_cache
 
