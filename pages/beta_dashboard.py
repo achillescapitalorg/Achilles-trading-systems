@@ -38,6 +38,10 @@ except ImportError:
     MT5_AVAILABLE = False
     print("[MT5] MetaTrader5 package not installed")
 
+# Exness uses "XAUUSDm" (micro/cent account suffix).  Fallback cascade tries
+# the most common Exness variants before giving up.
+MT5_GOLD_SYMBOLS = ["XAUUSDm", "XAUUSD", "GOLD"]
+
 # ── Paths ───────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 MODELS_DIR = PROJECT_ROOT / "data" / "beta_testing" / "processed" / "models"
@@ -130,14 +134,21 @@ def _load_df():
 
     # 1. Try MT5 broker data (primary — real-time from Exness)
     if MT5_AVAILABLE:
+        selected_symbol = None
         try:
             if not mt5.initialize():
                 raise RuntimeError("MT5 terminal not running")
 
-            if not mt5.symbol_select("XAUUSD", True):
-                raise RuntimeError("XAUUSD not in Market Watch")
+            for sym in MT5_GOLD_SYMBOLS:
+                if mt5.symbol_select(sym, True):
+                    rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M1, 0, 500)
+                    if rates is not None and len(rates) > 0:
+                        selected_symbol = sym
+                        print(f"[MT5] Selected symbol: {sym}")
+                        break
 
-            rates = mt5.copy_rates_from_pos("XAUUSD", mt5.TIMEFRAME_M1, 0, 500)
+            if selected_symbol is None:
+                raise RuntimeError(f"None of {MT5_GOLD_SYMBOLS} available in Market Watch")
 
             if rates is None or len(rates) < 200:
                 raise RuntimeError("Not enough bars")
@@ -152,7 +163,7 @@ def _load_df():
             if (datetime.now() - last_bar_time).total_seconds() < 120:
                 _df_cache = df_live
                 _df_cache_time = datetime.now()
-                print(f"[MT5] Loaded {len(df_live)} live bars. Last: {last_bar_time}")
+                print(f"[MT5] Loaded {len(df_live)} live bars via {selected_symbol}. Last: {last_bar_time}")
                 mt5.shutdown()
                 return _df_cache
             else:

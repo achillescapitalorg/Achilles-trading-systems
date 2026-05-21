@@ -97,7 +97,7 @@ class ExnessMT5Bridge:
     
     # Supported symbols
     SYMBOLS = {
-        'gold': 'XAUUSD',
+        'gold': 'XAUUSDm',
         'btc': 'BTCUSD',
         'eth': 'ETHUSD',
         'eurusd': 'EURUSD',
@@ -292,7 +292,7 @@ class ExnessMT5Bridge:
         
         # Base prices
         base_prices = {
-            'XAUUSD': 2000,
+            'XAUUSDm': 2000,
             'BTCUSD': 45000,
             'ETHUSD': 2500,
             'EURUSD': 1.08,
@@ -304,7 +304,7 @@ class ExnessMT5Bridge:
         np.random.seed(42)
         
         # Daily volatility based on asset
-        vol_map = {'XAUUSD': 0.012, 'BTCUSD': 0.035, 'ETHUSD': 0.045}
+        vol_map = {'XAUUSDm': 0.012, 'BTCUSD': 0.035, 'ETHUSD': 0.045}
         daily_vol = vol_map.get(symbol, 0.01)
         
         # Generate returns with slight upward drift
@@ -353,7 +353,7 @@ class ExnessMT5Bridge:
         # For paper trading or when MT5 not available
         if not MT5_AVAILABLE or isinstance(self, PaperTradingBridge):
             base_prices = {
-                'XAUUSD': 2000,
+                'XAUUSDm': 2000,
                 'BTCUSD': 45000,
                 'ETHUSD': 2500,
                 'EURUSD': 1.08,
