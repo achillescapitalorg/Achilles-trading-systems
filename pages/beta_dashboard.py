@@ -149,7 +149,7 @@ def _load_df():
             df_live = df_live.sort_values("date").set_index("date")
 
             last_bar_time = df_live.index[-1]
-            if (datetime.now() - last_bar_time).total_seconds() < 600:
+            if (datetime.now() - last_bar_time).total_seconds() < 120:
                 _df_cache = df_live
                 _df_cache_time = datetime.now()
                 print(f"[MT5] Loaded {len(df_live)} live bars. Last: {last_bar_time}")
@@ -190,7 +190,7 @@ def _load_df():
             df_live = df_live.dropna(subset=['open', 'high', 'low', 'close', 'volume'])
 
             last_bar_time = df_live['date'].iloc[-1]
-            if (datetime.now() - last_bar_time).total_seconds() < 600:
+            if (datetime.now() - last_bar_time).total_seconds() < 120:
                 df_live = df_live.set_index("date").sort_index()
                 _df_cache = df_live
                 _df_cache_time = datetime.now()
@@ -576,6 +576,47 @@ layout = dbc.Container(
 def refresh_beta_dashboard(_n_intervals):
     _model_cache.load()
     signals, df = _generate_live_signals()
+
+    # ── Data freshness gate ─────────────────────────────────────
+    is_live = False
+    if df is not None and len(df) > 0:
+        age_sec = (datetime.now() - df.index[-1]).total_seconds()
+        is_live = age_sec < 120
+    else:
+        age_sec = float('inf')
+
+    if not is_live:
+        banner = html.Div(
+            "🔴 STALE DATA — TRADING BLOCKED (≥120s old)",
+            style={"color": "#FF4136", "fontWeight": "bold", "fontSize": "14px", "textAlign": "center"}
+        )
+        # 54 outputs: blocked placeholder for every component
+        no_data = html.Span("—", style={"color": COLORS["text_secondary"]})
+        blocked = (
+            # ML signals (11)
+            no_data, no_data, no_data, no_data, no_data, no_data, no_data,
+            no_data, no_data, no_data, banner,
+            # Regime (9)
+            no_data, no_data, no_data, no_data, no_data, no_data, no_data, no_data, no_data,
+            # Adjusted (6)
+            no_data, no_data, no_data, no_data, no_data, no_data,
+            # Sentiment (13)
+            no_data, no_data, no_data, no_data, no_data, no_data, no_data,
+            no_data, no_data, no_data, no_data, no_data, no_data,
+            # Microstructure (5)
+            no_data, no_data, no_data, no_data, no_data,
+            # Risk manager (6)
+            no_data, no_data, no_data, no_data, no_data, no_data,
+            # Existing (4)
+            [], [], [], go.Figure()
+        )
+        return blocked
+
+    # Data is live — green banner injected into beta-signal-status later
+    live_banner = html.Div(
+        "✅ LIVE — MT5 Exness (< 2 min)",
+        style={"color": "#2ECC40", "fontWeight": "bold", "fontSize": "14px", "textAlign": "center"}
+    )
     
     # Build raw_signal for regime integration to skip redundant ML recomputation
     raw_signal = None
@@ -690,21 +731,11 @@ def refresh_beta_dashboard(_n_intervals):
 
     # Data freshness banner
     last_bar_time = df.index[-1]
-    is_live = (datetime.now() - last_bar_time).total_seconds() < 600
     status = html.Div([
+        live_banner,
         html.Div(
-            f"{'LIVE' if is_live else 'STALE (CSV Fallback)'} | Last bar: {last_bar_time.strftime('%Y-%m-%d %H:%M')}",
-            style={
-                'color': 'green' if is_live else 'orange',
-                'fontWeight': 'bold',
-                'fontSize': '12px',
-                'marginBottom': '4px',
-                'textAlign': 'center'
-            }
-        ),
-        html.Div(
-            f"Live ✓  •  Last update: {datetime.now().strftime('%H:%M:%S')}  •  Data: {df.index[-1].strftime('%Y-%m-%d %H:%M')}",
-            style={'color': COLORS['text_secondary'], 'fontSize': '10px', 'textAlign': 'center'}
+            f"Last bar: {last_bar_time.strftime('%Y-%m-%d %H:%M')}  •  Refresh: {datetime.now().strftime('%H:%M:%S')}",
+            style={'color': COLORS['text_secondary'], 'fontSize': '10px', 'textAlign': 'center', 'marginTop': '4px'}
         ),
     ])
 
