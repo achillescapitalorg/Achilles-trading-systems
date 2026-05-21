@@ -113,15 +113,33 @@ _df_cache_time = None
 CACHE_TTL_SECONDS = 60  # Refresh live data every 60 seconds
 
 def _load_df():
-    """Load live gold data from yfinance, with CSV fallback. Returns cached DataFrame."""
+    """Load live gold data from MT5 broker, with yfinance + CSV fallback."""
     global _df_cache, _df_cache_time
 
-    # Try live data first
-    try:
-        if _df_cache is not None and _df_cache_time is not None:
-            if (datetime.now() - _df_cache_time).total_seconds() < CACHE_TTL_SECONDS:
-                return _df_cache
+    # Check cache
+    if _df_cache is not None and _df_cache_time is not None:
+        if (datetime.now() - _df_cache_time).total_seconds() < CACHE_TTL_SECONDS:
+            return _df_cache
 
+    # 1. Try MT5 broker data (primary — real-time from Exness)
+    try:
+        from trading_bot.exness_bridge import ExnessMT5Bridge
+        bridge = ExnessMT5Bridge()
+        if bridge.connect():
+            df_live = bridge.get_prices("XAUUSD", timeframe=1, bars=500)
+            if df_live is not None and len(df_live) >= 200:
+                df_live = df_live.rename(columns={'time': 'date'})
+                df_live['date'] = pd.to_datetime(df_live['date'])
+                df_live = df_live.set_index("date").sort_index()
+                _df_cache = df_live
+                _df_cache_time = datetime.now()
+                print(f"[MT5] Loaded {len(df_live)} live bars. Last: {df_live.index[-1]}")
+                return _df_cache
+    except Exception as e:
+        print(f"[MT5] Error: {e}")
+
+    # 2. Fallback to yfinance (GC=F futures)
+    try:
         ticker = yf.Ticker("GC=F")
         df_live = ticker.history(period="5d", interval="1m")
 
@@ -151,11 +169,11 @@ def _load_df():
                 print(f"[LiveData] Loaded {len(df_live)} live bars. Last: {last_bar_time}")
                 return _df_cache
             else:
-                print(f"[LiveData] Stale data detected (last bar: {last_bar_time}), falling back to CSV")
+                print(f"[LiveData] Stale data (last bar: {last_bar_time}), falling back to CSV")
     except Exception as e:
-        print(f"[LiveData] Error fetching live data: {e}")
+        print(f"[LiveData] Error fetching yfinance: {e}")
 
-    # Fallback to CSV
+    # 3. Final fallback to CSV
     if _df_cache is None and DATA_PATH.exists():
         print(f"[LiveData] Loading fallback CSV: {DATA_PATH}")
         df = pd.read_csv(DATA_PATH, parse_dates=["date"])
