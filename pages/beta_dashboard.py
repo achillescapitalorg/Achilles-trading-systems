@@ -31,6 +31,13 @@ from sentiment.fetcher_expanded import ExpandedNewsFetcher
 from sentiment.hardened_pretrade_booster import HardenedPreTradeBooster
 from sentiment.sentiment_hardened import HardenedSentimentAnalyzer
 
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
+    print("[MT5] MetaTrader5 package not installed")
+
 # ── Paths ───────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 MODELS_DIR = PROJECT_ROOT / "data" / "beta_testing" / "processed" / "models"
@@ -122,21 +129,42 @@ def _load_df():
             return _df_cache
 
     # 1. Try MT5 broker data (primary — real-time from Exness)
-    try:
-        from trading_bot.exness_bridge import ExnessMT5Bridge
-        bridge = ExnessMT5Bridge()
-        if bridge.connect():
-            df_live = bridge.get_prices("XAUUSD", timeframe=1, bars=500)
-            if df_live is not None and len(df_live) >= 200:
-                df_live = df_live.rename(columns={'time': 'date'})
-                df_live['date'] = pd.to_datetime(df_live['date'])
-                df_live = df_live.set_index("date").sort_index()
+    if MT5_AVAILABLE:
+        try:
+            if not mt5.initialize():
+                raise RuntimeError("MT5 terminal not running")
+
+            if not mt5.symbol_select("XAUUSD", True):
+                raise RuntimeError("XAUUSD not in Market Watch")
+
+            rates = mt5.copy_rates_from_pos("XAUUSD", mt5.TIMEFRAME_M1, 0, 500)
+
+            if rates is None or len(rates) < 200:
+                raise RuntimeError("Not enough bars")
+
+            df_live = pd.DataFrame(rates)
+            df_live['date'] = pd.to_datetime(df_live['time'], unit='s')
+            df_live = df_live.rename(columns={'tick_volume': 'volume'})
+            df_live = df_live[['date', 'open', 'high', 'low', 'close', 'volume']]
+            df_live = df_live.sort_values("date").set_index("date")
+
+            last_bar_time = df_live.index[-1]
+            if (datetime.now() - last_bar_time).total_seconds() < 600:
                 _df_cache = df_live
                 _df_cache_time = datetime.now()
-                print(f"[MT5] Loaded {len(df_live)} live bars. Last: {df_live.index[-1]}")
+                print(f"[MT5] Loaded {len(df_live)} live bars. Last: {last_bar_time}")
+                mt5.shutdown()
                 return _df_cache
-    except Exception as e:
-        print(f"[MT5] Error: {e}")
+            else:
+                mt5.shutdown()
+                raise RuntimeError("MT5 data stale")
+
+        except Exception as e:
+            print(f"[MT5] Error: {e}")
+            try:
+                mt5.shutdown()
+            except:
+                pass
 
     # 2. Fallback to yfinance (GC=F futures)
     try:
