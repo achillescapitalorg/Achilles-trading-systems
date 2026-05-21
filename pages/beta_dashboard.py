@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import json
 from datetime import datetime, timedelta
+from dateutil.tz import tzlocal
 
 import yfinance as yf
 
@@ -164,7 +165,8 @@ def _load_df():
                 raise RuntimeError("Not enough bars")
 
             df_live = pd.DataFrame(rates)
-            df_live['date'] = pd.to_datetime(df_live['time'], unit='s')
+            # Use datetime.fromtimestamp to respect local timezone (not UTC)
+            df_live['date'] = pd.to_datetime([datetime.fromtimestamp(t) for t in df_live['time']])
             df_live = df_live.rename(columns={'tick_volume': 'volume'})
             df_live = df_live[['date', 'open', 'high', 'low', 'close', 'volume']]
             df_live = df_live.sort_values("date").set_index("date")
@@ -215,7 +217,7 @@ def _load_df():
                 'Close': 'close',
                 'Volume': 'volume'
             })
-            df_live['date'] = pd.to_datetime(df_live['date']).dt.tz_localize(None)
+            df_live['date'] = pd.to_datetime(df_live['date']).dt.tz_convert(tzlocal()).dt.tz_localize(None)
             df_live = df_live.sort_values("date").reset_index(drop=True)
 
             # Clean: drop zero volume, forward-fill gaps, drop NaN
