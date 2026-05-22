@@ -122,6 +122,19 @@ data/beta_testing/processed/models/features.pkl
 data/beta_testing/processed/models/features_v9.pkl
 data/cross_asset/
 
+# Dukascopy tick data (huge parquet files — regenerate locally)
+data/beta_testing/dukascopy/
+
+# Paper trading runtime logs
+data/paper_trades/*.jsonl
+
+# Temporary / test scripts (not part of production codebase)
+scripts/test_*.py
+scripts/testformt5
+
+# Backup files
+*.backup
+
 # All JSON caches at root data level
 data/*.json
 data/*.db
@@ -143,6 +156,9 @@ wget-log
 report.txt
 improvement_report.txt
 scripts/*_log.txt
+
+# Artifact files
+=5.0.37
 
 # =============================================================================
 # Checkpoints

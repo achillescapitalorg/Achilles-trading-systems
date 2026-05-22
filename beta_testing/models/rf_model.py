@@ -21,11 +21,14 @@ class Gold1mRandomForest:
         'random_state': 42,
     }
 
-    def __init__(self):
-        self.model = RandomForestClassifier(**self.BEST_PARAMS)
+    def __init__(self, params=None):
+        best = self.BEST_PARAMS.copy()
+        if params:
+            best.update(params)
+        self.model = RandomForestClassifier(**best)
 
-    def fit(self, X_train, y_train, **kwargs):
-        self.model.fit(X_train, y_train)
+    def fit(self, X_train, y_train, sample_weight=None, **kwargs):
+        self.model.fit(X_train, y_train, sample_weight=sample_weight)
         if hasattr(self.model, "oob_score_"):
             print(f"[RF-1M] OOB Score: {self.model.oob_score_:.4f}")
         else:

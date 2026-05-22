@@ -34,14 +34,18 @@ class Gold1mXGBoost:
             self.params.update(params)
         self.model = None
 
-    def fit(self, X_train, y_train, X_val=None, y_val=None):
-        scale = (y_train == 0).sum() / max((y_train == 1).sum(), 1)
-        self.model = xgb.XGBClassifier(**self.params, scale_pos_weight=scale)
+    def fit(self, X_train, y_train, X_val=None, y_val=None, sample_weight=None):
+        # Only auto-compute scale_pos_weight if not already provided in params
+        if 'scale_pos_weight' not in self.params or self.params.get('scale_pos_weight') is None:
+            scale = (y_train == 0).sum() / max((y_train == 1).sum(), 1)
+            self.params['scale_pos_weight'] = scale
+        self.model = xgb.XGBClassifier(**self.params)
         eval_set = [(X_train, y_train)]
         if X_val is not None and y_val is not None:
             eval_set.append((X_val, y_val))
         self.model.fit(
             X_train, y_train,
+            sample_weight=sample_weight,
             eval_set=eval_set,
             verbose=False
         )

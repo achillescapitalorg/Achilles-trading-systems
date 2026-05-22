@@ -37,14 +37,16 @@ class Gold1mLightGBM:
         self.model = None
         self.feature_names = None
 
-    def fit(self, X_train, y_train, X_val=None, y_val=None, num_boost_round=3000):
+    def fit(self, X_train, y_train, X_val=None, y_val=None, sample_weight=None, num_boost_round=3000):
         self.feature_names = list(X_train.columns)
-        n_pos = (y_train == 1).sum()
-        n_neg = (y_train == 0).sum()
-        scale_pos_weight = n_neg / max(n_pos, 1)
-        self.params['scale_pos_weight'] = scale_pos_weight
+        # Only auto-compute scale_pos_weight if not already provided
+        if 'scale_pos_weight' not in self.params or self.params.get('scale_pos_weight') is None:
+            n_pos = (y_train == 1).sum()
+            n_neg = (y_train == 0).sum()
+            scale_pos_weight = n_neg / max(n_pos, 1)
+            self.params['scale_pos_weight'] = scale_pos_weight
 
-        train_data = lgb.Dataset(X_train, y_train)
+        train_data = lgb.Dataset(X_train, y_train, weight=sample_weight)
         valid_sets = [train_data]
         if X_val is not None and y_val is not None:
             valid_sets.append(lgb.Dataset(X_val, y_val, reference=train_data))
