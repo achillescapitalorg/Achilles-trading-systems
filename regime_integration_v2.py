@@ -28,7 +28,7 @@ Key Changes from v1:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Union
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -102,7 +102,18 @@ class SignalPackage:
     decision_reason: str
 
     # Filter diagnostics (why was signal blocked?)
-    filters_passed: Dict[str, bool]
+    filters_passed: Union[Dict[str, bool], bool]  # dict in legacy, bool in hybrid
+
+    # Hybrid architecture metadata
+    entry_quality_1m: float = 0.0       # 0-1, 1m microstructure entry score
+    execution_stage: str = 'unknown'    # '15m_bias', '1m_execution', 'legacy'
+
+    # Position state machine
+    position_state: str = 'IDLE'        # 'IDLE', 'LONG', 'SHORT'
+    unrealized_pnl: float = 0.0
+    position_hold_time_min: float = 0.0
+    last_exit_reason: str = ''
+    last_exit_pnl: float = 0.0
 
 
 class IntegratedTradingSystem:
@@ -146,113 +157,176 @@ class IntegratedTradingSystem:
         self.last_15m_signal = None
         self.feature_cache = {}
 
+        # === HYBRID ARCHITECTURE STATE ===
+        # 15M signal cache (refreshes every 15 minutes)
+        self._15m_signal_cache = None
+        self._15m_signal_time = None
+        self._15m_cache_ttl = 900  # 15 minutes
+
+        # Position state machine
+        self._open_position = None  # Dict or None
+
+        # Feature columns cache for 15M models
+        self._15m_feature_cols = None
+
     # =====================================================================
     # MAIN PROCESSING PIPELINE
     # =====================================================================
-    def process_bar(
+    # =====================================================================
+    # PHASE 1: HYBRID 15M PRIMARY + 1M EXECUTION
+    # =====================================================================
+
+    def get_1m_execution_signal(
         self,
         df_1m: pd.DataFrame,
-        signal_15m: Optional[Dict],
-        current_time: datetime,
-        live_price: float,
-        precomputed_ensemble: Optional[Dict] = None
+        signal_15m: Optional[Dict] = None,
+        current_time: datetime = None,
+        live_price: float = None
     ) -> SignalPackage:
         """
-        Process a single 1m bar through the full pipeline.
-
-        Args:
-            df_1m: Recent 1m bars (last 200 rows minimum)
-            signal_15m: Dict with 'direction' and 'strength' from 15m model
-            current_time: Current timestamp
-            live_price: Current market price
-            precomputed_ensemble: Optional dict with 'direction', 'confidence', 'model_agreement'
-                                  from existing dashboard signal generation
-
-        Returns:
-            SignalPackage with complete decision and diagnostics
+        Stage 2: Compute 1m entry/execution signal conditional on 15m bias.
+        Called every 1m bar. Does NOT re-run 15m models; uses cached/external 15m signal.
         """
-        # Update 15m signal cache
+        if current_time is None:
+            current_time = datetime.now()
+
+        # Resolve 15m signal
         if signal_15m is not None:
             self.last_15m_signal = signal_15m
-
-        # Default to real 15m prediction if no external signal provided
         if self.last_15m_signal is None:
+            # Fallback: compute on demand (dashboard refresh etc)
             self.last_15m_signal = self._predict_15m(df_1m)
 
-        # Step 1: Generate microstructure features
+        s15 = self.last_15m_signal
+
+        # 1m Microstructure only (fast)
         micro = self._analyze_microstructure(df_1m)
 
-        # Step 2: ML Ensemble prediction (use precomputed if provided)
-        if precomputed_ensemble is not None:
-            ensemble_dir = precomputed_ensemble.get('direction', 'NEUTRAL')
-            ensemble_conf = precomputed_ensemble.get('confidence', 0.0)
-            model_agreement = precomputed_ensemble.get('model_agreement', 0.0)
-        else:
-            ensemble_dir, ensemble_conf, model_agreement = self._ensemble_predict(df_1m)
-
-        # Step 3: Regime detection (delegate to existing regime_integration if available)
+        # Regime (fast, cached internally)
         regime, regime_allows, regime_mult = self._detect_regime(df_1m)
 
-        # Step 4: Sentiment analysis
+        # Sentiment (cached)
         sentiment_score, sentiment_conf, sentiment_valid = self._analyze_sentiment()
 
-        # Step 5: Apply hardened filters
-        filters_passed, decision, reason = self._apply_filters(
-            ensemble_dir, ensemble_conf, model_agreement,
-            regime, regime_allows, regime_mult,
-            micro, sentiment_score, sentiment_valid
-        )
+        # ---- HYBRID DECISION LOGIC ----
+        # 15m bias determines direction; 1m microstructure determines entry timing
+        bias_raw = s15.get('direction', 'HOLD')
+        # Normalize LONG/SHORT → BUY/SELL
+        bias = {'LONG': 'BUY', 'SHORT': 'SELL'}.get(bias_raw, bias_raw)
+        # Handle both 'strength' (from _predict_15m) and 'confidence' (from get_15m_signal)
+        bias_strength = s15.get('strength', s15.get('confidence', 0.0))
 
-        # Step 6: Risk management (position sizing, stops)
-        position_size, stop_loss, take_profit, rr = self._calculate_risk_params(
-            live_price, ensemble_dir, ensemble_conf, regime, regime_mult,
-            micro, df_1m
-        )
+        # Microstructure entry filters
+        entry_quality = self._evaluate_1m_entry_quality(micro, bias)
 
-        # Step 7: Check for open trade exits
-        if self.risk_manager is not None and self.risk_manager.open_trade is not None:
-            exit_reason = self.risk_manager.check_exit_conditions(
-                current_time, live_price, micro['ofi_proxy'], micro['vpin_proxy']
+        # Build decision
+        if bias in ['BUY', 'SELL'] and entry_quality >= 0.6:
+            # Valid entry: align with 15m bias
+            decision = 'OPEN_LONG' if bias == 'BUY' else 'OPEN_SHORT'
+            reason = (
+                f"15m bias {bias} (strength {bias_strength:.2f}) + "
+                f"1m entry quality {entry_quality:.2f}"
             )
-            if exit_reason is not None:
-                pnl = self.risk_manager.close_position(current_time, live_price, exit_reason)
-                decision = 'HOLD'
-                reason = f'Closed previous trade: {exit_reason} (PnL: ${pnl:.2f})'
+        elif bias in ['BUY', 'SELL']:
+            decision = 'HOLD'
+            reason = (
+                f"15m bias {bias} (strength {bias_strength:.2f}) but "
+                f"1m entry quality {entry_quality:.2f} < 0.60 - waiting for better entry"
+            )
+        else:
+            decision = 'HOLD'
+            reason = f"15m bias is HOLD - no directional edge"
 
-        # Step 8: Attempt to open position if signal is valid
-        if decision in ['OPEN_LONG', 'OPEN_SHORT'] and self.risk_manager is not None:
-            direction = 'BUY' if decision == 'OPEN_LONG' else 'SELL'
+        # Risk params (conditional on 15m bias strength)
+        position_size, stop_loss, take_profit, rr = self._calculate_risk_params_hybrid(
+            live_price, bias, bias_strength, regime, regime_mult, micro, df_1m
+        )
 
-            allowed, risk_reason = self.risk_manager.can_trade(current_time)
-            if not allowed:
-                decision = 'BLOCKED'
-                reason = f'Risk manager blocked: {risk_reason}'
-            else:
-                atr_14 = self._get_atr(df_1m)
-                trade = self.risk_manager.open_position(
-                    current_time=current_time,
-                    direction=direction,
-                    entry_price=live_price,
-                    atr_14=atr_14,
-                    regime=regime,
-                    confidence=ensemble_conf,
-                    ofi_proxy=micro['ofi_proxy'],
-                    vpin_proxy=micro['vpin_proxy'],
-                    microstructure_quality=micro['quality_score']
+        # Pre-compute ATR for exits and potential entries
+        atr_14 = self._get_atr(df_1m)
+
+        # =====================================================================
+        # POSITION STATE MACHINE
+        # =====================================================================
+        position_state = 'IDLE'
+        unrealized_pnl = 0.0
+        hold_time_min = 0.0
+        last_exit_reason = ''
+        last_exit_pnl = 0.0
+
+        if self.risk_manager is not None:
+            # Track last closed trade info
+            if len(self.risk_manager.trades) > 0:
+                last_trade = self.risk_manager.trades[-1]
+                if last_trade.exit_reason is not None:
+                    last_exit_reason = last_trade.exit_reason
+                    last_exit_pnl = last_trade.pnl or 0.0
+
+            # Active position management
+            if self.risk_manager.open_trade is not None:
+                trade = self.risk_manager.open_trade
+                position_state = 'LONG' if trade.direction == 'BUY' else 'SHORT'
+                hold_time_min = (current_time - trade.entry_time).total_seconds() / 60.0
+
+                # Compute unrealized P&L
+                if trade.direction == 'BUY':
+                    unrealized_pnl = (live_price - trade.entry_price) * trade.size_lots * 100
+                else:
+                    unrealized_pnl = (trade.entry_price - live_price) * trade.size_lots * 100
+
+                # 1. Standard exit checks (SL, TP, microstructure, trailing)
+                exit_reason = self.risk_manager.check_exit_conditions(
+                    current_time, live_price, micro['ofi_proxy'], micro['vpin_proxy'], atr_14
                 )
 
-                if trade is None:
-                    decision = 'BLOCKED'
-                    reason = 'Risk manager rejected position sizing'
+                # 2. 15m bias flip detection — close if bias flipped against position
+                if exit_reason is None and bias != 'HOLD':
+                    if (position_state == 'LONG' and bias == 'SELL') or \
+                       (position_state == 'SHORT' and bias == 'BUY'):
+                        exit_reason = '15M_FLIP'
 
-        # Build signal package
+                if exit_reason is not None:
+                    pnl = self.risk_manager.close_position(current_time, live_price, exit_reason)
+                    decision = 'HOLD'
+                    reason = f'Closed {position_state}: {exit_reason} (PnL: ${pnl:.2f})'
+                    last_exit_reason = exit_reason
+                    last_exit_pnl = pnl
+                    position_state = 'IDLE'
+                    unrealized_pnl = 0.0
+
+            # Attempt open (only if IDLE)
+            if position_state == 'IDLE' and decision in ['OPEN_LONG', 'OPEN_SHORT']:
+                direction = 'BUY' if decision == 'OPEN_LONG' else 'SELL'
+                allowed, risk_reason = self.risk_manager.can_trade(current_time)
+                if not allowed:
+                    decision = 'BLOCKED'
+                    reason = f'Risk manager blocked: {risk_reason}'
+                else:
+                    trade = self.risk_manager.open_position(
+                        current_time=current_time,
+                        direction=direction,
+                        entry_price=live_price,
+                        atr_14=atr_14,
+                        regime=regime,
+                        confidence=bias_strength,
+                        ofi_proxy=micro['ofi_proxy'],
+                        vpin_proxy=micro['vpin_proxy'],
+                        microstructure_quality=micro['quality_score']
+                    )
+                    if trade is None:
+                        decision = 'BLOCKED'
+                        reason = 'Risk manager rejected position sizing'
+                    else:
+                        position_state = 'LONG' if direction == 'BUY' else 'SHORT'
+
+        # Assemble package
         signal = SignalPackage(
             timestamp=current_time,
-            signal_15m_direction=self.last_15m_signal['direction'],
-            signal_15m_strength=self.last_15m_signal['strength'],
-            ensemble_direction=ensemble_dir,
-            ensemble_confidence=ensemble_conf,
-            model_agreement=model_agreement,
+            signal_15m_direction=bias,
+            signal_15m_strength=bias_strength,
+            ensemble_direction=bias,
+            ensemble_confidence=bias_strength,
+            model_agreement=s15.get('model_agreement', 0.0),
             current_regime=regime,
             regime_allows_trading=regime_allows,
             regime_position_multiplier=regime_mult,
@@ -270,10 +344,124 @@ class IntegratedTradingSystem:
             risk_reward_ratio=rr,
             final_decision=decision,
             decision_reason=reason,
-            filters_passed=filters_passed
+            filters_passed=(entry_quality >= 0.6 and bias != 'HOLD'),
+            entry_quality_1m=entry_quality,
+            execution_stage='1m_execution',
+            position_state=position_state,
+            unrealized_pnl=unrealized_pnl,
+            position_hold_time_min=hold_time_min,
+            last_exit_reason=last_exit_reason,
+            last_exit_pnl=last_exit_pnl
         )
-
         return signal
+
+    # ---- Backward compatibility wrapper ----
+    def process_bar(
+        self,
+        df_1m: pd.DataFrame,
+        signal_15m: Optional[Dict] = None,
+        current_time: datetime = None,
+        live_price: float = None,
+        precomputed_ensemble: Optional[Dict] = None
+    ) -> SignalPackage:
+        """
+        LEGACY wrapper - now routes to the two-stage hybrid pipeline.
+        If precomputed_ensemble is passed, it is treated as the 15m signal.
+        """
+        # Map old precomputed_ensemble → 15m signal for backward compat
+        if precomputed_ensemble is not None and signal_15m is None:
+            signal_15m = {
+                'direction': precomputed_ensemble.get('direction', 'HOLD'),
+                'strength': precomputed_ensemble.get('confidence', 0.0),
+                'model_agreement': precomputed_ensemble.get('model_agreement', 0.0),
+            }
+        return self.get_1m_execution_signal(df_1m, signal_15m, current_time, live_price)
+
+    def _evaluate_1m_entry_quality(self, micro: Dict, bias: str) -> float:
+        """
+        Score 0-1 for 1m entry quality aligned with 15m bias.
+        No 1m ML involved - purely microstructure + momentum alignment.
+        """
+        score = 0.0
+        checks = 0
+
+        # 1. OFI alignment with bias
+        if bias == 'BUY' and micro['ofi_proxy'] > 0.05:
+            score += 1.0
+        elif bias == 'SELL' and micro['ofi_proxy'] < -0.05:
+            score += 1.0
+        else:
+            score += max(0.0, 1.0 - abs(micro['ofi_proxy']) * 10)
+        checks += 1
+
+        # 2. VPIN not elevated (market not about to jump)
+        score += max(0.0, 1.0 - micro['vpin_proxy'] / 0.6)
+        checks += 1
+
+        # 3. Entropy moderate (not chaotic)
+        score += 1.0 if micro['sign_entropy'] < 0.7 else max(0.0, 1.0 - (micro['sign_entropy'] - 0.7) * 3)
+        checks += 1
+
+        # 4. HFT activity normal (not spoofing)
+        score += 1.0 if micro['hft_activity'] < 2.0 else 0.5
+        checks += 1
+
+        # 5. Overall micro quality
+        score += micro['quality_score']
+        checks += 1
+
+        return score / checks if checks > 0 else 0.0
+
+    def _calculate_risk_params_hybrid(
+        self, live_price: float, bias: str, bias_strength: float,
+        regime: str, regime_mult: float, micro: Dict, df_1m: pd.DataFrame
+    ) -> Tuple[float, float, float, float]:
+        """
+        Risk sizing scales with 15m bias strength (not 1m confidence).
+        Delegates SL/TP to RiskManager for asymmetric regime-dependent targets.
+        """
+        if bias == 'HOLD' or live_price is None or live_price <= 0:
+            return 0.0, 0.0, 0.0, 0.0
+
+        atr_14 = self._get_atr(df_1m)
+
+        # Delegate to RiskManager for asymmetric SL/TP
+        if self.risk_manager is not None:
+            direction = 'BUY' if bias == 'BUY' else 'SELL'
+            sl, tp = self.risk_manager.calculate_stops(
+                entry_price=live_price,
+                direction=direction,
+                atr_14=atr_14,
+                regime=regime,
+                ofi_proxy=micro.get('ofi_proxy'),
+                bias_strength=bias_strength
+            )
+            size = self.risk_manager.calculate_position_size(
+                entry_price=live_price,
+                stop_loss=sl,
+                regime=regime,
+                confidence=bias_strength,
+                microstructure_quality=micro.get('quality_score', 0.5)
+            )
+            risk = abs(live_price - sl)
+            reward = abs(tp - live_price)
+            rr = reward / risk if risk > 0 else 0.0
+        else:
+            # Fallback when no risk manager attached
+            sl_atr = 1.5
+            tp_atr = 3.0
+            base_size = 0.10
+            size = base_size * bias_strength * regime_mult
+            size = min(size, 0.50)
+            if bias == 'BUY':
+                sl = live_price - atr_14 * sl_atr
+                tp = live_price + atr_14 * tp_atr
+            else:
+                sl = live_price + atr_14 * sl_atr
+                tp = live_price - atr_14 * tp_atr
+            rr = tp_atr / sl_atr
+
+        return round(size, 3), round(sl, 2), round(tp, 2), round(rr, 2)
 
     # =====================================================================
     # UTILITY: ATR helper
@@ -335,24 +523,31 @@ class IntegratedTradingSystem:
         Generate 15m directional bias from latest 1m bars.
 
         Returns:
-            {'direction': 'BUY'|'SELL'|'HOLD', 'strength': float}
+            {
+                'direction': 'BUY'|'SELL'|'HOLD',
+                'strength': float,
+                'model_agreement': float,
+                'regime': str,
+                'raw_probs': dict,
+                'avg_prob': float,
+            }
         """
         if resample_to_15m is None or compute_15m_features is None:
-            return {'direction': 'HOLD', 'strength': 0.0}
+            return {'direction': 'HOLD', 'strength': 0.0, 'model_agreement': 0.0, 'regime': 'UNKNOWN'}
 
         self._load_15m_models()
         if not any(self._15m_model_cache.get(k) for k in ['lgb', 'xgb', 'rf']):
-            return {'direction': 'HOLD', 'strength': 0.0}
+            return {'direction': 'HOLD', 'strength': 0.0, 'model_agreement': 0.0, 'regime': 'UNKNOWN'}
 
         try:
             # Need enough 1m bars to form meaningful 15m bars
             if len(df_1m) < 200:
-                return {'direction': 'HOLD', 'strength': 0.0}
+                return {'direction': 'HOLD', 'strength': 0.0, 'model_agreement': 0.0, 'regime': 'UNKNOWN'}
 
             # Resample last ~500 bars to 15m
             df_15m = resample_to_15m(df_1m.tail(500))
             if len(df_15m) < 10:
-                return {'direction': 'HOLD', 'strength': 0.0}
+                return {'direction': 'HOLD', 'strength': 0.0, 'model_agreement': 0.0, 'regime': 'UNKNOWN'}
 
             features = compute_15m_features(df_15m)
 
@@ -370,17 +565,193 @@ class IntegratedTradingSystem:
                 preds['rf'] = float(self._15m_model_cache['rf'].predict(X_latest)[0])
 
             if not preds:
-                return {'direction': 'HOLD', 'strength': 0.0}
+                return {'direction': 'HOLD', 'strength': 0.0, 'model_agreement': 0.0, 'regime': 'UNKNOWN'}
 
             avg_prob = np.mean(list(preds.values()))
             direction = 'BUY' if avg_prob > 0.55 else 'SELL' if avg_prob < 0.45 else 'HOLD'
             strength = abs(avg_prob - 0.5) * 2
 
-            return {'direction': direction, 'strength': strength}
+            # Model agreement: fraction of models agreeing with majority
+            individual_dirs = [1 if p > 0.5 else 0 for p in preds.values()]
+            majority = 1 if avg_prob > 0.5 else 0
+            agreement = sum(1 for d in individual_dirs if d == majority) / len(individual_dirs)
+
+            # Weighted conviction: agreement × average confidence
+            avg_confidence = np.mean([abs(p - 0.5) for p in preds.values()])
+            weighted_conviction = float(agreement * avg_confidence)
+
+            # Detect regime on the 1m data for consistency
+            regime, _, _ = self._detect_regime(df_1m)
+
+            return {
+                'direction': direction,
+                'strength': float(strength),
+                'model_agreement': float(agreement),
+                'weighted_conviction': weighted_conviction,
+                'regime': regime,
+                'raw_probs': preds,
+                'avg_prob': float(avg_prob),
+            }
 
         except Exception as e:
             print(f"[15m] Prediction error: {e}")
-            return {'direction': 'HOLD', 'strength': 0.0}
+            return {'direction': 'HOLD', 'strength': 0.0, 'model_agreement': 0.0, 'regime': 'ERROR'}
+
+    # =====================================================================
+    # HYBRID ARCHITECTURE: 15M PRIMARY SIGNAL
+    # =====================================================================
+    def get_15m_signal(self, df_15m: pd.DataFrame) -> dict:
+        """
+        PRIMARY DIRECTIONAL SIGNAL - runs on 15M bars.
+        Cached for 15 minutes to avoid recomputation.
+
+        Returns:
+            {
+                'direction': 'LONG' | 'SHORT' | 'HOLD',
+                'confidence': float (0-1),
+                'regime': str,
+                'model_agreement': float,
+                'raw_probs': dict {model: prob},
+                'timestamp': datetime
+            }
+        """
+        # Check cache
+        if self._15m_signal_cache is not None and self._15m_signal_time is not None:
+            age = (datetime.now() - self._15m_signal_time).total_seconds()
+            if age < self._15m_cache_ttl:
+                return self._15m_signal_cache
+
+        # Fallback: if no 15M models, return HOLD with warning
+        self._load_15m_models()
+        if not any(self._15m_model_cache.get(k) for k in ['lgb', 'xgb', 'rf']):
+            signal = {
+                'direction': 'HOLD',
+                'confidence': 0.0,
+                'regime': 'UNKNOWN',
+                'model_agreement': 0.0,
+                'raw_probs': {},
+                'timestamp': datetime.now(),
+                'warning': '15M models not loaded - using 1M-only fallback'
+            }
+            self._15m_signal_cache = signal
+            self._15m_signal_time = datetime.now()
+            return signal
+
+        try:
+            if len(df_15m) < 10:
+                signal = {
+                    'direction': 'HOLD',
+                    'confidence': 0.0,
+                    'regime': 'INSUFFICIENT_DATA',
+                    'model_agreement': 0.0,
+                    'raw_probs': {},
+                    'timestamp': datetime.now()
+                }
+                self._15m_signal_cache = signal
+                self._15m_signal_time = datetime.now()
+                return signal
+
+            features = compute_15m_features(df_15m)
+            target_cols = [c for c in features.columns if c.startswith('target_')]
+            X = features.drop(columns=target_cols, errors='ignore')
+            X_latest = X.iloc[[-1]]
+
+            preds = {}
+            if self._15m_model_cache['lgb'] is not None:
+                preds['lgb'] = float(self._15m_model_cache['lgb'].predict(X_latest)[0])
+            if self._15m_model_cache['xgb'] is not None:
+                preds['xgb'] = float(self._15m_model_cache['xgb'].predict(X_latest)[0])
+            if self._15m_model_cache['rf'] is not None:
+                preds['rf'] = float(self._15m_model_cache['rf'].predict(X_latest)[0])
+
+            if not preds:
+                signal = {
+                    'direction': 'HOLD',
+                    'confidence': 0.0,
+                    'regime': 'UNKNOWN',
+                    'model_agreement': 0.0,
+                    'raw_probs': {},
+                    'timestamp': datetime.now()
+                }
+                self._15m_signal_cache = signal
+                self._15m_signal_time = datetime.now()
+                return signal
+
+            avg_prob = np.mean(list(preds.values()))
+            direction = 'LONG' if avg_prob > 0.55 else 'SHORT' if avg_prob < 0.45 else 'HOLD'
+            confidence = abs(avg_prob - 0.5) * 2
+
+            # Model agreement: how many models agree with majority
+            individual_dirs = [1 if p > 0.5 else 0 for p in preds.values()]
+            majority = 1 if avg_prob > 0.5 else 0
+            agreement = sum(1 for d in individual_dirs if d == majority) / len(individual_dirs)
+
+            # Regime detection on 15M
+            regime = self._detect_regime_15m(df_15m)
+
+            signal = {
+                'direction': direction,
+                'confidence': float(confidence),
+                'regime': regime,
+                'model_agreement': float(agreement),
+                'raw_probs': preds,
+                'timestamp': datetime.now()
+            }
+
+            self._15m_signal_cache = signal
+            self._15m_signal_time = datetime.now()
+            return signal
+
+        except Exception as e:
+            print(f"[15M] Signal generation error: {e}")
+            signal = {
+                'direction': 'HOLD',
+                'confidence': 0.0,
+                'regime': 'ERROR',
+                'model_agreement': 0.0,
+                'raw_probs': {},
+                'timestamp': datetime.now(),
+                'warning': f'Error: {str(e)}'
+            }
+            self._15m_signal_cache = signal
+            self._15m_signal_time = datetime.now()
+            return signal
+
+    def _detect_regime_15m(self, df_15m: pd.DataFrame) -> str:
+        """Simplified regime detection for 15M data."""
+        try:
+            vol = df_15m['close'].pct_change().rolling(20, min_periods=1).std().iloc[-1]
+            trend = (df_15m['close'].iloc[-1] - df_15m['close'].iloc[-20]) / df_15m['close'].iloc[-20] if len(df_15m) >= 20 else 0
+
+            if vol > 0.0015 and abs(trend) > 0.02:
+                return 'STRONG_TREND_UP' if trend > 0 else 'STRONG_TREND_DOWN'
+            elif vol > 0.0015:
+                return 'HIGH_VOL_CHAOS'
+            elif abs(trend) > 0.01:
+                return 'GRIND_UP' if trend > 0 else 'GRIND_DOWN'
+            elif vol < 0.0005:
+                return 'LOW_VOL_DRIFT'
+            else:
+                return 'CHOPPY_RANGE'
+        except Exception:
+            return 'CHOPPY_RANGE'
+
+    def _session_filter(self, df_1m: pd.DataFrame) -> bool:
+        """Check if current time is within reasonable trading hours."""
+        try:
+            now = df_1m.index[-1]
+            hour = now.hour
+            # Avoid weekends (Friday after 22:00 UTC, Sunday before 22:00 UTC)
+            weekday = now.weekday()
+            if weekday == 4 and hour >= 22:
+                return False
+            if weekday == 5:
+                return False
+            if weekday == 6 and hour < 22:
+                return False
+            return True
+        except Exception:
+            return True
 
     # =====================================================================
     # STEP 2: ENSEMBLE PREDICTION (fallback if no precomputed)

@@ -31,6 +31,12 @@ from regime_integration_v2 import IntegratedTradingSystem
 from sentiment.fetcher_expanded import ExpandedNewsFetcher
 from sentiment.hardened_pretrade_booster import HardenedPreTradeBooster
 from sentiment.sentiment_hardened import HardenedSentimentAnalyzer
+from paper_trading.logger import (
+    get_performance_summary,
+    get_recent_trades_table,
+    compute_equity_curve,
+)
+from execution.engine import ExecutionEngine
 
 try:
     import MetaTrader5 as mt5
@@ -117,6 +123,7 @@ _model_cache = ModelCache()
 
 # ── Microstructure + Risk Manager Integration ───────────────────────────
 _trading_system = IntegratedTradingSystem(account_balance=10000.0)
+_execution_engine = ExecutionEngine()
 
 
 # ── Data cache (live data with CSV fallback) ────────────────────────────
@@ -444,22 +451,74 @@ layout = dbc.Container(
             ])
         ),
 
-        # ── Adjusted Signal ───────────────────────────────────────────
+        # ── 15M Primary Bias ──────────────────────────────────────────
         _card(
-            "⚡ REGIME-ADJUSTED SIGNAL  ·  Raw ML + Regime Filter",
+            "📡 15M PRIMARY BIAS  ·  Ensemble Directional Signal",
             html.Div([
                 dbc.Row([
-                    dbc.Col(_stat("RAW SIGNAL", "beta-raw-signal", COLORS["accent"]), width=3),
-                    dbc.Col(_stat("ADJUSTED SIGNAL", "beta-adjusted-signal", COLORS["success"]), width=3),
+                    dbc.Col(_stat("15M DIRECTION", "beta-15m-direction", COLORS["accent"]), width=3),
+                    dbc.Col(_stat("15M STRENGTH", "beta-15m-strength", COLORS["info"]), width=3),
+                    dbc.Col(_stat("WEIGHTED CONVICTION", "beta-15m-agreement", COLORS["warning"]), width=3),
+                    dbc.Col(_stat("15M REGIME", "beta-15m-regime", COLORS["text_secondary"]), width=3),
+                ]),
+                html.Div(id="beta-15m-raw-probs",
+                         style={"color": COLORS["text_secondary"], "fontSize": "10px",
+                                "marginTop": "8px", "textAlign": "center"}),
+            ])
+        ),
+
+        # ── 1M Execution Signal ───────────────────────────────────────
+        _card(
+            "⚡ 1M EXECUTION SIGNAL  ·  Microstructure Entry Timing",
+            html.Div([
+                dbc.Row([
+                    dbc.Col(_stat("EXECUTION", "beta-1m-decision", COLORS["accent"]), width=3),
+                    dbc.Col(_stat("ENTRY QUALITY", "beta-1m-quality", COLORS["info"]), width=3),
                     dbc.Col(_stat("STOP LOSS", "beta-stop-loss", COLORS["danger"]), width=2),
                     dbc.Col(_stat("TAKE PROFIT", "beta-take-profit", COLORS["success"]), width=2),
                     dbc.Col(_stat("R:R", "beta-risk-reward", COLORS["info"]), width=2),
                 ]),
-                html.Div(id="beta-adjustment-reason",
-                         children="Waiting for regime analysis...",
+                html.Div(id="beta-1m-reason",
+                         children="Waiting for execution signal...",
                          style={"color": COLORS["text_secondary"], "fontSize": "11px",
                                 "marginTop": "10px", "textAlign": "center"}),
             ])
+        ),
+
+        # ── Position State Machine ────────────────────────────────────
+        _card(
+            "🎯 POSITION STATE  ·  Open Trade Tracking",
+            html.Div([
+                dbc.Row([
+                    dbc.Col(_stat("STATE", "beta-position-state", COLORS["accent"]), width=3),
+                    dbc.Col(_stat("UNREALIZED P&L", "beta-position-pnl", COLORS["info"]), width=3),
+                    dbc.Col(_stat("HOLD TIME", "beta-position-hold", COLORS["warning"]), width=3),
+                    dbc.Col(_stat("LAST EXIT", "beta-last-exit", COLORS["text_secondary"]), width=3),
+                ]),
+            ])
+        ),
+
+        # ── Manual Execution Panel ────────────────────────────────────
+        _card(
+            "⚡ MANUAL EXECUTION  ·  MT5 Order Preparation",
+            html.Div([
+                dbc.Row([
+                    dbc.Col(_stat("MT5 STATUS", "beta-exec-status", COLORS["accent"]), width=3),
+                    dbc.Col(_stat("SYMBOL", "beta-exec-symbol", COLORS["info"]), width=3),
+                    dbc.Col(_stat("SPREAD", "beta-exec-spread", COLORS["warning"]), width=3),
+                    dbc.Col(_stat("FREE MARGIN", "beta-exec-margin", COLORS["success"]), width=3),
+                ]),
+                html.Hr(style={"borderColor": COLORS["border"], "margin": "12px 0"}),
+                html.Div(id="beta-exec-prepared",
+                         children="No active signal - waiting for setup...",
+                         style={"color": COLORS["text_secondary"], "fontSize": "12px",
+                                "textAlign": "center"}),
+            ])
+        ),
+
+        _card(
+            "🏦 BROKER POSITIONS  ·  MT5 Open Positions",
+            html.Div(id="beta-broker-positions", children="No open positions")
         ),
 
         # ── Sentiment Validation Panel ────────────────────────────────
@@ -526,6 +585,35 @@ layout = dbc.Container(
             ])
         ),
 
+        # ── Paper Trading Performance ────────────────────────────────
+        _card(
+            "📊 PAPER TRADING  ·  Live Performance Analytics",
+            html.Div([
+                dbc.Row([
+                    dbc.Col(_stat("TOTAL TRADES", "beta-paper-trades", COLORS["accent"]), width=2),
+                    dbc.Col(_stat("WIN RATE", "beta-paper-winrate", COLORS["success"]), width=2),
+                    dbc.Col(_stat("PROFIT FACTOR", "beta-paper-pf", COLORS["info"]), width=2),
+                    dbc.Col(_stat("AVG WIN", "beta-paper-avgwin", COLORS["success"]), width=2),
+                    dbc.Col(_stat("AVG LOSS", "beta-paper-avgloss", COLORS["danger"]), width=2),
+                    dbc.Col(_stat("SHARPE", "beta-paper-sharpe", COLORS["warning"]), width=2),
+                ]),
+                html.Div(id="beta-paper-summary",
+                         style={"color": COLORS["text_secondary"], "fontSize": "11px",
+                                "marginTop": "10px", "textAlign": "center"}),
+            ])
+        ),
+
+        _card(
+            "📈 EQUITY CURVE  ·  Account Balance Over Time",
+            dcc.Graph(id="beta-equity-chart", config={"displayModeBar": False},
+                      style={"height": "280px"})
+        ),
+
+        _card(
+            "📋 RECENT TRADES  ·  Last 10 Paper Trades",
+            html.Div(id="beta-recent-trades", children=[])
+        ),
+
         # ── Per-Model Cards ───────────────────────────────────────────
         html.H4("Per-Model Breakdown", style={"color": COLORS["accent"], "marginTop": "20px", "marginBottom": "12px"}),
         dbc.Row(id="beta-model-cards", className="g-3"),
@@ -570,13 +658,31 @@ layout = dbc.Container(
     Output("beta-position-multiplier", "children"),
     Output("beta-transition-warn", "children"),
     Output("beta-regime-reason", "children"),
-    # Adjusted signal outputs
-    Output("beta-raw-signal", "children"),
-    Output("beta-adjusted-signal", "children"),
+    # 15M Primary Bias outputs
+    Output("beta-15m-direction", "children"),
+    Output("beta-15m-strength", "children"),
+    Output("beta-15m-agreement", "children"),
+    Output("beta-15m-regime", "children"),
+    Output("beta-15m-raw-probs", "children"),
+    # 1M Execution signal outputs
+    Output("beta-1m-decision", "children"),
+    Output("beta-1m-quality", "children"),
     Output("beta-stop-loss", "children"),
     Output("beta-take-profit", "children"),
     Output("beta-risk-reward", "children"),
-    Output("beta-adjustment-reason", "children"),
+    Output("beta-1m-reason", "children"),
+    # Position state outputs
+    Output("beta-position-state", "children"),
+    Output("beta-position-pnl", "children"),
+    Output("beta-position-hold", "children"),
+    Output("beta-last-exit", "children"),
+    # Execution outputs
+    Output("beta-exec-status", "children"),
+    Output("beta-exec-symbol", "children"),
+    Output("beta-exec-spread", "children"),
+    Output("beta-exec-margin", "children"),
+    Output("beta-exec-prepared", "children"),
+    Output("beta-broker-positions", "children"),
     # Sentiment outputs
     Output("beta-sentiment-score", "children"),
     Output("beta-sentiment-dir", "children"),
@@ -604,6 +710,16 @@ layout = dbc.Container(
     Output("beta-risk-maxdd", "children"),
     Output("beta-risk-consec", "children"),
     Output("beta-risk-halted", "children"),
+    # Paper trading outputs
+    Output("beta-paper-trades", "children"),
+    Output("beta-paper-winrate", "children"),
+    Output("beta-paper-pf", "children"),
+    Output("beta-paper-avgwin", "children"),
+    Output("beta-paper-avgloss", "children"),
+    Output("beta-paper-sharpe", "children"),
+    Output("beta-paper-summary", "children"),
+    Output("beta-equity-chart", "figure"),
+    Output("beta-recent-trades", "children"),
     # Existing outputs
     Output("beta-model-cards", "children"),
     Output("beta-metrics-row", "children"),
@@ -637,7 +753,13 @@ def refresh_beta_dashboard(_n_intervals):
             no_data, no_data, no_data, banner,
             # Regime (9)
             no_data, no_data, no_data, no_data, no_data, no_data, no_data, no_data, no_data,
-            # Adjusted (6)
+            # 15M Bias (5)
+            no_data, no_data, no_data, no_data, no_data,
+            # 1M Execution (6)
+            no_data, no_data, no_data, no_data, no_data, no_data,
+            # Position state (4)
+            no_data, no_data, no_data, no_data,
+            # Execution (6)
             no_data, no_data, no_data, no_data, no_data, no_data,
             # Sentiment (13)
             no_data, no_data, no_data, no_data, no_data, no_data, no_data,
@@ -646,6 +768,8 @@ def refresh_beta_dashboard(_n_intervals):
             no_data, no_data, no_data, no_data, no_data,
             # Risk manager (6)
             no_data, no_data, no_data, no_data, no_data, no_data,
+            # Paper trading (9)
+            no_data, no_data, no_data, no_data, no_data, no_data, no_data, go.Figure(), [],
             # Existing (4)
             [], [], [], go.Figure()
         )
@@ -675,30 +799,23 @@ def refresh_beta_dashboard(_n_intervals):
     
     regime_pred = _get_regime_prediction(df, raw_signal=raw_signal) if df is not None else None
 
-    # ── AUTHORITATIVE DECISION: v2 full pipeline ─────────────────
+    # ── HYBRID TWO-STAGE PIPELINE ───────────────────────────────
+    signal_15m = None
     signal_v2 = None
     if df is not None and _trading_system is not None:
         try:
-            primary = signals.get(60, signals.get(20, {}))
-            preds = primary.get("preds", {})
-            votes = [1 if p > 0.5 else -1 for p in preds.values()]
-            ensemble_vote = 1 if primary.get("raw_prob", 0.5) > 0.5 else -1
-            model_agreement = sum(1 for v in votes if v == ensemble_vote) / max(len(votes), 1)
+            # Stage 1: 15m directional bias (from 15m ensemble models)
+            signal_15m = _trading_system._predict_15m(df)
 
-            precomputed = {
-                "direction": primary.get("action", "HOLD"),
-                "confidence": primary.get("confidence", 0),
-                "model_agreement": model_agreement,
-            }
-            signal_v2 = _trading_system.process_bar(
+            # Stage 2: 1m execution signal (microstructure entry timing)
+            signal_v2 = _trading_system.get_1m_execution_signal(
                 df_1m=df,
-                signal_15m=None,
+                signal_15m=signal_15m,
                 current_time=datetime.now(),
                 live_price=df["close"].iloc[-1],
-                precomputed_ensemble=precomputed,
             )
         except Exception as e:
-            print(f"[BetaDashboard] v2 process_bar error: {e}")
+            print(f"[BetaDashboard] Hybrid pipeline error: {e}")
 
     # Empty states
     empty = dbc.Col(
@@ -719,9 +836,15 @@ def refresh_beta_dashboard(_n_intervals):
             # Regime
             _regime_badge("UNKNOWN", 0),
             "—", "—", "—", "—", "—", "—", "—", "—",
-            # Adjusted
+            # 15M Bias
+            "—", "—", "—", "—", "—",
+            # 1M Execution
             "—", "—", "—", "—", "—",
             "Regime system not ready. Training in progress...",
+            # Position state
+            "—", "—", "—", "—",
+            # Execution
+            "—", "—", "—", "—", "—", "—",
             # Sentiment
             "—", "—", "—", "—", "—", "—",
             "—", "—", "—", "—", "—", "—",
@@ -730,6 +853,8 @@ def refresh_beta_dashboard(_n_intervals):
             "—", "—", "—", "—", "—",
             # Risk manager
             "—", "—", "—", "—", "—", "—",
+            # Paper trading
+            "—", "—", "—", "—", "—", "—", "—", empty_fig, [],
             # Existing
             [empty] * 3,
             [empty] * 4,
@@ -830,23 +955,59 @@ def refresh_beta_dashboard(_n_intervals):
         raw_signal_str = adjusted_signal_str = stop_str = tp_str = rr_str = "—"
         reason_str = "Regime models not loaded yet"
 
-    # Override with v2's authoritative decision (all 7 filters + risk manager)
+    # Hybrid pipeline display values
+    # 15M Bias outputs
+    bias_direction = signal_15m.get('direction', 'HOLD') if signal_15m else 'HOLD'
+    bias_strength = signal_15m.get('strength', 0.0) if signal_15m else 0.0
+    bias_agreement = signal_15m.get('model_agreement', 0.0) if signal_15m else 0.0
+    weighted_conviction = signal_15m.get('weighted_conviction', 0.0) if signal_15m else 0.0
+    bias_regime = signal_15m.get('regime', 'UNKNOWN') if signal_15m else 'UNKNOWN'
+
+    # Weighted conviction display with color coding
+    if weighted_conviction > 0.50:
+        conv_color = COLORS["success"]
+    elif weighted_conviction > 0.30:
+        conv_color = COLORS["warning"]
+    else:
+        conv_color = COLORS["danger"]
+    bias_agreement = html.Span(f"{weighted_conviction:.1%}", style={"color": conv_color, "fontWeight": "bold"})
+
+    # Raw probabilities tooltip
+    raw_probs = signal_15m.get('raw_probs', {}) if signal_15m else {}
+    raw_probs_str = ""
+    if raw_probs:
+        parts = []
+        for name, p in raw_probs.items():
+            dir_str = "BUY" if p > 0.5 else "SELL"
+            parts.append(f"{name.upper()}: {p:.1%} {dir_str}")
+        raw_probs_str = " | ".join(parts)
+    else:
+        raw_probs_str = "Model probabilities not available"
+
+    # 1M Execution outputs
+    decision_1m = "—"
+    quality_1m = "—"
+    stop_str = "—"
+    tp_str = "—"
+    rr_str = "—"
+    reason_1m = "Waiting for execution signal..."
+
     if signal_v2 is not None:
         v2_action = signal_v2.final_decision
         # Map v2 decisions to display labels
         if v2_action == 'OPEN_LONG':
-            final_action = 'BUY'
+            decision_1m = html.Span("BUY", style={"color": COLORS["success"], "fontWeight": "bold"})
         elif v2_action == 'OPEN_SHORT':
-            final_action = 'SELL'
+            decision_1m = html.Span("SELL", style={"color": COLORS["danger"], "fontWeight": "bold"})
+        elif v2_action == 'BLOCKED':
+            decision_1m = html.Span("BLOCKED", style={"color": COLORS["warning"], "fontWeight": "bold"})
         else:
-            final_action = 'HOLD'
-        final_conf = signal_v2.ensemble_confidence
+            decision_1m = html.Span("HOLD", style={"color": COLORS["text_secondary"]})
+
+        quality_1m = f"{signal_v2.entry_quality_1m:.2f}"
         stop_loss = signal_v2.stop_loss if signal_v2.stop_loss > 0 else None
         take_profit = signal_v2.take_profit if signal_v2.take_profit > 0 else None
         risk_reward = signal_v2.risk_reward_ratio
-        reason = signal_v2.decision_reason
-
-        adjusted_signal_str = f"{final_action} @ {final_conf:.1%}"
         stop_str = f"{stop_loss:.2f}" if stop_loss else "—"
         tp_str = f"{take_profit:.2f}" if take_profit else "—"
         if risk_reward < 1.0:
@@ -856,7 +1017,7 @@ def refresh_beta_dashboard(_n_intervals):
             ], style={"color": COLORS["danger"]})
         else:
             rr_str = f"{risk_reward:.2f}"
-        reason_str = reason if reason else "No adjustment needed"
+        reason_1m = signal_v2.decision_reason if signal_v2.decision_reason else "No adjustment needed"
 
         # Override regime display with v2's actual state
         position_mult_str = f"{signal_v2.regime_position_multiplier:.2f}x"
@@ -868,6 +1029,134 @@ def refresh_beta_dashboard(_n_intervals):
             trading_status_str = "BLOCKED"
         else:
             trading_status_str = "ACTIVE"
+
+    # Position state machine display values
+    position_state_str = "IDLE"
+    position_pnl_str = "—"
+    position_hold_str = "—"
+    last_exit_str = "—"
+    if signal_v2 is not None:
+        state = signal_v2.position_state
+        if state == 'LONG':
+            position_state_str = html.Span("LONG", style={"color": COLORS["success"], "fontWeight": "bold"})
+        elif state == 'SHORT':
+            position_state_str = html.Span("SHORT", style={"color": COLORS["danger"], "fontWeight": "bold"})
+        else:
+            position_state_str = html.Span("IDLE", style={"color": COLORS["text_secondary"]})
+
+        if state in ['LONG', 'SHORT']:
+            pnl_color = COLORS["success"] if signal_v2.unrealized_pnl >= 0 else COLORS["danger"]
+            position_pnl_str = html.Span(
+                f"${signal_v2.unrealized_pnl:+.2f}",
+                style={"color": pnl_color, "fontWeight": "bold"}
+            )
+            position_hold_str = f"{signal_v2.position_hold_time_min:.1f} min"
+
+        if signal_v2.last_exit_reason:
+            exit_color = COLORS["success"] if signal_v2.last_exit_pnl >= 0 else COLORS["danger"]
+            exit_explanations = {
+                'SL': 'Stop loss hit — price moved against the position.',
+                'TP': 'Take profit hit — target reached.',
+                'MICRO_REVERSE': 'Order flow flipped against position. Early exit to avoid larger loss.',
+                'TOXIC_FLOW': 'VPIN spike detected — adverse selection likely.',
+                'TIMEOUT': 'Max hold time (2 hours) reached.',
+                'TRAILING_STOP': 'Trailing stop triggered after price pulled back from highs.',
+                '15M_FLIP': '15m bias reversed. Position closed to align with new bias.',
+            }
+            expl = exit_explanations.get(signal_v2.last_exit_reason, 'Position closed.')
+            last_exit_str = html.Div([
+                html.Span([
+                    html.Span(f"{signal_v2.last_exit_reason} ", style={"color": COLORS["text"], "fontWeight": "bold"}),
+                    html.Span(f"${signal_v2.last_exit_pnl:+.2f}", style={"color": exit_color, "fontWeight": "bold"}),
+                ]),
+                html.Div(expl, style={"color": COLORS["text_secondary"], "fontSize": "9px", "marginTop": "2px"}),
+            ])
+
+    # ── Execution Engine ────────────────────────────────────────
+    exec_status_str = html.Span("MT5 Offline", style={"color": COLORS["danger"]})
+    exec_symbol_str = "—"
+    exec_spread_str = "—"
+    exec_margin_str = "—"
+    exec_prepared_str = "No active signal - waiting for setup..."
+    broker_positions_str = "No open positions"
+
+    try:
+        if MT5_AVAILABLE and mt5.terminal_info() and mt5.terminal_info().connected:
+            exec_status_str = html.Span("✅ Connected", style={"color": COLORS["success"]})
+            symbol = _execution_engine.get_symbol()
+            exec_symbol_str = symbol if symbol else "—"
+
+            if symbol:
+                tick = mt5.symbol_info_tick(symbol)
+                if tick:
+                    spread = (tick.ask - tick.bid) / 0.01
+                    exec_spread_str = html.Span(
+                        f"{spread:.1f} pips",
+                        style={"color": COLORS["success"] if spread <= 5.0 else COLORS["danger"]}
+                    )
+
+            acc = _execution_engine._get_account_info()
+            exec_margin_str = f"${acc['free_margin']:,.2f} ({acc['free_margin']/acc['balance']*100:.0f}%)" if acc['balance'] > 0 else "—"
+
+            # Prepare order if signal fired
+            if signal_v2 is not None and signal_v2.final_decision in ['OPEN_LONG', 'OPEN_SHORT']:
+                direction = 'BUY' if signal_v2.final_decision == 'OPEN_LONG' else 'SELL'
+                prepared = _execution_engine.prepare_order(
+                    direction=direction,
+                    volume=signal_v2.position_size_lots,
+                    sl=signal_v2.stop_loss,
+                    tp=signal_v2.take_profit,
+                    comment="AchillesHybrid"
+                )
+                if prepared.validated:
+                    exec_prepared_str = html.Div([
+                        html.Div(f"READY: {prepared.direction} {prepared.volume} lots @ {prepared.symbol}",
+                                 style={"color": COLORS["success"], "fontWeight": "bold", "fontSize": "14px"}),
+                        html.Div(f"SL: {prepared.sl:.2f}  |  TP: {prepared.tp:.2f}",
+                                 style={"color": COLORS["text_secondary"], "fontSize": "11px"}),
+                        html.Div(f"Checks: spread={prepared.pre_trade_checks.get('spread_pips', 0):.1f} pips, "
+                                 f"margin={prepared.pre_trade_checks.get('free_margin_pct', 0):.1%}",
+                                 style={"color": COLORS["text_secondary"], "fontSize": "10px"}),
+                    ])
+                else:
+                    exec_prepared_str = html.Div([
+                        html.Div(f"BLOCKED: {prepared.validation_reason}",
+                                 style={"color": COLORS["danger"], "fontWeight": "bold", "fontSize": "13px"}),
+                    ])
+
+            # Broker positions
+            positions = _execution_engine.get_open_positions()
+            if positions:
+                pos_rows = []
+                for pos in positions:
+                    pnl_color = COLORS["success"] if pos.current_profit >= 0 else COLORS["danger"]
+                    pos_rows.append(html.Tr([
+                        html.Td(f"#{pos.ticket}", style={"fontSize": "11px"}),
+                        html.Td(f"{pos.direction}", style={"fontSize": "11px"}),
+                        html.Td(f"{pos.volume}", style={"fontSize": "11px"}),
+                        html.Td(f"{pos.open_price:.2f}", style={"fontSize": "11px"}),
+                        html.Td(f"${pos.current_profit:+.2f}", style={"fontSize": "11px", "color": pnl_color, "fontWeight": "bold"}),
+                        html.Td(f"SL:{pos.sl:.2f} TP:{pos.tp:.2f}", style={"fontSize": "10px"}),
+                    ]))
+                broker_positions_str = dbc.Table(
+                    [html.Thead(html.Tr([
+                        html.Th("Ticket", style={"fontSize": "10px"}),
+                        html.Th("Dir", style={"fontSize": "10px"}),
+                        html.Th("Size", style={"fontSize": "10px"}),
+                        html.Th("Price", style={"fontSize": "10px"}),
+                        html.Th("PnL", style={"fontSize": "10px"}),
+                        html.Th("SL/TP", style={"fontSize": "10px"}),
+                    ])), html.Tbody(pos_rows)],
+                    size="sm", bordered=False, striped=True, hover=True,
+                    style={"color": COLORS["text"], "marginBottom": "0"}
+                )
+            else:
+                broker_positions_str = html.Div("No open positions", style={"color": COLORS["text_secondary"], "textAlign": "center"})
+        else:
+            exec_status_str = html.Span("MT5 Offline", style={"color": COLORS["danger"]})
+            exec_prepared_str = html.Div("Connect to MetaTrader 5 to enable execution.", style={"color": COLORS["text_secondary"], "fontSize": "12px"})
+    except Exception as e:
+        print(f"[BetaDashboard] Execution engine error: {e}")
 
     # ── Sentiment Analysis ──────────────────────────────────────
     fetcher = ExpandedNewsFetcher()
@@ -982,6 +1271,91 @@ def refresh_beta_dashboard(_n_intervals):
                 risk_halted_str = html.Span("NO", style={"color": COLORS["success"]})
         except Exception as e:
             print(f"[BetaDashboard] Microstructure/Risk error: {e}")
+
+    # ── Paper Trading Analytics ───────────────────────────────
+    paper_trades_str = "—"
+    paper_winrate_str = "—"
+    paper_pf_str = "—"
+    paper_avgwin_str = "—"
+    paper_avgloss_str = "—"
+    paper_sharpe_str = "—"
+    paper_summary_str = "No trades yet."
+    equity_fig = go.Figure().update_layout(
+        paper_bgcolor=COLORS["background"], plot_bgcolor=COLORS["background"],
+        font_color=COLORS["text"], margin=dict(l=20, r=20, t=30, b=20),
+        xaxis=dict(showgrid=False), yaxis=dict(showgrid=False),
+    )
+    recent_trades_table = html.Div("No trades recorded yet.", style={"color": COLORS["text_secondary"], "textAlign": "center"})
+
+    try:
+        perf = get_performance_summary(initial_balance=10000.0)
+        if perf["total_trades"] > 0:
+            paper_trades_str = str(perf["total_trades"])
+            paper_winrate_str = f"{perf['win_rate']:.1%}"
+            paper_pf_str = f"{perf['profit_factor']:.2f}" if perf['profit_factor'] != float('inf') else "∞"
+            paper_avgwin_str = f"${perf['avg_win']:.2f}"
+            paper_avgloss_str = f"${perf['avg_loss']:.2f}"
+            paper_sharpe_str = f"{perf['sharpe_annual']:.2f}"
+            paper_summary_str = (
+                f"Total P&L: ${perf['total_pnl']:+.2f}  |  "
+                f"Best: ${perf['best_trade']:.2f}  |  "
+                f"Worst: ${perf['worst_trade']:.2f}  |  "
+                f"Max Win Streak: {perf['max_consecutive_wins']}  |  "
+                f"Max Loss Streak: {perf['max_consecutive_losses']}"
+            )
+
+            # Equity curve
+            eq_df = compute_equity_curve(initial_balance=10000.0)
+            if not eq_df.empty:
+                equity_fig = go.Figure()
+                equity_fig.add_trace(go.Scatter(
+                    x=eq_df["time"], y=eq_df["equity"],
+                    mode="lines+markers", name="Equity",
+                    line=dict(color=COLORS["accent"], width=2),
+                    marker=dict(size=4),
+                ))
+                equity_fig.add_hline(y=10000, line_dash="dash", line_color="gray", opacity=0.5)
+                equity_fig.update_layout(
+                    paper_bgcolor=COLORS["background"], plot_bgcolor=COLORS["surface"],
+                    font_color=COLORS["text"], margin=dict(l=40, r=20, t=30, b=40),
+                    xaxis=dict(gridcolor=COLORS.get("grid", "#333")),
+                    yaxis=dict(gridcolor=COLORS.get("grid", "#333"), tickprefix="$"),
+                    showlegend=False,
+                )
+
+            # Recent trades table
+            recent = get_recent_trades_table(limit=10)
+            if not recent.empty:
+                table_header = html.Thead(html.Tr([
+                    html.Th("Dir", style={"fontSize": "10px"}),
+                    html.Th("Entry", style={"fontSize": "10px"}),
+                    html.Th("Exit", style={"fontSize": "10px"}),
+                    html.Th("Price", style={"fontSize": "10px"}),
+                    html.Th("Size", style={"fontSize": "10px"}),
+                    html.Th("PnL", style={"fontSize": "10px"}),
+                    html.Th("Hold", style={"fontSize": "10px"}),
+                    html.Th("Reason", style={"fontSize": "10px"}),
+                ]))
+                rows = []
+                for _, row in recent.iterrows():
+                    pnl_color = COLORS["success"] if "+" in str(row["pnl_fmt"]) else COLORS["danger"]
+                    rows.append(html.Tr([
+                        html.Td(row["direction_icon"], style={"fontSize": "11px"}),
+                        html.Td(row["entry_time"], style={"fontSize": "11px"}),
+                        html.Td(row["exit_time"], style={"fontSize": "11px"}),
+                        html.Td(f"{row['entry_price']:.2f} → {row['exit_price']:.2f}", style={"fontSize": "11px"}),
+                        html.Td(f"{row['size_lots']}", style={"fontSize": "11px"}),
+                        html.Td(row["pnl_fmt"], style={"fontSize": "11px", "color": pnl_color, "fontWeight": "bold"}),
+                        html.Td(row["hold_fmt"], style={"fontSize": "11px"}),
+                        html.Td(row["exit_reason"], style={"fontSize": "10px"}),
+                    ]))
+                recent_trades_table = dbc.Table(
+                    [table_header, html.Tbody(rows)],
+                    size="sm", bordered=False, striped=True, hover=True,
+                    style={"color": COLORS["text"], "marginBottom": "0"}
+                )
+    except Exception as e:
+        print(f"[BetaDashboard] Paper trading analytics error: {e}")
 
     # ── Per-Model Cards ─────────────────────────────────────────
     model_cards = []
@@ -1111,13 +1485,31 @@ def refresh_beta_dashboard(_n_intervals):
         position_mult_str,
         transition_warn_str,
         regime_reason_str,
-        # Adjusted signal
-        raw_signal_str,
-        adjusted_signal_str,
+        # 15M Primary Bias
+        bias_direction,
+        f"{bias_strength:.1%}",
+        bias_agreement,
+        bias_regime.replace("_", " ") if bias_regime != "UNKNOWN" else "—",
+        raw_probs_str,
+        # 1M Execution Signal
+        decision_1m,
+        quality_1m,
         stop_str,
         tp_str,
         rr_str,
-        reason_str,
+        reason_1m,
+        # Position State
+        position_state_str,
+        position_pnl_str,
+        position_hold_str,
+        last_exit_str,
+        # Execution
+        exec_status_str,
+        exec_symbol_str,
+        exec_spread_str,
+        exec_margin_str,
+        exec_prepared_str,
+        broker_positions_str,
         # Sentiment
         f"{sentiment_score:+.2f}",
         sentiment_dir,
@@ -1145,6 +1537,16 @@ def refresh_beta_dashboard(_n_intervals):
         risk_maxdd_str,
         risk_consec_str,
         risk_halted_str,
+        # Paper trading
+        paper_trades_str,
+        paper_winrate_str,
+        paper_pf_str,
+        paper_avgwin_str,
+        paper_avgloss_str,
+        paper_sharpe_str,
+        paper_summary_str,
+        equity_fig,
+        recent_trades_table,
         # Existing
         model_cards,
         metrics,

@@ -38,7 +38,13 @@ class Trade:
     exit_time: Optional[datetime] = None
     exit_price: Optional[float] = None
     pnl: Optional[float] = None
-    exit_reason: Optional[str] = None  # 'TP', 'SL', 'MICRO_REVERSE', 'TIMEOUT', 'MANUAL'
+    exit_reason: Optional[str] = None  # 'TP', 'SL', 'MICRO_REVERSE', 'TIMEOUT', 'MANUAL', 'TRAILING_STOP'
+
+    # Trailing stop state
+    trailing_stop_active: bool = False
+    trailing_stop_price: Optional[float] = None
+    highest_price_seen: Optional[float] = None
+    lowest_price_seen: Optional[float] = None
 
 
 class RiskManager:
@@ -48,7 +54,7 @@ class RiskManager:
     Rules enforced:
     1. Max 0.5% risk per trade (configurable)
     2. Daily max drawdown 2% -> trading halt
-    3. 3 consecutive losses -> 4h cooldown
+    3. Weighted consecutive losses -> dynamic sizing + short cooldown
     4. Regime-based position sizing multiplier
     5. Dynamic stop: tighter in HIGH_VOL_CHAOS, wider in STRONG_TREND
     6. Microstructure-based emergency exit (OFI reversal)
@@ -57,14 +63,62 @@ class RiskManager:
     # Risk Parameters
     RISK_PER_TRADE_PCT: float = 0.005        # 0.5% of account per trade
     DAILY_MAX_DRAWDOWN_PCT: float = 0.02     # 2% daily loss limit
-    CONSECUTIVE_LOSS_LIMIT: int = 3          # Cooldown after 3 losses
-    COOLDOWN_HOURS: int = 4
+    CONSECUTIVE_LOSS_LIMIT: float = 3.0      # Cooldown threshold (weighted)
+    COOLDOWN_MINUTES_BASE: int = 30          # Base cooldown (regime-adjusted)
+
+    # Loss type weights for consecutive loss scoring
+    LOSS_WEIGHTS = {
+        'SL': 1.0,
+        'TP': 0.0,               # Wins don't count
+        'TRAILING_STOP': 0.5,
+        'MICRO_REVERSE': 0.3,    # Microstructure noise — low weight
+        'TOXIC_FLOW': 0.3,
+        'TIMEOUT': 0.3,
+        '15M_FLIP': 0.5,
+        'MANUAL': 1.0,
+    }
+
+    # Regime-aware cooldown (minutes)
+    COOLDOWN_BY_REGIME = {
+        'STRONG_TREND_UP': 15,
+        'STRONG_TREND_DOWN': 15,
+        'GRIND_UP': 30,
+        'GRIND_DOWN': 30,
+        'CHOPPY': 60,
+        'HIGH_VOL_CHAOS': 60,
+        'LOW_VOL_DRIFT': 60,
+        'UNKNOWN': 30,
+    }
+
+    # Dynamic sizing tiers based on weighted loss score
+    SIZE_TIERS = [
+        (0.0, 1.00),   # < 1.0: full size
+        (1.0, 0.50),   # 1.0-2.0: half size
+        (2.0, 0.25),   # 2.0-3.0: quarter size
+        (3.0, 0.00),   # >= 3.0: blocked
+    ]
 
     # ATR Multipliers for Stop/Target
     SL_ATR_MULTIPLIER_DEFAULT: float = 1.5
     SL_ATR_MULTIPLIER_CHAOS: float = 2.0     # Wider in chaos
     SL_ATR_MULTIPLIER_TREND: float = 1.2     # Tighter in strong trend
-    TP_ATR_MULTIPLIER: float = 2.5
+
+    # ASYMMETRIC: TP multipliers vary by regime
+    TP_ATR_MULTIPLIER: float = 2.5           # Legacy fallback
+    TP_ATR_MULTIPLIERS = {
+        'STRONG_TREND_UP': 6.0,      # Very wide — trailing stop is primary exit
+        'STRONG_TREND_DOWN': 6.0,
+        'GRIND_UP': 2.5,
+        'GRIND_DOWN': 2.5,
+        'CHOPPY': 1.5,               # Quick profits in chop
+        'HIGH_VOL_CHAOS': 1.2,       # Very tight — chaos reverses fast
+        'LOW_VOL_DRIFT': 2.0,
+        'UNKNOWN': 2.0
+    }
+
+    # Trailing stop settings (only in strong trends)
+    TRAILING_ACTIVATION_ATR: float = 1.5   # Activate after 1.5×ATR profit
+    TRAILING_DISTANCE_ATR: float = 1.0     # Trail 1.0×ATR behind price
 
     # Regime Position Size Multipliers
     REGIME_MULTIPLIERS = {
@@ -94,7 +148,7 @@ class RiskManager:
 
         # State tracking
         self.daily_pnl: float = 0.0
-        self.consecutive_losses: int = 0
+        self.consecutive_losses: float = 0.0   # Weighted score (not integer count)
         self.cooldown_until: Optional[datetime] = None
         self.trading_halted: bool = False
         self.halt_reason: Optional[str] = None
@@ -153,6 +207,16 @@ class RiskManager:
 
         final_lots = base_lots * regime_mult * conf_scale * micro_scale
 
+        # Dynamic sizing based on weighted consecutive loss score
+        loss_score = self.consecutive_losses
+        size_mult = 1.0
+        for threshold, mult in self.SIZE_TIERS:
+            if loss_score >= threshold:
+                size_mult = mult
+            else:
+                break
+        final_lots *= size_mult
+
         # Hard limits
         final_lots = min(final_lots, 5.0)   # Max 5 lots
         final_lots = max(final_lots, 0.01)  # Min 0.01 lots
@@ -168,15 +232,20 @@ class RiskManager:
         direction: str,
         atr_14: float,
         regime: str,
-        ofi_proxy: Optional[float] = None
+        ofi_proxy: Optional[float] = None,
+        bias_strength: float = 0.5
     ) -> Tuple[float, float]:
         """
         Calculate dynamic stop loss and take profit.
 
+        ASYMMETRIC: TP varies by regime and bias strength.
+        Stronger bias / stronger trend = wider TP (let winners run).
+        Choppy / chaotic = tighter TP (take quick profits).
+
         Returns:
             (stop_loss_price, take_profit_price)
         """
-        # ATR multiplier based on regime
+        # ATR multiplier for SL based on regime
         if regime == 'HIGH_VOL_CHAOS':
             sl_mult = self.SL_ATR_MULTIPLIER_CHAOS
         elif regime in ['STRONG_TREND_UP', 'STRONG_TREND_DOWN']:
@@ -185,7 +254,15 @@ class RiskManager:
             sl_mult = self.SL_ATR_MULTIPLIER_DEFAULT
 
         sl_distance = atr_14 * sl_mult
-        tp_distance = atr_14 * self.TP_ATR_MULTIPLIER
+
+        # ASYMMETRIC TP: regime-dependent base
+        tp_mult = self.TP_ATR_MULTIPLIERS.get(regime, self.TP_ATR_MULTIPLIER)
+        tp_distance = atr_14 * tp_mult
+
+        # Scale TP with bias strength (0.5 → 0.7 maps to 0.9× → 1.15×)
+        # Stronger conviction = let winners run further
+        bias_scale = 0.7 + (bias_strength * 0.65)  # 0.5→1.025, 0.7→1.155
+        tp_distance *= bias_scale
 
         # Microstructure adjustment: if OFI strongly reverses, tighten stop
         if ofi_proxy is not None:
@@ -226,10 +303,18 @@ class RiskManager:
         if self.trading_halted:
             return False, f"Trading halted: {self.halt_reason}"
 
-        # 3. Cooldown active?
+        # 3. Weighted loss score exceeded?
+        if self.consecutive_losses >= self.CONSECUTIVE_LOSS_LIMIT:
+            if self.cooldown_until is None or current_time >= self.cooldown_until:
+                # Auto-trigger cooldown if not already set
+                self.cooldown_until = current_time + timedelta(minutes=self.COOLDOWN_MINUTES_BASE)
+            remaining = (self.cooldown_until - current_time).total_seconds() / 60
+            return False, f"Risk pause: {remaining:.0f}min remaining (score {self.consecutive_losses:.1f})"
+
+        # 3b. Cooldown active (from previous block)?
         if self.cooldown_until is not None and current_time < self.cooldown_until:
-            remaining = (self.cooldown_until - current_time).total_seconds() / 3600
-            return False, f"Cooldown: {remaining:.1f}h remaining"
+            remaining = (self.cooldown_until - current_time).total_seconds() / 60
+            return False, f"Risk pause: {remaining:.0f}min remaining (score {self.consecutive_losses:.1f})"
 
         # 4. Daily drawdown limit?
         daily_dd = (self.initial_balance_today - self.current_balance) / self.initial_balance_today
@@ -263,9 +348,9 @@ class RiskManager:
             print(f"[RiskManager] Trade rejected: {reason}")
             return None
 
-        # Calculate stops
+        # Calculate stops (asymmetric, regime-dependent)
         stop_loss, take_profit = self.calculate_stops(
-            entry_price, direction, atr_14, regime, ofi_proxy
+            entry_price, direction, atr_14, regime, ofi_proxy, confidence
         )
 
         # Calculate size
@@ -296,12 +381,45 @@ class RiskManager:
 
         return trade
 
+    def _update_trailing_stop(self, trade: Trade, current_price: float, atr_14: float):
+        """
+        Update trailing stop for open trade.
+        Only activates in strong trends after price moves favorably.
+        """
+        if trade.regime not in ['STRONG_TREND_UP', 'STRONG_TREND_DOWN']:
+            return
+
+        # Track highest/lowest price seen
+        if trade.highest_price_seen is None:
+            trade.highest_price_seen = current_price
+            trade.lowest_price_seen = current_price
+        else:
+            trade.highest_price_seen = max(trade.highest_price_seen, current_price)
+            trade.lowest_price_seen = min(trade.lowest_price_seen, current_price)
+
+        # Activation threshold: price moved 1.5×ATR in our favor
+        if trade.direction == 'BUY':
+            profit_distance = trade.highest_price_seen - trade.entry_price
+            if profit_distance >= self.TRAILING_ACTIVATION_ATR * atr_14:
+                trade.trailing_stop_active = True
+                new_trail = trade.highest_price_seen - (self.TRAILING_DISTANCE_ATR * atr_14)
+                if trade.trailing_stop_price is None or new_trail > trade.trailing_stop_price:
+                    trade.trailing_stop_price = new_trail
+        else:  # SELL
+            profit_distance = trade.entry_price - trade.lowest_price_seen
+            if profit_distance >= self.TRAILING_ACTIVATION_ATR * atr_14:
+                trade.trailing_stop_active = True
+                new_trail = trade.lowest_price_seen + (self.TRAILING_DISTANCE_ATR * atr_14)
+                if trade.trailing_stop_price is None or new_trail < trade.trailing_stop_price:
+                    trade.trailing_stop_price = new_trail
+
     def check_exit_conditions(
         self,
         current_time: datetime,
         current_price: float,
         current_ofi: float,
-        current_vpin: float
+        current_vpin: float,
+        atr_14: float = 1.0
     ) -> Optional[str]:
         """
         Check if open trade should be exited.
@@ -314,11 +432,21 @@ class RiskManager:
 
         trade = self.open_trade
 
-        # 1. Stop Loss hit
+        # Update trailing stop first
+        self._update_trailing_stop(trade, current_price, atr_14)
+
+        # 1. Stop Loss hit (static)
         if trade.direction == 'BUY' and current_price <= trade.stop_loss:
             return 'SL'
         if trade.direction == 'SELL' and current_price >= trade.stop_loss:
             return 'SL'
+
+        # 1b. Trailing Stop hit
+        if trade.trailing_stop_active and trade.trailing_stop_price is not None:
+            if trade.direction == 'BUY' and current_price <= trade.trailing_stop_price:
+                return 'TRAILING_STOP'
+            if trade.direction == 'SELL' and current_price >= trade.trailing_stop_price:
+                return 'TRAILING_STOP'
 
         # 2. Take Profit hit
         if trade.direction == 'BUY' and current_price >= trade.take_profit:
@@ -327,7 +455,6 @@ class RiskManager:
             return 'TP'
 
         # 3. Microstructure reversal (OFI flips against position)
-        # If OFI strongly reverses against our direction, exit early
         if trade.direction == 'BUY' and current_ofi < -1.5:
             return 'MICRO_REVERSE'
         if trade.direction == 'SELL' and current_ofi > 1.5:
@@ -390,17 +517,23 @@ class RiskManager:
         if dd > self.max_drawdown_pct:
             self.max_drawdown_pct = dd
 
-        # Win/Loss tracking
+        # Win/Loss tracking with weighted consecutive loss scoring
         if pnl > 0:
             self.winning_trades += 1
             self.consecutive_losses = 0
         else:
-            self.consecutive_losses += 1
+            # Weight loss by exit type (micro-exits count less than SL)
+            loss_weight = self.LOSS_WEIGHTS.get(exit_reason, 1.0)
+            self.consecutive_losses += loss_weight
 
-            # Check consecutive loss limit
+            # Regime-aware cooldown duration
+            cooldown_minutes = self.COOLDOWN_BY_REGIME.get(trade.regime, self.COOLDOWN_MINUTES_BASE)
+
+            # Check if weighted score triggers cooldown
             if self.consecutive_losses >= self.CONSECUTIVE_LOSS_LIMIT:
-                self.cooldown_until = current_time + timedelta(hours=self.COOLDOWN_HOURS)
-                print(f"[RiskManager] COOLDOWN activated until {self.cooldown_until}")
+                self.cooldown_until = current_time + timedelta(minutes=cooldown_minutes)
+                print(f"[RiskManager] RISK PAUSE activated: {cooldown_minutes}min "
+                      f"(regime={trade.regime}, score={self.consecutive_losses:.1f}, reason={exit_reason})")
 
         # Check daily halt
         daily_dd = (self.initial_balance_today - self.current_balance) / self.initial_balance_today
@@ -408,11 +541,82 @@ class RiskManager:
             self.trading_halted = True
             self.halt_reason = f"Daily drawdown: {daily_dd:.2%}"
 
+        # Append to trade history
+        self.trades.append(trade)
+
+        # Persist trade to disk
+        self._persist_trade(trade)
+
         print(f"[RiskManager] CLOSE {trade.direction} | PnL: ${pnl:.2f} | "
               f"Reason: {exit_reason} | Balance: ${self.current_balance:.2f}")
 
         self.open_trade = None
         return pnl
+
+    def _persist_trade(self, trade: Trade):
+        """Append closed trade to JSONL log for persistence across restarts."""
+        try:
+            from pathlib import Path
+            log_dir = Path("data/paper_trades")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "trade_log.jsonl"
+
+            record = {
+                'entry_time': trade.entry_time.isoformat() if trade.entry_time else None,
+                'exit_time': trade.exit_time.isoformat() if trade.exit_time else None,
+                'direction': trade.direction,
+                'entry_price': trade.entry_price,
+                'exit_price': trade.exit_price,
+                'size_lots': trade.size_lots,
+                'stop_loss': trade.stop_loss,
+                'take_profit': trade.take_profit,
+                'regime': trade.regime,
+                'confidence': trade.confidence,
+                'ofi_proxy': trade.ofi_proxy,
+                'vpin_proxy': trade.vpin_proxy,
+                'exit_reason': trade.exit_reason,
+                'pnl': trade.pnl,
+                'hold_time_min': (trade.exit_time - trade.entry_time).total_seconds() / 60
+                    if trade.exit_time and trade.entry_time else None,
+            }
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(record) + '\n')
+        except Exception as e:
+            print(f"[RiskManager] Trade persist error: {e}")
+
+    def load_trade_history(self, filepath: str = "data/paper_trades/trade_log.jsonl"):
+        """Load trade history from JSONL and restore metrics."""
+        from pathlib import Path
+        log_file = Path(filepath)
+        if not log_file.exists():
+            return
+
+        try:
+            with open(log_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    # We don't fully reconstruct Trade objects, just update metrics
+                    pnl = record.get('pnl', 0.0)
+                    exit_reason = record.get('exit_reason', 'SL')
+                    if pnl is not None:
+                        self.total_pnl += pnl
+                        self.total_trades += 1
+                        if pnl > 0:
+                            self.winning_trades += 1
+                            self.consecutive_losses = 0
+                        else:
+                            loss_weight = self.LOSS_WEIGHTS.get(exit_reason, 1.0)
+                            self.consecutive_losses += loss_weight
+                        self.current_balance += pnl
+                        if self.current_balance > self.peak_balance:
+                            self.peak_balance = self.current_balance
+            print(f"[RiskManager] Loaded {self.total_trades} trades from history. "
+                  f"Balance: ${self.current_balance:.2f}")
+        except Exception as e:
+            print(f"[RiskManager] History load error: {e}")
 
     # =====================================================================
     # DAILY RESET
